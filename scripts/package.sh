@@ -3,6 +3,46 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
+PACKAGE_BACKUP_DIR=""
+PACKAGE_RESTORE_FILES=()
+PACKAGE_RESTORE_BACKUPS=()
+
+backup_package_file() {
+    local file="$1"
+    local backup=""
+
+    [ -f "$file" ] || err "打包配置文件不存在: $file"
+    mkdir -p "$BUILD_DIR"
+
+    if [ -z "$PACKAGE_BACKUP_DIR" ]; then
+        PACKAGE_BACKUP_DIR="$(mktemp -d "$BUILD_DIR/package-backup.XXXXXX")"
+    fi
+
+    backup="$PACKAGE_BACKUP_DIR/$(printf '%s' "$file" | sed 's|[/:\\]|_|g').bak"
+    cp "$file" "$backup"
+    PACKAGE_RESTORE_FILES+=("$file")
+    PACKAGE_RESTORE_BACKUPS+=("$backup")
+}
+
+restore_package_files() {
+    local i
+
+    if [ "${#PACKAGE_RESTORE_FILES[@]}" -gt 0 ]; then
+        for i in "${!PACKAGE_RESTORE_FILES[@]}"; do
+            cp "${PACKAGE_RESTORE_BACKUPS[$i]}" "${PACKAGE_RESTORE_FILES[$i]}"
+        done
+        log "已恢复打包前配置"
+    fi
+
+    if [ -n "${PACKAGE_BACKUP_DIR:-}" ]; then
+        rm -rf "$PACKAGE_BACKUP_DIR"
+    fi
+
+    PACKAGE_BACKUP_DIR=""
+    PACKAGE_RESTORE_FILES=()
+    PACKAGE_RESTORE_BACKUPS=()
+    trap - EXIT
+}
 
 # ============================================================
 # 工具函数: 动态设置 abiFilters
@@ -50,6 +90,10 @@ package_hap() {
     log "=== 打包 HAP ($NATIVE_ARCH) ==="
     local unsigned_hap="$WINEHUA/entry/build/default/outputs/default/entry-default-unsigned.hap"
     local signed_hap="$WINEHUA/entry/build/default/outputs/default/entry-default-signed.hap"
+
+    backup_package_file "$WINEHUA/entry/build-profile.json5"
+    backup_package_file "$WINEHUA/entry/src/main/module.json5"
+    trap restore_package_files EXIT
 
     set_abi_filters
 
@@ -117,6 +161,7 @@ with open('$profile', 'w') as f:
 
     ls -lh "$signed_hap"
     log "HAP 构建 + 签名完成 ($NATIVE_ARCH)"
+    restore_package_files
 }
 
 # ============================================================

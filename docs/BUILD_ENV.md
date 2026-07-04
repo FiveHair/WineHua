@@ -12,29 +12,55 @@
 
 ### Docker 容器
 
-项目根目录提供了 `Dockerfile`，可以直接构建镜像：
+项目根目录提供了 `Dockerfile` 和 WSL/Docker 封装脚本。推荐在 WSL2 中进入仓库后执行：
 
 ```bash
-docker build -t wineohos-build .
+# thirdparty 必须先初始化；wine 和 box64 使用 SSH URL，需要当前 shell 有 Git/SSH 权限
+bash scripts/docker_wsl_build.sh submodules
+
+# 构建固定镜像名
+bash scripts/docker_wsl_build.sh build-image
+
+# 如果 Harmony Command Line Tools 不在 /apps/harmony，用 HARMONY_TOOLS 指定 WSL 路径
+HARMONY_TOOLS=/mnt/c/path/to/command-line-tools bash scripts/docker_wsl_build.sh check
+HARMONY_TOOLS=/mnt/c/path/to/command-line-tools bash scripts/docker_wsl_build.sh make
 ```
 
-然后挂载源码和 SDK 运行：
+默认目标是当前主调试平台：`NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad`。脚本会把仓库挂载到 `/data/src/winehua`，把 Harmony tools 挂载到 `/apps/harmony`，并在构建成功后把 HAP 额外复制到 `dist/entry-default-signed-arm64-v8a-pad.hap`。
+
+也可以直接使用 Docker：
 
 ```bash
-docker run --rm \
-  -v /path/to/wineohos:/data/src/winehua \
-  -v /path/to/harmony-sdk:/apps/harmony \
-  wineohos-build make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+docker build -t winehua-linuxbase .
+
+docker run --rm -it \
+  -v /mnt/f/WineHua:/data/src/winehua \
+  -v /mnt/c/path/to/command-line-tools:/apps/harmony:ro \
+  -w /data/src/winehua \
+  winehua-linuxbase make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
 ```
+
+如果 Windows bind mount 性能较慢，可以让中间产物走 Docker named volumes：
+
+```bash
+WINEHUA_DOCKER_CACHE=volume \
+HARMONY_TOOLS=/mnt/c/path/to/command-line-tools \
+bash scripts/docker_wsl_build.sh make
+```
+
+`volume` 模式会覆盖容器内的 `build/`、`.hvigor/`、`oh_modules/`、`entry/build/`，源码仍来自 Host 绑定目录；最终 HAP 会复制到 Host 可见的 `dist/`。
 
 或手动启动容器：
 
 ```bash
 docker run -d --name wine \
-  -v /path/to/wineohos:/data/src/winehua \
-  -v /path/to/harmony-sdk:/apps/harmony \
-  ubuntu:26.04 bash -c 'sleep infinity'
+  -v /mnt/f/WineHua:/data/src/winehua \
+  -v /mnt/c/path/to/command-line-tools:/apps/harmony:ro \
+  -w /data/src/winehua \
+  winehua-linuxbase bash -c 'sleep infinity'
 ```
+
+`package.sh` 在 HAP 打包期间会临时调整 ABI 和 Pad 配置；脚本现在会在成功或失败退出时恢复 `entry/build-profile.json5` 和 `entry/src/main/module.json5`，避免绑定 Host 代码后留下源码脏改动。
 
 ### WSL2
 

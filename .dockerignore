@@ -1,0 +1,3 @@
+# Dockerfile does not copy project sources; sources are mounted at runtime.
+**
+!Dockerfile

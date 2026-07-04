@@ -17,10 +17,14 @@ RUN apt-get update && apt-get install -y \
     gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
     # HAP 签名
     default-jdk \
+    # 开发工具 (持久化容器用)
+    vim less gdb strace htop tree openssh-server rsync sudo \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Python 包 (virglrenderer + Mesa guest_gfx 构建)
-RUN pip3 install --break-system-packages pyyaml mako markupsafe \
+# Python 包 (virglrenderer + Mesa guest_gfx 构建) — 使用清华 PyPI 镜像
+RUN pip3 install --break-system-packages \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    pyyaml mako markupsafe \
  && rm -rf /root/.cache/pip
 
 # libxml2.so.2 兼容性修复
@@ -28,12 +32,43 @@ RUN pip3 install --break-system-packages pyyaml mako markupsafe \
 RUN ln -sf /usr/lib/x86_64-linux-gnu/libxml2.so.16 /usr/lib/x86_64-linux-gnu/libxml2.so.2 \
  && ldconfig
 
+# ── 开发用户 (避免 root 写入 bind mount 导致 Host 权限问题) ──
+ARG USERNAME=developer
+RUN useradd -m -s /bin/bash $USERNAME \
+ && echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
+ && chmod 0440 /etc/sudoers.d/$USERNAME
+
+# ── SSH 服务 (VS Code Remote-SSH 可选) ──
+RUN mkdir -p /var/run/sshd \
+ && ssh-keygen -A \
+ && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config \
+ && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config \
+ && echo 'AcceptEnv LANG LC_*' >> /etc/ssh/sshd_config
+EXPOSE 22
+
+# ── 默认环境变量 (减少 docker run/exec 时的 -e 参数) ──
+ENV OHOS_SDK=/apps/harmony/sdk/default/openharmony \
+    TOOL_HOME=/apps/harmony \
+    NATIVE_ARCH=arm64-v8a \
+    DEVICE_TYPE=pad \
+    PATH=/apps/harmony/bin:/apps/harmony/tool/node/bin:$PATH
+
 WORKDIR /data/src/winehua
 
-# 使用时挂载:
-#   -v /path/to/wineohos:/data/src/winehua          (项目源码)
-#   -v /path/to/harmony-sdk:/apps/harmony             (OHOS SDK)
+# ── 使用说明 ──
 #
-# 构建:
-#   docker run --rm -v $(pwd):/data/src/winehua -v ~/huawei/command-line-tools:/apps/harmony \
-#     wineohos-build make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+# 开发容器 (持久化):
+#   docker build -t winehua-dev .
+#   bash scripts/docker_wsl_build.sh dev-start
+#   bash scripts/docker_wsl_build.sh dev-exec
+#
+# 一次性构建 (CI):
+#   docker run --rm \
+#     -v /mnt/f/WineHua:/data/src/winehua \
+#     -v /mnt/f/command-line-tools:/apps/harmony:ro \
+#     -w /data/src/winehua \
+#     winehua-dev make NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pad
+#
+# 路径约定:
+#   F:\WineHua                → /data/src/winehua   (项目源码, bind mount)
+#   F:\command-line-tools     → /apps/harmony       (OHOS SDK + hvigor, bind mount ro)

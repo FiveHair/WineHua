@@ -13,7 +13,7 @@
 #include "broker.h"
 #include "wait_utils.h"
 #include "wine_constants.h"
-
+#include "audio_broker.h"
 // 由 LaunchPadMode 在启动 Broker 前设置
 std::string gBrokerHomeDir;
 
@@ -98,15 +98,27 @@ static void HandleRequest(int conn_fd)
     char* entryParamsCopy = strdup(fullParams.c_str());
 
     NativeChildProcess_Fd fdNode = {};
+    NativeChildProcess_Fd audioFdNode = {};
     if (receivedFd >= 0) {
         fdNode.fdName = const_cast<char*>("wineserver_sock");
         fdNode.fd = receivedFd;
         fdNode.next = nullptr;
     }
 
-    NativeChildProcess_FdList fdList = {};
-    fdList.head = (receivedFd >= 0) ? &fdNode : nullptr;
+    // Create audio bootstrap fd for every spawned child
+    int audioBootstrapFd = winehua::AudioBroker::GetInstance().CreateBootstrapHandle();
+    if (audioBootstrapFd >= 0) {
+        audioFdNode.fdName = const_cast<char*>("wine_audio_bootstrap");
+        audioFdNode.fd = audioBootstrapFd;
+        audioFdNode.next = nullptr;
+        if (receivedFd >= 0) {
+            fdNode.next = &audioFdNode;
+        }
+    }
 
+    NativeChildProcess_FdList fdList = {};
+    fdList.head = (receivedFd >= 0) ? &fdNode :
+                  (audioBootstrapFd >= 0) ? &audioFdNode : nullptr;
     NativeChildProcess_Args args = {};
     args.entryParams = entryParamsCopy;
     args.fdList = fdList;
@@ -206,3 +218,7 @@ int StartBrokerServer()
     }
     return 0;
 }
+
+
+
+

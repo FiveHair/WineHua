@@ -33,6 +33,38 @@ make cmake ninja meson bison flex autoconf libtoolize gcc-mingw-w64-x86-64 java
 
 ---
 
+## WSL Docker 构建（推荐环境）
+
+在 WSL2 中使用项目封装脚本，默认构建 arm64 Pad：
+
+```bash
+# 首次准备
+bash scripts/docker_wsl_build.sh submodules
+bash scripts/docker_wsl_build.sh build-image
+
+# 环境检查 + 完整构建
+HARMONY_TOOLS=/mnt/c/path/to/command-line-tools bash scripts/docker_wsl_build.sh check
+HARMONY_TOOLS=/mnt/c/path/to/command-line-tools bash scripts/docker_wsl_build.sh make
+```
+
+常用变体：
+
+```bash
+# 只重新打 HAP
+HARMONY_TOOLS=/mnt/c/path/to/command-line-tools bash scripts/docker_wsl_build.sh hap
+
+# 中间产物使用 Docker named volumes，减少 Host bind mount 压力
+WINEHUA_DOCKER_CACHE=volume HARMONY_TOOLS=/mnt/c/path/to/command-line-tools bash scripts/docker_wsl_build.sh make
+
+# 切到 x86_64 Pad 或 PC/HNP
+NATIVE_ARCH=x86_64 DEVICE_TYPE=pad HARMONY_TOOLS=/mnt/c/path/to/command-line-tools bash scripts/docker_wsl_build.sh make
+NATIVE_ARCH=arm64-v8a DEVICE_TYPE=pc HARMONY_TOOLS=/mnt/c/path/to/command-line-tools bash scripts/docker_wsl_build.sh make
+```
+
+`package.sh` 会在打包时临时改写 `entry/build-profile.json5` 和 `entry/src/main/module.json5`，现在会在脚本退出时自动恢复。HAP 标准产物仍在 `entry/build/default/outputs/default/entry-default-signed.hap`；使用 Docker helper 时会额外复制一份到 `dist/`。
+
+---
+
 ## Makefile 构建（推荐）
 
 Makefile 使用 stamp 文件跟踪各阶段，支持自动增量构建。
