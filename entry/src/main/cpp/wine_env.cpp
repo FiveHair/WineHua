@@ -28,6 +28,8 @@ int CreateAudioBootstrapFd(const std::string& runtimeDir) {
     return fd;
 }
 
+static const char kMidiSoundfontPath[] = WINE_FILES_DIR "/audio/winehua-gm.sf2";
+
 std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                                       const std::string& sockName,
                                       const std::string& libPath,
@@ -65,6 +67,7 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "XKB_CONFIG_ROOT=" + xkbDir,
         "PATH=/usr/local/bin:/data/app/bin:/data/service/hnp/bin:/usr/bin:/vendor/bin:" + binDir + "/x86_64-windows:" + binDir,
         "TMPDIR=" WINE_TMPDIR,
+        "MIDI_SOUNDFONT_PATH=" + std::string(kMidiSoundfontPath),
     };
     AppendBox64PerfStrings(env);
 #ifdef __aarch64__

@@ -41,7 +41,7 @@ arm64 Pad 下 Box64 编译为 **共享库 (box64.so)**，由 NCP 子进程 dlope
 | NAPI 沙箱运行 | ✅ |
 | 多窗口 | ✅ |
 | 鼠标 / 键盘输入 | ✅ |
-| 音频 | ❌ |
+| 音频 (WASAPI / DirectSound / waveOut / MCI / MIDI) | ✅ |
 
 ## 构建
 
@@ -113,6 +113,8 @@ WineHua/
 - **Wayland compositor**: HAP 进程内嵌入式 compositor，不依赖外部 Wayland 服务
 - **NCP appspawn**: Pad 通过 `OH_Ability_StartNativeChildProcess` 创建子进程，绕过无 execve 限制
 - **surfaceId 架构**: 通过 `XComponentController` 回调获取 surfaceId，解决多窗口冲突
+- **音频 Host Broker**: 宿主进程集中持有 `OH_AudioRenderer` / `OH_AudioCapturer`，Wine 侧通过 IPC + ring buffer 传输 PCM
+- **MIDI 软音源**: `wineohos.drv` 内置 OHOS MIDI soft synth，随包携带 `winehua-gm.sf2`
 - **noexec 文件系统**: 可执行段用匿名 mmap + pread 替代文件映射
 - **dosdevices symlink**: OHOS 沙箱禁止 symlink()，fallback 到 drive_c
 - **XKB 键盘**: xkeyboard-config 打包到 rawfile/HNP，通过 `XKB_CONFIG_ROOT` 指向

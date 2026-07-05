@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <strings.h>
 #include <string>
 #include <dlfcn.h>
 #include <sys/stat.h>
@@ -54,10 +55,47 @@ static void* stderr_reader_thread(void* arg) {
 #define LOG_DOMAIN 0x0000
 #define LOG_TAG "WineChild"
 
-static void setup_wine_env(const char* binDir, const char* homeDir)
+static const char *default_winedebug_profile(void)
+{
+    return "-all";
+}
+
+static const char *midi_diag_winedebug_profile(void)
+{
+    return "-all,trace+driver,trace+winmm,trace+mmdevapi,"
+           "trace+ohosaudio,warn+ohosaudio,warn+module";
+}
+
+static const char *basename_of_path(const char *path)
+{
+    const char *slash;
+
+    if (!path || !path[0]) return path;
+    slash = strrchr(path, '/');
+    if (!slash) slash = strrchr(path, '\\');
+    return slash ? slash + 1 : path;
+}
+
+static bool is_audio_test_exe(int argc, char *argv[])
+{
+    if (argc <= 0 || !argv[0]) return false;
+    return !strcasecmp(basename_of_path(argv[0]), "winehua_audio_test.exe");
+}
+
+static const char *select_winedebug_profile(int argc, char *argv[])
+{
+    const char *override = getenv("WINEHUA_WINEDEBUG");
+
+    if (override && override[0]) return override;
+    if (is_audio_test_exe(argc, argv)) return midi_diag_winedebug_profile();
+    return default_winedebug_profile();
+}
+
+static void setup_wine_env(const char* binDir, const char* homeDir, const char *winedebug)
 {
     std::string shareDir = std::string(binDir) + "/../share";
     std::string libDir = std::string(binDir) + "/x86_64-unix";
+    static const char midiSoundfontPath[] = WINE_FILES_DIR "/audio/winehua-gm.sf2";
 
 #ifdef __aarch64__
     // ARM64: x86_64 .so 由 Box64 加载，不在系统 LD_LIBRARY_PATH
@@ -103,7 +141,8 @@ static void setup_wine_env(const char* binDir, const char* homeDir)
                     + binDir + "/x86_64-windows:" + binDir).c_str(), 1);
     setenv("TMPDIR", WINE_TMPDIR, 1);
     setenv("XDG_RUNTIME_DIR", WINE_PREFIX, 1);
-    setenv("WINEDEBUG", "-all", 1);  // -all=关闭全部调试频道
+    setenv("WINEDEBUG", winedebug && winedebug[0] ? winedebug : default_winedebug_profile(), 1);
+    setenv("MIDI_SOUNDFONT_PATH", midiSoundfontPath, 1);
 }
 
 extern "C" void Main(NativeChildProcess_Args args)
@@ -122,6 +161,7 @@ extern "C" void Main(NativeChildProcess_Args args)
     int argc = 0;
     char* argv[64];
     char* tok;
+    const char *winedebug;
     while ((tok = strtok(nullptr, "|")) && argc < 63)
         argv[argc++] = tok;
     argv[argc] = nullptr;
@@ -150,7 +190,11 @@ extern "C" void Main(NativeChildProcess_Args args)
     }
 
     // 3. 设置 Wine 环境变量
-    setup_wine_env(binDir, homeDir);
+    winedebug = select_winedebug_profile(argc, argv);
+    setup_wine_env(binDir, homeDir, winedebug);
+    OH_LOG_INFO(LOG_APP, "[WineChild] WINEDEBUG=%{public}s", winedebug);
+    if (is_audio_test_exe(argc, argv))
+        OH_LOG_INFO(LOG_APP, "[WineChild] MIDI diagnostic logging enabled for AudioTest");
 
     // 确保 WINEPREFIX 目录存在
     mkdir(WINE_PREFIX, 0755);

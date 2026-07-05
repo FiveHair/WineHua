@@ -1,7 +1,7 @@
 # Wine for HarmonyOS — 当前状态
 
-> 更新: 2026-06-22
-> 状态: ✅ ARM64 Pad Box64 .so | ✅ Explorer 桌面 | ✅ 输入 | ✅ 多窗口
+> 更新: 2026-07-05
+> 状态: ✅ ARM64 Pad Box64 .so | ✅ Explorer 桌面 | ✅ 输入 | ✅ 多窗口 | ✅ 音频全链路
 
 ---
 
@@ -35,6 +35,17 @@ XKB 键盘布局数据通过 `XKB_CONFIG_ROOT` 环境变量指向。
 ### 7. NAPI 沙箱 ✅
 
 app.hackeris.winehua HAP 在 NAPI 沙箱中运行，dosdevices symlink 不可用全覆盖修复。
+
+### 8. 音频全链路 ✅
+
+HarmonyOS Pad 上的宿主 Audio Broker、Wine `wineohos.drv` 与测试程序链路全部打通。
+
+- `WASAPI` 共享模式播放 / 录音通过
+- `DirectSound` 播放通过
+- `waveOut` 播放通过
+- `MCI` MP3 / WAV 播放通过
+- `MIDI` 软音源播放通过
+- `winehua_audio_test.exe` 全套音频验证通过
 
 ---
 
@@ -73,6 +84,11 @@ NCP 子进程 (appspawn)
 | 12 | dxg_surface use-after-free | wl_resource destroy 回调 + pending auto-destroy |
 | 13 | 多窗口 XComponent exports 冲突 | surfaceId + XComponentController |
 | 14 | Terminal 终端页面 | 已删除 (功能不完整) |
+| 15 | 宿主音频设备多进程争用 | Host Audio Broker + ring buffer IPC |
+| 16 | WASAPI event / DirectSound 卡死 | `wineohos.drv` 事件通知链路修复 |
+| 17 | MCI MP3/WAV 兼容性缺失 | `mciqtz32` 补齐解码 / 播放链路 |
+| 18 | MIDI 无设备 | OHOS MIDI soft synth + soundfont + `DRV_SUCCESS` 初始化修复 |
+| 19 | Pad 覆盖安装后沿用旧 Wine 运行时 | rawfile stamp 校验 + 自动重新解压 |
 
 ---
 
@@ -85,7 +101,7 @@ NCP 子进程 (appspawn)
 | xkbcommon include path 错误 | XKB 加载失败日志 | `/usr/share/X11/xkb` 应为 rawfile 解压路径 |
 | services.exe 无法启动 | 非阻塞 | 错误 267 (目录无效) |
 | dnsapi / nsiproxy 编译错误 | 跳过 | mingw 交叉编译 musl 不兼容 |
-| 音频 | 无 | 未实现 |
+| 音频 | 无 | 已实现: WASAPI / DirectSound / waveOut / MCI / MIDI |
 
 ---
 

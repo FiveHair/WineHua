@@ -1,6 +1,6 @@
 # WineHua Audio Test
 
-独立 PCM 音频播放器，验证 WineHua 完整音频链路。
+独立 PCM 音频播放器 + 音频接口验证工具，用来检查 WineHua 完整音频链路。
 
 ```
 MP3 → minimp3(解码) → s16le PCM → Resample(→48000Hz/stereo) → waveOutWrite
@@ -14,12 +14,23 @@ WAV → 手动解析 RIFF  → s16le PCM → Resample(→48000Hz/stereo) → wav
 ## 编译
 
 ```bash
-# 需要 mingw-w64 交叉编译工具链
-chmod +x build.sh
-./build.sh
+# 按工程规范，默认通过 winehua-dev 容器构建
+bash Test/AudioTest/build.sh
 ```
 
 产物: `winehua_audio_test.exe` (~200KB static, 零依赖)
+
+如果容器未启动，先执行：
+
+```bash
+bash scripts/docker_wsl_build.sh dev-start
+```
+
+## 运行说明
+
+- 顶部按钮会把每一项音频测试放到独立子进程里运行。
+- 这样即使 Wine 中某个 `callback` 路径卡住，主界面也不会一起冻结。
+- 如果某项测试超时，日志会明确标出该测试疑似卡在 Wine callback/driver 路径。
 
 ## 部署到 Pad
 

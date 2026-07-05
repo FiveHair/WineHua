@@ -15,6 +15,10 @@ const WINE_LIB_PC = `${WINE_BIN_PC}/x86_64-unix`;
 const WINE_ROOT_PAD = `${FILES_BASE}/wine`;
 const WINE_BIN_PAD = `${WINE_ROOT_PAD}/bin`;
 const WINE_LIB_PAD = `${WINE_BIN_PAD}/x86_64-unix`;
+const WINE_RUNTIME_STAMP = `${FILES_BASE}/wine-data.stamp`;
+const MIDI_SOUNDFONT_RAW = 'winehua-gm.sf2';
+const MIDI_SOUNDFONT_DIR = `${FILES_BASE}/audio`;
+const MIDI_SOUNDFONT_PATH = `${MIDI_SOUNDFONT_DIR}/winehua-gm.sf2`;
 
 // 运行时检测: 如果 HNP 路径不存在则使用 Pad 路径
 let WINE_BIN = WINE_BIN_PC;
@@ -40,6 +44,49 @@ function detectWinePath(): void {
   BIN_DIR = WINE_BIN;
   BOX64 = `${WINE_BIN}/box64`;
   hilog.info(DOMAIN, 'wine', 'detectWinePath: Pad mode (rawfile)');
+}
+
+function pathExists(path: string): boolean {
+  try {
+    fs.accessSync(path);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function readTextIfExists(path: string): string {
+  try {
+    return fs.readTextSync(path, { encoding: 'utf-8' }).trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+function writeTextFile(path: string, text: string): void {
+  const file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+  try {
+    fs.writeSync(file.fd, text);
+  } finally {
+    fs.closeSync(file);
+  }
+}
+
+function removePathRecursive(path: string): void {
+  if (!pathExists(path)) {
+    return;
+  }
+
+  const st = fs.statSync(path);
+  if (!st.isDirectory()) {
+    fs.unlinkSync(path);
+    return;
+  }
+
+  for (const name of fs.listFileSync(path)) {
+    removePathRecursive(`${path}/${name}`);
+  }
+  fs.rmdirSync(path);
 }
 
 const DRIVE_C = '/data/storage/el2/base/files/.wine/drive_c';
@@ -102,22 +149,34 @@ struct Index {
   // 使用 getRawFdSync 流式读取，避免 249MB 一次加载到内存导致 OOM
   private async extractWineData(): Promise<void> {
     const marker = `${WINE_ROOT_PAD}/share/wine/wine.inf`;
+    const ctx = getContext(this);
+    const rm = ctx.resourceManager;
+    const rawFd = rm.getRawFdSync('wine-data.zip');
+    const expectedStamp = `len=${rawFd.length}`;
+    const currentStamp = readTextIfExists(WINE_RUNTIME_STAMP);
+    const markerExists = pathExists(marker);
+
     hilog.info(DOMAIN, 'wine', 'extract: check marker=%{public}s', marker);
     try {
-      if (fs.accessSync(marker)) {
-        hilog.info(DOMAIN, 'wine', 'extract: already done (marker exists)');
+      if (markerExists && currentStamp === expectedStamp) {
+        hilog.info(DOMAIN, 'wine', 'extract: already done (marker + stamp match)');
         return;
       }
-    } catch (_) {}
-    hilog.info(DOMAIN, 'wine', 'extract: marker not found, start extracting');
 
-    try {
-      const ctx = getContext(this);
-      const rm = ctx.resourceManager;
+      if (markerExists) {
+        hilog.info(DOMAIN, 'wine', 'extract: stamp mismatch old=%{public}s new=%{public}s, refresh runtime',
+          currentStamp, expectedStamp);
+      } else {
+        hilog.info(DOMAIN, 'wine', 'extract: marker not found, start extracting');
+      }
+
+      if (pathExists(WINE_ROOT_PAD)) {
+        hilog.info(DOMAIN, 'wine', 'extract: removing old runtime %{public}s', WINE_ROOT_PAD);
+        removePathRecursive(WINE_ROOT_PAD);
+      }
 
       // 流式拷贝: getRawFdSync 获取 fd → 分块读取 → 写入临时文件
       hilog.info(DOMAIN, 'wine', 'extract: getRawFdSync wine-data.zip...');
-      const rawFd = rm.getRawFdSync('wine-data.zip');
       hilog.info(DOMAIN, 'wine', 'extract: rawFd fd=%{public}d offset=%{public}d length=%{public}d',
         rawFd.fd, rawFd.offset, rawFd.length);
 
@@ -140,7 +199,6 @@ struct Index {
         totalWritten += n;
       }
       fs.closeSync(dst);
-      rm.closeRawFdSync('wine-data.zip');
       hilog.info(DOMAIN, 'wine', 'extract: stream copy ok, totalWritten=%{public}d', totalWritten);
 
       // 确保目标目录存在
@@ -150,7 +208,8 @@ struct Index {
       hilog.info(DOMAIN, 'wine', 'extract: decompress ok');
 
       // 验证
-      if (fs.accessSync(marker)) {
+      if (pathExists(marker)) {
+        writeTextFile(WINE_RUNTIME_STAMP, expectedStamp);
         hilog.info(DOMAIN, 'wine', 'extract: verified, marker exists');
       } else {
         hilog.warn(DOMAIN, 'wine', 'extract: marker still missing after decompress!');
@@ -159,6 +218,59 @@ struct Index {
     } catch (e) {
       hilog.error(DOMAIN, 'wine', 'extract FAIL: %{public}s', JSON.stringify(e));
       this.statusText = '解压失败';
+    } finally {
+      rm.closeRawFdSync('wine-data.zip');
+    }
+  }
+
+  private async ensureMidiSoundFont(): Promise<void> {
+    hilog.info(DOMAIN, 'wine', 'midi-sf2: check %{public}s', MIDI_SOUNDFONT_PATH);
+    try {
+      const ctx = getContext(this);
+      const rm = ctx.resourceManager;
+      let dst: fs.File | undefined = undefined;
+      fs.mkdirSync(MIDI_SOUNDFONT_DIR, true);
+
+      const rawFd = rm.getRawFdSync(MIDI_SOUNDFONT_RAW);
+      try {
+        try {
+          const st = fs.statSync(MIDI_SOUNDFONT_PATH);
+          if (st.size === rawFd.length) {
+            hilog.info(DOMAIN, 'wine', 'midi-sf2: already available');
+            return;
+          }
+          hilog.warn(DOMAIN, 'wine', 'midi-sf2: size mismatch existing=%{public}d raw=%{public}d, recopy',
+            st.size, rawFd.length);
+        } catch (_) {}
+
+        dst = fs.openSync(MIDI_SOUNDFONT_PATH,
+          fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+        const chunkSize = 1024 * 1024;
+        const buf = new ArrayBuffer(chunkSize);
+        let pos = rawFd.offset;
+        const end = rawFd.offset + rawFd.length;
+        let totalWritten = 0;
+
+        while (pos < end) {
+          const toRead = Math.min(chunkSize, end - pos);
+          const n = fs.readSync(rawFd.fd, buf, { offset: pos, length: toRead });
+          if (n <= 0) {
+            break;
+          }
+          fs.writeSync(dst.fd, buf, { length: n });
+          pos += n;
+          totalWritten += n;
+        }
+
+        hilog.info(DOMAIN, 'wine', 'midi-sf2: copied %{public}d bytes', totalWritten);
+      } finally {
+        if (dst) {
+          fs.closeSync(dst);
+        }
+        rm.closeRawFdSync(MIDI_SOUNDFONT_RAW);
+      }
+    } catch (e) {
+      hilog.warn(DOMAIN, 'wine', 'midi-sf2 copy failed: %{public}s', JSON.stringify(e));
     }
   }
 
@@ -275,6 +387,7 @@ struct Index {
       hilog.info(DOMAIN, 'wine', 'auto-init: extracting wine data...');
       await this.extractWineData();
     }
+    await this.ensureMidiSoundFont();
     hilog.info(DOMAIN, 'wine', 'auto-init: starting Wine...');
     this.statusText = '启动服务...';
     const ok: boolean = testNapi.startServer(SOCK);
