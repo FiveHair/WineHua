@@ -240,16 +240,14 @@ static void xs_get_toplevel(wl_client* client, wl_resource* xsRes, uint32_t id) 
     td->xdgSurface = xsRes;
     wl_resource_set_implementation(tl, &kToplevelImpl, td, tl_resource_destroy);
 
-    // 关联 SurfaceData: 分配 toplevelId, 标记 hasToplevel
+    // 关联 SurfaceData: 分配 toplevelId, 发送 created 事件到 ArkTS
     if (d->wlSurface) {
         auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(d->wlSurface));
         if (sd && !sd->hasToplevel) {
             sd->hasToplevel = true;
             sd->toplevelId = WaylandServer::GetInstance()->NextToplevelId();
-            d->toplevelId = sd->toplevelId;  // XdgSurface 也缓存 toplevelId
-            td->toplevelId = sd->toplevelId; // ToplevelData 存储独立的拷贝
-            OH_LOG_INFO(LOG_APP, "[MW] xs_get_toplevel -> id=%{public}u (first toplevel for this surface)", sd->toplevelId);
-            // 注册 toplevel resource (用于 SendToplevelClose)
+            d->toplevelId = sd->toplevelId;
+            td->toplevelId = sd->toplevelId;
             WaylandServer::GetInstance()->RegisterToplevelResource(sd->toplevelId, tl);
             WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "created",
                 "{\"w\":640,\"h\":480}");
