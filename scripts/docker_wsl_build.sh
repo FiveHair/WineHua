@@ -244,7 +244,8 @@ container_check() {
     run_container bash -lc '
 set -euo pipefail
 missing=0
-for tool in gcc g++ make cmake ninja meson bison flex autoconf libtoolize pkg-config git python3 java node x86_64-w64-mingw32-gcc; do
+for tool in gcc g++ make cmake ninja meson bison flex autoconf libtoolize pkg-config git python3 java node \
+    x86_64-w64-mingw32-gcc x86_64-w64-mingw32-g++ i686-w64-mingw32-gcc i686-w64-mingw32-g++; do
     if command -v "$tool" >/dev/null 2>&1; then
         echo "ok: $tool"
     else

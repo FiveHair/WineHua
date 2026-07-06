@@ -8,19 +8,6 @@ WL_SRC="$ROOT/thirdparty/wayland"
 WP_SRC="$ROOT/thirdparty/wayland-protocols"
 WL_BUILD="$BUILD_DIR/wayland_build"
 
-# 确保 native wayland-scanner 可用
-SCANNER=/usr/local/bin/wayland-scanner
-build_scanner() {
-    if [ -x "$SCANNER" ]; then return 0; fi
-    log "--- 编译 wayland-scanner (native) ---"
-    mkdir -p /tmp/wayland_native
-    meson setup /tmp/wayland_native "$WL_SRC" \
-        --prefix /usr/local -Ddocumentation=false -Dtests=false --buildtype=release
-    ninja -C /tmp/wayland_native
-    ninja -C /tmp/wayland_native install
-    log "wayland-scanner: $(which wayland-scanner)"
-}
-
 log "=== 构建 Wayland (x86_64) ==="
 
 if [ -f "$SYSROOT_EXT_LIB/libwayland-client.so.0" ] \
@@ -31,7 +18,7 @@ if [ -f "$SYSROOT_EXT_LIB/libwayland-client.so.0" ] \
     exit 0
 fi
 
-build_scanner
+ensure_wayland_scanner
 
 mkdir -p "$SYSROOT_EXT_INC" "$SYSROOT_EXT_LIB" "$SYSROOT_EXT_PC" "$SYSROOT_EXT_SHARE"
 mkdir -p "$WL_BUILD"

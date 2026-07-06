@@ -92,9 +92,46 @@ NATIVE_LIBS="$WINEHUA/entry/libs/$NATIVE_ARCH"
 # 编译并行
 JOBS=${JOBS:-$(nproc)}
 
+HOST_TOOLS_DIR="$BUILD_DIR/host-tools"
+
+ensure_wayland_scanner() {
+    if [ -n "${WAYLAND_SCANNER:-}" ] && [ -x "$WAYLAND_SCANNER" ]; then
+        return 0
+    fi
+    if command -v wayland-scanner >/dev/null 2>&1; then
+        WAYLAND_SCANNER="$(command -v wayland-scanner)"
+        export WAYLAND_SCANNER
+        return 0
+    fi
+    if [ -x "$HOST_TOOLS_DIR/bin/wayland-scanner" ]; then
+        WAYLAND_SCANNER="$HOST_TOOLS_DIR/bin/wayland-scanner"
+        export WAYLAND_SCANNER
+        return 0
+    fi
+
+    log "--- 编译 wayland-scanner (native) ---"
+    local wl_build="$BUILD_DIR/wayland-scanner-build"
+    mkdir -p "$wl_build" "$HOST_TOOLS_DIR/bin"
+    if [ ! -f "$wl_build/build.ninja" ]; then
+        meson setup "$wl_build" "$ROOT/thirdparty/wayland" \
+            --prefix "$HOST_TOOLS_DIR" -Ddocumentation=false -Dtests=false --buildtype=release
+    fi
+    ninja -C "$wl_build"
+    if [ -x "$wl_build/src/wayland-scanner" ]; then
+        cp "$wl_build/src/wayland-scanner" "$HOST_TOOLS_DIR/bin/"
+    elif [ -x "$wl_build/wayland-scanner" ]; then
+        cp "$wl_build/wayland-scanner" "$HOST_TOOLS_DIR/bin/"
+    else
+        err "wayland-scanner build finished but executable was not found under $wl_build"
+    fi
+    WAYLAND_SCANNER="$HOST_TOOLS_DIR/bin/wayland-scanner"
+    export WAYLAND_SCANNER
+}
+
 # 生成 meson cross file (路径依赖 ROOT, 不能硬编码)
 gen_cross_file() {
     local cross="$BUILD_DIR/ohos-x86_64-cross.txt"
+    ensure_wayland_scanner
     cat > "$cross" << XEOF
 [binaries]
 c = '$OHOS_SDK/native/llvm/bin/clang'
@@ -102,7 +139,7 @@ cpp = '$OHOS_SDK/native/llvm/bin/clang++'
 ar = '$OHOS_SDK/native/llvm/bin/llvm-ar'
 strip = '$OHOS_SDK/native/llvm/bin/llvm-strip'
 pkg-config = '/usr/bin/pkg-config'
-wayland-scanner = '/usr/local/bin/wayland-scanner'
+wayland-scanner = '$WAYLAND_SCANNER'
 
 [built-in options]
 c_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC']

@@ -104,7 +104,8 @@ build_protocols() {
     fi
 
     log "--- 生成 Wayland 协议文件 ---"
-    local scanner="/usr/local/bin/wayland-scanner"
+    ensure_wayland_scanner
+    local scanner="$WAYLAND_SCANNER"
 
     # wayland core protocol
     local wl_xml="$ROOT/thirdparty/wayland/protocol/wayland.xml"

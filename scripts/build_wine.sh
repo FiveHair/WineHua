@@ -27,7 +27,7 @@ build_native_tools() {
         export ac_cv_lib_soname_freetype="libfreetype.so.6"
         export FREETYPE_CFLAGS="-I/usr/include/freetype2"
         export FREETYPE_LIBS="-lfreetype"
-        export WAYLAND_SCANNER=/usr/local/bin/wayland-scanner
+        ensure_wayland_scanner
         "$WINE_SRC/configure" --enable-win64 --disable-tests \
             --without-x --without-alsa \
             --without-opengl --without-vulkan
@@ -80,7 +80,7 @@ build_ohos_unix() {
         export XKBCOMMON_LIBS="-L$SYSROOT_EXT_LIB -lxkbcommon"
         export XKBREGISTRY_CFLAGS="-I$SYSROOT_EXT_INC"
         export XKBREGISTRY_LIBS="-L$SYSROOT_EXT_LIB -lxkbregistry"
-        export WAYLAND_SCANNER=/usr/local/bin/wayland-scanner
+        ensure_wayland_scanner
 
         CC="$CLANG --target=$TARGET --sysroot=$SYSROOT" \
         CFLAGS="${WINE_CFLAGS:-} -I$SYSROOT_EXT_INC -I$SYSROOT_EXT_INC/freetype2" \

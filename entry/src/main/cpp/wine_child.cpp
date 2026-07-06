@@ -84,6 +84,21 @@ static bool is_audio_test_exe(int argc, char *argv[])
     return !strcasecmp(basename_of_path(argv[0]), "winehua_audio_test.exe");
 }
 
+#ifdef PAD_MODE
+static bool should_join_shell_desktop(int argc, char *argv[])
+{
+    const char *program;
+
+    if (argc <= 0 || !argv[0]) return false;
+
+    program = basename_of_path(argv[0]);
+    if (!strcasecmp(program, "wine") && argc > 1 && argv[1])
+        program = basename_of_path(argv[1]);
+
+    return strcasecmp(program, "wineboot") && strcasecmp(program, "explorer");
+}
+#endif
+
 static const char *select_winedebug_profile(int argc, char *argv[])
 {
     const char *override = getenv("WINEHUA_WINEDEBUG");
@@ -195,6 +210,18 @@ extern "C" void Main(NativeChildProcess_Args args)
     // 3. 设置 Wine 环境变量
     winedebug = select_winedebug_profile(argc, argv);
     setup_wine_env(binDir, homeDir, winedebug);
+#ifdef PAD_MODE
+    if (should_join_shell_desktop(argc, argv))
+    {
+        setenv("WINEHUA_DESKTOP", "shell", 1);
+        OH_LOG_INFO(LOG_APP, "[WineChild] WINEHUA_DESKTOP=shell");
+    }
+    else
+    {
+        unsetenv("WINEHUA_DESKTOP");
+        OH_LOG_INFO(LOG_APP, "[WineChild] WINEHUA_DESKTOP unset");
+    }
+#endif
     OH_LOG_INFO(LOG_APP, "[WineChild] WINEDEBUG=%{public}s", winedebug);
     if (is_audio_test_exe(argc, argv))
         OH_LOG_INFO(LOG_APP, "[WineChild] MIDI diagnostic logging enabled for AudioTest");

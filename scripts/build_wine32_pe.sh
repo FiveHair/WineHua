@@ -54,7 +54,7 @@ if [ ! -f "Makefile" ]; then
     export WAYLAND_CLIENT_LIBS="-lwayland-client"
     export XKBCOMMON_LIBS="-lxkbcommon"
     export XKBREGISTRY_LIBS="-lxkbregistry"
-    export WAYLAND_SCANNER=/usr/local/bin/wayland-scanner
+    ensure_wayland_scanner
     "$WINE_SRC/configure" \
         --host=i686-w64-mingw32 \
         --with-wine-tools="$WINE_TOOLS" \

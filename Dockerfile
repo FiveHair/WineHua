@@ -13,8 +13,9 @@ RUN apt-get update && apt-get install -y \
     libexpat1-dev libxml2-dev libffi-dev \
     # sfnt2fon 字体工具 (Wine .fon 生成)
     libfreetype-dev \
-    # Wine OHOS 交叉 PE 编译 (mingw gcc + g++ for C++17 DLLs like icu.dll)
+    # Wine OHOS / WoW64 PE 编译 (mingw gcc + g++ for 64-bit and 32-bit PE DLLs)
     gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+    gcc-mingw-w64-i686 g++-mingw-w64-i686 \
     # HAP 签名
     default-jdk \
     # 开发工具 (持久化容器用)
