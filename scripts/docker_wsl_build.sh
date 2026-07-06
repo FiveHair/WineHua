@@ -261,8 +261,8 @@ for mod in yaml mako markupsafe; do
     fi
 done
 test -x /apps/harmony/bin/hvigorw && echo "ok: hvigorw" || { echo "missing: hvigorw"; missing=1; }
-test -x /apps/harmony/sdk/default/openharmony/native/llvm/bin/clang && echo "ok: OHOS clang" || { echo "missing: OHOS clang"; missing=1; }
-/apps/harmony/sdk/default/hms/native/BiSheng/bin/ld.lld --version >/dev/null 2>&1 && echo "ok: ld.lld" || { echo "missing: ld.lld"; missing=1; }
+/apps/harmony/sdk/default/openharmony/native/llvm/bin/clang --version >/dev/null 2>&1 && echo "ok: OHOS clang" || { echo "missing/broken: OHOS clang"; missing=1; }
+/apps/harmony/sdk/default/hms/native/BiSheng/bin/ld.lld --version >/dev/null 2>&1 && echo "ok: ld.lld" || { echo "missing/broken: ld.lld"; missing=1; }
 exit "$missing"
 '
 }
@@ -278,6 +278,8 @@ fi
 
 run_make() {
     local make_cmd=""
+    local dist_hap=""
+    local host_hap=""
 
     check_submodules
     if [ "$#" -eq 0 ]; then
@@ -285,6 +287,14 @@ run_make() {
     fi
     printf -v make_cmd '%q ' make "$@"
     run_container bash -lc "$make_cmd; $copy_hap_to_dist_if_present"
+
+    dist_hap="$ROOT/dist/entry-default-signed-${DEFAULT_ARCH}-${DEFAULT_DEVICE}.hap"
+    host_hap="$ROOT/entry/build/default/outputs/default/entry-default-signed.hap"
+    if [ -s "$dist_hap" ]; then
+        mkdir -p "$(dirname "$host_hap")"
+        cp -f "$dist_hap" "$host_hap"
+        echo "copied: entry/build/default/outputs/default/entry-default-signed.hap"
+    fi
 }
 
 case "${1:-help}" in

@@ -26,7 +26,16 @@ let WINE_LIB = WINE_LIB_PC;
 let BIN_DIR = WINE_BIN;
 let BOX64 = `${WINE_BIN}/box64`;
 
-function detectWinePath(): void {
+function detectWinePath(hasRawfileWineData: boolean): void {
+  if (hasRawfileWineData) {
+    WINE_BIN = WINE_BIN_PAD;
+    WINE_LIB = WINE_LIB_PAD;
+    BIN_DIR = WINE_BIN;
+    BOX64 = `${WINE_BIN}/box64`;
+    hilog.info(DOMAIN, 'wine', 'detectWinePath: Pad mode (rawfile package)');
+    return;
+  }
+
   try {
     if (fs.accessSync(WINE_BIN_PC)) {
       // PC 模式 (HNP)
@@ -73,17 +82,21 @@ function writeTextFile(path: string, text: string): void {
 }
 
 function removePathRecursive(path: string): void {
-  if (!pathExists(path)) {
+  let st: fs.Stat;
+  try {
+    st = fs.lstatSync(path);
+  } catch (e) {
+    hilog.warn(DOMAIN, 'wine', 'removePath: skip missing path=%{public}s err=%{public}s', path, JSON.stringify(e));
     return;
   }
 
-  const st = fs.statSync(path);
-  if (!st.isDirectory()) {
+  if (st.isSymbolicLink() || !st.isDirectory()) {
     fs.unlinkSync(path);
     return;
   }
 
-  for (const name of fs.listFileSync(path)) {
+  const names = fs.listFileSync(path);
+  for (const name of names) {
     removePathRecursive(`${path}/${name}`);
   }
   fs.rmdirSync(path);
@@ -108,9 +121,11 @@ struct Index {
   @State entries: string[] = [];
   @State dirStack: string[] = [];
   @State processList: ProcessInfo[] = [];
+  private hasRawfileWineData: boolean = false;
 
   aboutToAppear(): void {
-    detectWinePath();
+    this.hasRawfileWineData = this.detectRawfileWineData();
+    detectWinePath(this.hasRawfileWineData);
 
     testNapi.setStateCallback((s: string) => {
       hilog.info(DOMAIN, 'wine', 'state: %{public}s', s);
@@ -143,6 +158,20 @@ struct Index {
     this.refreshPrefix();
     // 下一帧自动初始化 (避免阻塞 UI 首次渲染)
     setTimeout(() => this.doInit(), 0);
+  }
+
+  private detectRawfileWineData(): boolean {
+    const ctx = getContext(this);
+    const rm = ctx.resourceManager;
+    try {
+      const rawFd = rm.getRawFdSync('wine-data.zip');
+      hilog.info(DOMAIN, 'wine', 'rawfile: wine-data.zip exists len=%{public}d', rawFd.length);
+      rm.closeRawFdSync('wine-data.zip');
+      return true;
+    } catch (_) {
+      hilog.info(DOMAIN, 'wine', 'rawfile: wine-data.zip not packaged');
+      return false;
+    }
   }
 
   // Pad: 从 rawfile 取出 wine-data.zip → zlib.decompressFile 解压到 files/wine/
@@ -213,11 +242,14 @@ struct Index {
         hilog.info(DOMAIN, 'wine', 'extract: verified, marker exists');
       } else {
         hilog.warn(DOMAIN, 'wine', 'extract: marker still missing after decompress!');
+        this.statusText = '解压失败';
+        throw new Error('wine-data marker missing after decompress');
       }
       this.statusText = '已解压';
     } catch (e) {
       hilog.error(DOMAIN, 'wine', 'extract FAIL: %{public}s', JSON.stringify(e));
       this.statusText = '解压失败';
+      throw new Error('wine-data extraction failed');
     } finally {
       rm.closeRawFdSync('wine-data.zip');
     }
@@ -379,12 +411,18 @@ struct Index {
     let documentSaveResult = await documentViewPicker.save({ pickerMode: picker.DocumentPickerMode.DOWNLOAD });
     const zHome = new fileUri.FileUri(documentSaveResult[0]).path + '/';
     // Pad: 检查是否需要解压 wine 数据文件
-    hilog.info(DOMAIN, 'wine', 'auto-init: check PC path=%{public}s', WINE_BIN_PC);
-    const isPC = fs.accessSync(WINE_BIN_PC);
+    let isPC = false;
+    if (this.hasRawfileWineData) {
+      hilog.info(DOMAIN, 'wine', 'auto-init: rawfile package detected, skip HNP path detection');
+    } else {
+      hilog.info(DOMAIN, 'wine', 'auto-init: check PC path=%{public}s', WINE_BIN_PC);
+      isPC = pathExists(WINE_BIN_PC);
+    }
     hilog.info(DOMAIN, 'wine', 'auto-init: isPC=%{public}s', String(isPC));
     if (!isPC) {
       this.statusText = '解压数据...';
       hilog.info(DOMAIN, 'wine', 'auto-init: extracting wine data...');
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
       await this.extractWineData();
     }
     await this.ensureMidiSoundFont();

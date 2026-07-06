@@ -12,10 +12,9 @@ backup_package_file() {
     local backup=""
 
     [ -f "$file" ] || err "打包配置文件不存在: $file"
-    mkdir -p "$BUILD_DIR"
 
     if [ -z "$PACKAGE_BACKUP_DIR" ]; then
-        PACKAGE_BACKUP_DIR="$(mktemp -d "$BUILD_DIR/package-backup.XXXXXX")"
+        PACKAGE_BACKUP_DIR="$(mktemp -d /tmp/winehua-package-backup.XXXXXX)"
     fi
 
     backup="$PACKAGE_BACKUP_DIR/$(printf '%s' "$file" | sed 's|[/:\\]|_|g').bak"
@@ -70,6 +69,175 @@ with open('$profile', 'w') as f:
     f.write(content)
 "
     log "abiFilters: [$abi_value]"
+}
+
+has_real_signing_material() {
+    python3 - "$WINEHUA/build-profile.json5" <<'PY'
+import json
+import os
+import re
+import sys
+
+profile_path = sys.argv[1]
+root = os.path.dirname(profile_path)
+with open(profile_path, "r", encoding="utf-8") as fh:
+    content = re.sub(r",\s*([}\]])", r"\1", fh.read())
+profile = json.loads(content)
+material = profile["app"]["signingConfigs"][0]["material"]
+placeholders = {
+    "your_key_alias",
+    "YOUR_ENCRYPTED_KEY_PASSWORD",
+    "YOUR_ENCRYPTED_STORE_PASSWORD",
+}
+for key in ("certpath", "profile", "storeFile"):
+    value = material.get(key, "")
+    if not value or "your_" in value or not os.path.isfile(os.path.join(root, value)):
+        sys.exit(1)
+for key in ("keyAlias", "keyPassword", "storePassword"):
+    if material.get(key, "") in placeholders:
+        sys.exit(1)
+PY
+}
+
+sign_hap_with_local_debug_material() {
+    local unsigned_hap="$1"
+    local signed_hap="$2"
+    local sign_jar="$TOOL_HOME/sdk/default/openharmony/toolchains/lib/hap-sign-tool.jar"
+    local work_dir="$BUILD_DIR/local-debug-signing"
+    local password="${WINEHUA_DEBUG_SIGN_PASSWORD:-WineHuaDebug123}"
+    local root_alias="winehua_root_ca"
+    local sub_alias="winehua_app_ca"
+    local app_alias="winehua_debug"
+    local profile_sub_alias="winehua_profile_ca"
+    local profile_alias="winehua_profile"
+    local root_subject="C=CN,O=WineHua,OU=Debug,CN=WineHua Root CA"
+    local sub_subject="C=CN,O=WineHua,OU=Debug,CN=Application Debug Signature Service CA"
+    local app_subject="C=CN,O=WineHua,OU=Debug,CN=WineHua Debug"
+    local profile_sub_subject="C=CN,O=WineHua,OU=Debug,CN=Provision Profile Debug Signature Service CA"
+    local profile_subject="C=CN,O=WineHua,OU=Debug,CN=WineHua Profile Debug"
+    local keystore="$work_dir/debug.p12"
+    local root_cert="$work_dir/root-ca.cer"
+    local sub_cert="$work_dir/sub-app-ca.cer"
+    local app_cert="$work_dir/app-debug-cert.cer"
+    local profile_sub_cert="$work_dir/sub-profile-ca.cer"
+    local profile_cert="$work_dir/profile-debug-cert.cer"
+    local profile_json="$work_dir/profile.json"
+    local profile_p7b="$work_dir/profile.p7b"
+    local cert_b64
+
+    mkdir -p "$work_dir"
+    rm -f "$keystore" "$root_cert" "$sub_cert" "$app_cert" \
+        "$profile_sub_cert" "$profile_cert" "$profile_json" "$profile_p7b"
+
+    java -jar "$sign_jar" generate-ca \
+        -keyAlias "$root_alias" -keyPwd "$password" \
+        -keyAlg ECC -keySize NIST-P-256 \
+        -subject "$root_subject" -validity 3650 -signAlg SHA256withECDSA \
+        -keystoreFile "$keystore" -keystorePwd "$password" \
+        -outFile "$root_cert" -pwdInputMode 0
+
+    java -jar "$sign_jar" generate-ca \
+        -keyAlias "$sub_alias" -keyPwd "$password" \
+        -keyAlg ECC -keySize NIST-P-256 \
+        -issuer "$root_subject" -issuerKeyAlias "$root_alias" -issuerKeyPwd "$password" \
+        -subject "$sub_subject" -validity 3650 -signAlg SHA256withECDSA \
+        -keystoreFile "$keystore" -keystorePwd "$password" \
+        -outFile "$sub_cert" -pwdInputMode 0
+
+    java -jar "$sign_jar" generate-ca \
+        -keyAlias "$profile_sub_alias" -keyPwd "$password" \
+        -keyAlg ECC -keySize NIST-P-256 \
+        -issuer "$root_subject" -issuerKeyAlias "$root_alias" -issuerKeyPwd "$password" \
+        -subject "$profile_sub_subject" -validity 3650 -signAlg SHA256withECDSA \
+        -keystoreFile "$keystore" -keystorePwd "$password" \
+        -outFile "$profile_sub_cert" -pwdInputMode 0
+
+    java -jar "$sign_jar" generate-keypair \
+        -keyAlias "$app_alias" -keyPwd "$password" \
+        -keyAlg ECC -keySize NIST-P-256 \
+        -keystoreFile "$keystore" -keystorePwd "$password" -pwdInputMode 0
+
+    java -jar "$sign_jar" generate-app-cert \
+        -keyAlias "$app_alias" -keyPwd "$password" \
+        -issuer "$sub_subject" -issuerKeyAlias "$sub_alias" -issuerKeyPwd "$password" \
+        -subject "$app_subject" -validity 3650 -signAlg SHA256withECDSA \
+        -rootCaCertFile "$root_cert" -subCaCertFile "$sub_cert" \
+        -keystoreFile "$keystore" -keystorePwd "$password" \
+        -outForm certChain -outFile "$app_cert" -pwdInputMode 0
+
+    java -jar "$sign_jar" generate-keypair \
+        -keyAlias "$profile_alias" -keyPwd "$password" \
+        -keyAlg ECC -keySize NIST-P-256 \
+        -keystoreFile "$keystore" -keystorePwd "$password" -pwdInputMode 0
+
+    java -jar "$sign_jar" generate-profile-cert \
+        -keyAlias "$profile_alias" -keyPwd "$password" \
+        -issuer "$profile_sub_subject" \
+        -issuerKeyAlias "$profile_sub_alias" -issuerKeyPwd "$password" \
+        -subject "$profile_subject" -validity 3650 -signAlg SHA256withECDSA \
+        -rootCaCertFile "$root_cert" -subCaCertFile "$profile_sub_cert" \
+        -keystoreFile "$keystore" -keystorePwd "$password" \
+        -outForm certChain -outFile "$profile_cert" -pwdInputMode 0
+
+    cert_b64="$(base64 -w0 "$app_cert")"
+    python3 - "$profile_json" "$cert_b64" <<'PY'
+import json
+import sys
+
+path, cert = sys.argv[1:3]
+profile = {
+    "version-name": "1.0.0",
+    "version-code": 1,
+    "app-distribution-type": "os_integration",
+    "uuid": "00000000-0000-0000-0000-000000000001",
+    "validity": {"not-before": 1704067200, "not-after": 4102444800},
+    "type": "debug",
+    "bundle-info": {
+        "developer-id": "WineHuaDebug",
+        "development-certificate": cert,
+        "distribution-certificate": cert,
+        "bundle-name": "app.hackeris.winehua",
+        "apl": "normal",
+        "app-feature": "hos_normal_app",
+    },
+    "acls": {"allowed-acls": []},
+    "permissions": {"restricted-permissions": []},
+    "debug-info": {"device-ids": ["*"]},
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(profile, fh, separators=(",", ":"))
+PY
+
+    java -jar "$sign_jar" sign-profile \
+        -mode localSign \
+        -keyAlias "$profile_alias" -keyPwd "$password" \
+        -profileCertFile "$profile_cert" -inFile "$profile_json" \
+        -signAlg SHA256withECDSA \
+        -keystoreFile "$keystore" -keystorePwd "$password" \
+        -outFile "$profile_p7b" -pwdInputMode 0
+
+    java -jar "$sign_jar" verify-profile -inFile "$profile_p7b" \
+        -outFile "$work_dir/profile-verify.json"
+
+    java -jar "$sign_jar" sign-app \
+        -mode localSign \
+        -keyAlias "$app_alias" -keyPwd "$password" \
+        -appCertFile "$app_cert" -profileFile "$profile_p7b" -profileSigned 1 \
+        -inFile "$unsigned_hap" -signAlg SHA256withECDSA \
+        -keystoreFile "$keystore" -keystorePwd "$password" \
+        -outFile "$signed_hap" -compatibleVersion 22 -signCode 1 -pwdInputMode 0
+}
+
+sign_hap() {
+    local unsigned_hap="$1"
+    local signed_hap="$2"
+
+    if has_real_signing_material; then
+        python3 sign.py "$unsigned_hap" "$signed_hap"
+    else
+        warn "未找到真实 .ohos 签名材料，使用本地 debug 签名生成 HAP"
+        sign_hap_with_local_debug_material "$unsigned_hap" "$signed_hap"
+    fi
 }
 
 # ============================================================
@@ -136,7 +304,14 @@ with open('$profile', 'w') as f:
     # NATIVE_ARCH=all 时保留两个架构
 
     cd "$WINEHUA"
-    hvigorw assembleHap || { err "hvigorw assembleHap 失败"; return 1; }
+    if ! hvigorw --no-daemon -c ohos.buildDir=.hvigor-ohos-build assembleHap; then
+        if [ -s "$unsigned_hap" ]; then
+            warn "hvigorw assembleHap 未完成签名，但 unsigned HAP 已生成，继续使用项目签名流程"
+        else
+            err "hvigorw assembleHap 失败"
+            return 1
+        fi
+    fi
 
     cd "$WINEHUA/entry"
     # 清理非目标架构的 HNP (hvigorw 不处理 hnp/, 所以这时清理即可)
@@ -157,7 +332,7 @@ with open('$profile', 'w') as f:
     fi
 
     cd "$WINEHUA"
-    python3 sign.py "$unsigned_hap" "$signed_hap"
+    sign_hap "$unsigned_hap" "$signed_hap"
 
     ls -lh "$signed_hap"
     log "HAP 构建 + 签名完成 ($NATIVE_ARCH)"

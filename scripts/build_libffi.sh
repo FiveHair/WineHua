@@ -17,9 +17,12 @@ log "=== 构建 libffi → sysroot-ext ==="
 SRC="$ROOT/thirdparty/libffi"
 BUILD="$BUILD_DIR/libffi_build"
 mkdir -p "$BUILD" "$SYSROOT_EXT_INC" "$SYSROOT_EXT_LIB" "$SYSROOT_EXT_PC"
-cd "$BUILD"
 
-"$SRC/autogen.sh" 2>/dev/null || true
+if [ ! -x "$SRC/configure" ]; then
+    (cd "$SRC" && ./autogen.sh)
+fi
+
+cd "$BUILD"
 CC="$CLANG --target=$TARGET --sysroot=$SYSROOT" \
 CFLAGS="-O2 -fPIC -D__MUSL__" \
 LDFLAGS="-fuse-ld=lld --sysroot=$SYSROOT --target=$TARGET" \
