@@ -160,9 +160,18 @@ native-$(1): $$(STAMPS)/$(1)/native
 
 $$(STAMPS)/$(1)/native: $(SCRIPTS)/build_native.sh $(SCRIPTS)/env.sh FORCE | $$(STAMPS)/$(1)
 	@sentinel="$(NATIVE_SENTINEL_$(subst -,_,$(1)))"; \
+	libs_dir="$(ROOT)/entry/libs/$(1)"; \
 	if [ -f $$@ ] && [ -f "$$$$sentinel" ] && \
+	    [ -f "$$$$libs_dir/libfreetype.so.6" ] && \
+	    [ -f "$$$$libs_dir/libxkbcommon.so.0" ] && \
+	    [ -f "$$$$libs_dir/libxkbregistry.so.0" ] && \
+	    [ -f "$$$$libs_dir/libwayland-egl.so.1" ] && \
+	    [ -f "$$$$libs_dir/libEGL.so.1" ] && \
 	    ! find $(ROOT)/thirdparty/wayland \
 	           $(ROOT)/thirdparty/libffi \
+	           $(ROOT)/thirdparty/freetype \
+	           $(ROOT)/thirdparty/libxml2 \
+	           $(ROOT)/thirdparty/libxkbcommon \
 	           $(ROOT)/thirdparty/libepoxy \
 	           $(ROOT)/thirdparty/virglrenderer \
 	           -newer $$@ -type f \

@@ -23,16 +23,18 @@
 extern napi_threadsafe_function gStateTsfn;
 
 napi_value RunWineExe(napi_env env, napi_callback_info info) {
-    size_t argc = 4;
-    napi_value args[4];
+    size_t argc = 5;
+    napi_value args[5] = {};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (argc < 4) return nullptr;
 
-    char binDir[512] = {}, sockPath[512] = {}, libPath[2048] = {}, wineExe[1024] = {};
+    char binDir[512] = {}, sockPath[512] = {}, libPath[2048] = {}, wineExe[1024] = {}, homeArg[1024] = {};
     napi_get_value_string_utf8(env, args[0], binDir, sizeof(binDir), nullptr);
     napi_get_value_string_utf8(env, args[1], sockPath, sizeof(sockPath), nullptr);
     napi_get_value_string_utf8(env, args[2], libPath, sizeof(libPath), nullptr);
     napi_get_value_string_utf8(env, args[3], wineExe, sizeof(wineExe), nullptr);
+    if (argc >= 5 && args[4])
+        napi_get_value_string_utf8(env, args[4], homeArg, sizeof(homeArg), nullptr);
 
     std::string exePath(wineExe);
 #ifdef PAD_MODE
@@ -75,7 +77,7 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
         LogGraphicsBackendStateForLaunch("Wine");
     }
 
-    std::string homeDir = "/storage/Users/currentUser/Download";
+    std::string homeDir = homeArg[0] ? homeArg : "/storage/Users/currentUser/Download";
     std::vector<std::string> envStrs = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd, homeDir);
     if (restoreGraphicsBackend) {
         winehua::GraphicsBroker::GetInstance().SetRequestedBackend(previousBackend);
@@ -94,9 +96,9 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
 #ifdef PAD_MODE
     {
 #ifdef __aarch64__
-        std::string entryParams = std::string(binDir) + "|" + exePath;
+        std::string entryParams = homeDir + "|" + binDir + "|" + exePath;
 #else
-        std::string entryParams = std::string(binDir) + "|wine|" + exePath;
+        std::string entryParams = homeDir + "|" + binDir + "|wine|" + exePath;
 #endif
         OH_LOG_INFO(LOG_APP, "[Wine] runWineExe via broker: %{public}s", entryParams.c_str());
 

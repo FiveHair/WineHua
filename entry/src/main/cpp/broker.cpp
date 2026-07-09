@@ -37,6 +37,45 @@ static const char* kBrokerSocketPath = WINE_BROKER_SOCKET;
 
 static std::atomic<bool> gBrokerRunning{false};
 
+static bool EntryParamsAlreadyHasHomePrefix(const char* entryParams)
+{
+    if (!entryParams || !entryParams[0]) return false;
+
+    const char* firstSep = strchr(entryParams, '|');
+    if (!firstSep) return false;
+    const char* second = firstSep + 1;
+    const char* secondEnd = strchr(second, '|');
+    if (!secondEnd) return false;
+
+    size_t secondLen = static_cast<size_t>(secondEnd - second);
+    return (strlen(WINE_FILES_DIR "/wine/bin") == secondLen &&
+            strncmp(second, WINE_FILES_DIR "/wine/bin", secondLen) == 0);
+}
+
+static bool EntryParamsLaunchesWineserver(const char* entryParams)
+{
+    if (!entryParams) return false;
+    const char* arg0 = entryParams;
+
+    if (EntryParamsAlreadyHasHomePrefix(entryParams))
+    {
+        const char* firstSep = strchr(entryParams, '|');
+        const char* secondEnd = firstSep ? strchr(firstSep + 1, '|') : nullptr;
+        if (!secondEnd) return false;
+        arg0 = secondEnd + 1;
+    }
+    else
+    {
+        const char* firstSep = strchr(entryParams, '|');
+        if (!firstSep) return false;
+        arg0 = firstSep + 1;
+    }
+
+    const char* end = strchr(arg0, '|');
+    size_t len = end ? static_cast<size_t>(end - arg0) : strlen(arg0);
+    return len == strlen("wineserver") && strncmp(arg0, "wineserver", len) == 0;
+}
+
 // 处理单个请求: recvmsg(entryParams + fd) → StartNativeChildProcess → sendmsg(childPid, status)
 static void HandleRequest(int conn_fd)
 {
@@ -93,8 +132,9 @@ static void HandleRequest(int conn_fd)
 
     // 4) 构造 NativeChildProcess 参数
     // 复制 entryParams 并加上 homeDir 前缀 (与 LaunchPadMode 新格式一致)
-    std::string fullParams = gBrokerHomeDir.empty() ? entryParamsRaw
-                            : (gBrokerHomeDir + "|" + entryParamsRaw);
+    std::string fullParams = (!gBrokerHomeDir.empty() && !EntryParamsAlreadyHasHomePrefix(entryParamsRaw))
+                            ? (gBrokerHomeDir + "|" + entryParamsRaw)
+                            : entryParamsRaw;
     char* entryParamsCopy = strdup(fullParams.c_str());
 
     NativeChildProcess_Fd fdNode = {};
@@ -128,11 +168,14 @@ static void HandleRequest(int conn_fd)
 
     // 5) 调用 StartNativeChildProcess (在主进程上下文，可以调用多次)
     int32_t childPid = -1;
+    const char* entryPoint = EntryParamsLaunchesWineserver(entryParamsRaw)
+                             ? "libwine_child.so:WineserverMain"
+                             : "libwine_child.so:Main";
     int32_t ret = OH_Ability_StartNativeChildProcess(
-        const_cast<char*>("libwine_child.so:Main"), args, options, &childPid);
+        const_cast<char*>(entryPoint), args, options, &childPid);
 
-    OH_LOG_INFO(LOG_APP, "[Broker] StartNativeChildProcess ret=%{public}d childPid=%{public}d",
-                ret, childPid);
+    OH_LOG_INFO(LOG_APP, "[Broker] StartNativeChildProcess entry=%{public}s ret=%{public}d childPid=%{public}d",
+                entryPoint, ret, childPid);
 
     free(entryParamsCopy);
     // 注意: receivedFd 的所有权已转移给 StartNativeChildProcess，不要在这里 close
@@ -218,7 +261,3 @@ int StartBrokerServer()
     }
     return 0;
 }
-
-
-
-

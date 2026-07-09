@@ -29,6 +29,8 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <time.h>
+#include <algorithm>
+#include <vector>
 
 // 从 stderr pipe 读取 Wine 内部日志，同时转发到 hilog 和文件
 struct stderr_ctx { int fd; int fileFd; };
@@ -68,6 +70,14 @@ static const char *midi_diag_winedebug_profile(void)
            "trace+ohosaudio,warn+ohosaudio,warn+module";
 }
 
+static const char *sdl_audio_diag_winedebug_profile(void)
+{
+    return "-all,trace+driver,trace+winmm,trace+mmdevapi,"
+           "warn+mmdevapi,err+mmdevapi,trace+dsound,warn+dsound,"
+           "err+dsound,trace+ohosaudio,warn+ohosaudio,err+ohosaudio,"
+           "warn+module,err+module";
+}
+
 static const char *basename_of_path(const char *path)
 {
     const char *slash;
@@ -80,8 +90,146 @@ static const char *basename_of_path(const char *path)
 
 static bool is_audio_test_exe(int argc, char *argv[])
 {
+    const char *base;
+
     if (argc <= 0 || !argv[0]) return false;
-    return !strcasecmp(basename_of_path(argv[0]), "winehua_audio_test.exe");
+    base = basename_of_path(argv[0]);
+    return !strcasecmp(base, "winehua_audio_test.exe") ||
+           !strcasecmp(base, "winehua_audio_test32.exe");
+}
+
+static bool is_sdl_audio_test_exe(int argc, char *argv[])
+{
+    const char *base;
+
+    if (argc <= 0 || !argv[0]) return false;
+    base = basename_of_path(argv[0]);
+    return !strcasecmp(base, "mj_x86.exe") || !strcasecmp(base, "mj_x86d.exe");
+}
+
+static bool program_is(const char *program, const char *name)
+{
+    if (!program || !name) return false;
+    if (!strcasecmp(program, name)) return true;
+
+    char withExe[128];
+    int n = snprintf(withExe, sizeof(withExe), "%s.exe", name);
+    return n > 0 && n < (int)sizeof(withExe) && !strcasecmp(program, withExe);
+}
+
+static bool arg_equals(int argc, char *argv[], const char *value)
+{
+    for (int i = 1; i < argc; ++i)
+        if (argv[i] && !strcasecmp(argv[i], value))
+            return true;
+    return false;
+}
+
+static bool arg_starts_with(int argc, char *argv[], const char *prefix)
+{
+    size_t prefixLen = prefix ? strlen(prefix) : 0;
+    if (!prefixLen) return false;
+
+    for (int i = 1; i < argc; ++i)
+        if (argv[i] && !strncasecmp(argv[i], prefix, prefixLen))
+            return true;
+    return false;
+}
+
+static bool has_windows_dir(const char *path)
+{
+    return path && (strchr(path, '\\') || strchr(path, '/'));
+}
+
+static bool is_launchable_path(const char *path)
+{
+    const char *base;
+    const char *dot;
+
+    if (!has_windows_dir(path)) return false;
+    base = basename_of_path(path);
+    dot = strrchr(base, '.');
+    if (!dot) return false;
+    return !strcasecmp(dot, ".exe") || !strcasecmp(dot, ".bat") || !strcasecmp(dot, ".cmd");
+}
+
+static std::string trim_quotes(const char *value)
+{
+    std::string s = value ? value : "";
+    while (!s.empty() && (s.front() == '"' || s.front() == '\'')) s.erase(s.begin());
+    while (!s.empty() && (s.back() == '"' || s.back() == '\'')) s.pop_back();
+    return s;
+}
+
+static bool append_windows_path_tail(std::string *out, const std::string& tail)
+{
+    for (char ch : tail)
+    {
+        if (ch == '\\') out->push_back('/');
+        else out->push_back(ch);
+    }
+    return !out->empty();
+}
+
+static bool wine_file_parent_to_native(const char *path, const char *homeDir, std::string *out)
+{
+    std::string file = trim_quotes(path);
+    size_t slash = file.find_last_of("\\/");
+    std::string dir;
+
+    if (slash == std::string::npos) return false;
+    dir = file.substr(0, slash);
+    if (dir.size() >= 3 && dir[1] == ':' && (dir[2] == '\\' || dir[2] == '/'))
+    {
+        char drive = (char)tolower((unsigned char)dir[0]);
+        std::string tail = dir.substr(3);
+
+        if (drive == 'z')
+        {
+            if (!homeDir || !homeDir[0]) return false;
+            *out = homeDir;
+            if (!out->empty() && out->back() != '/') out->push_back('/');
+            return append_windows_path_tail(out, tail);
+        }
+        if (drive == 'c')
+        {
+            *out = WINE_PREFIX "/drive_c/";
+            return append_windows_path_tail(out, tail);
+        }
+        return false;
+    }
+    if (!dir.empty() && dir[0] == '/')
+    {
+        *out = dir;
+        return true;
+    }
+    return false;
+}
+
+static bool derive_launch_cwd(int argc, char *argv[], const char *homeDir, std::string *out)
+{
+    const char *program;
+
+    if (argc <= 0 || !argv[0]) return false;
+    program = basename_of_path(argv[0]);
+
+    if (!strcasecmp(program, "wineboot") ||
+        !strcasecmp(program, "explorer") ||
+        !strcasecmp(program, "services.exe") ||
+        !strcasecmp(program, "wineserver"))
+        return false;
+
+    if (!strcasecmp(program, "cmd.exe") || !strcasecmp(program, "cmd"))
+    {
+        for (int i = argc - 1; i >= 1; --i)
+            if (is_launchable_path(argv[i]) && wine_file_parent_to_native(argv[i], homeDir, out))
+                return true;
+    }
+
+    if (is_launchable_path(argv[0]) && wine_file_parent_to_native(argv[0], homeDir, out))
+        return true;
+
+    return false;
 }
 
 #ifdef PAD_MODE
@@ -89,13 +237,38 @@ static bool should_join_shell_desktop(int argc, char *argv[])
 {
     const char *program;
 
+    if (getenv("WINEHUA_BOOTSTRAP_PHASE")) return false;
     if (argc <= 0 || !argv[0]) return false;
 
     program = basename_of_path(argv[0]);
     if (!strcasecmp(program, "wine") && argc > 1 && argv[1])
         program = basename_of_path(argv[1]);
 
-    return strcasecmp(program, "wineboot") && strcasecmp(program, "explorer");
+    if (!strcasecmp(program, "rundll32.exe") || !strcasecmp(program, "rundll32") ||
+        !strcasecmp(program, "rundll.exe") || !strcasecmp(program, "rundll"))
+    {
+        for (int i = 1; i < argc; ++i)
+            if (argv[i] && !strncasecmp(argv[i], "setupapi,InstallHinfSection", 27))
+                return false;
+    }
+
+    if (program_is(program, "wineboot") ||
+        program_is(program, "services") ||
+        program_is(program, "winemenubuilder"))
+        return false;
+
+    if (program_is(program, "explorer") && arg_equals(argc, argv, "/desktop"))
+        return false;
+
+    if (program_is(program, "explorer") && arg_starts_with(argc, argv, "/desktop=shell"))
+        return true;
+
+    if (program_is(program, "control") && arg_equals(argc, argv, "install_mono"))
+        return false;
+    if (program_is(program, "iexplore") && arg_equals(argc, argv, "/RegServer"))
+        return false;
+
+    return true;
 }
 #endif
 
@@ -105,6 +278,7 @@ static const char *select_winedebug_profile(int argc, char *argv[])
 
     if (override && override[0]) return override;
     if (is_audio_test_exe(argc, argv)) return midi_diag_winedebug_profile();
+    if (is_sdl_audio_test_exe(argc, argv)) return sdl_audio_diag_winedebug_profile();
     return default_winedebug_profile();
 }
 
@@ -112,13 +286,19 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
 {
     std::string shareDir = std::string(binDir) + "/../share";
     std::string libDir = std::string(binDir) + "/x86_64-unix";
-    static const char midiSoundfontPath[] = WINE_FILES_DIR "/audio/winehua-gm.sf2";
+    std::string midiSoundfontPath = std::string(binDir) + "/../audio/winehua-gm.sf2";
 
 #ifdef __aarch64__
     // ARM64: x86_64 .so 由 Box64 加载，不在系统 LD_LIBRARY_PATH
     // LD_LIBRARY_PATH 只包含 ARM64 原生 .so
     setenv("LD_LIBRARY_PATH",
-           "/data/app/bin:/usr/local/lib:/system/lib64/module:/system/lib64", 1);
+           "/data/storage/el1/bundle/libs/arm64-v8a:"
+           "/data/storage/el1/bundle/libs/arm64:"
+           "/data/app/el1/bundle/public/app.hackeris.winehua/libs/arm64-v8a:"
+           "/data/app/el1/bundle/public/app.hackeris.winehua/libs/arm64:"
+           "/data/app/bin:/usr/local/lib:"
+           "/system/lib64/module:/system/lib64:/system/lib64/platformsdk:"
+           "/system/lib64/chipset-sdk:/vendor/lib64:/vendor/lib64/chipsetsdk", 1);
     // Box64 用它自己的搜索路径加载 x86_64 .so
     setenv("BOX64_LD_LIBRARY_PATH", libDir.c_str(), 1);
 #else
@@ -149,6 +329,7 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
     setenv("WINEDLLDIR1", (std::string(binDir) + "/i386-windows").c_str(), 1);
     setenv("WINEDLLDIR2", binDir, 1);
     setenv("WINEDLLPATH", (std::string(binDir) + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir).c_str(), 1);
+    setenv("XKB_CONFIG_ROOT", (shareDir + "/X11/xkb").c_str(), 1);
     // Box64 日志: 0=关闭 (3=DEBUG 会产生海量 I/O)
     SetBox64PerfEnv();
 #ifdef __aarch64__
@@ -159,8 +340,31 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
                     + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir).c_str(), 1);
     setenv("TMPDIR", WINE_TMPDIR, 1);
     setenv("XDG_RUNTIME_DIR", WINE_PREFIX, 1);
+    setenv("WINE_MONO", "never", 1);
+    setenv("WINEDLLOVERRIDES", "mscoree,mshtml=", 0);
     setenv("WINEDEBUG", winedebug && winedebug[0] ? winedebug : default_winedebug_profile(), 1);
-    setenv("MIDI_SOUNDFONT_PATH", midiSoundfontPath, 1);
+    setenv("MIDI_SOUNDFONT_PATH", midiSoundfontPath.c_str(), 1);
+}
+
+static void apply_entry_param_env_overrides(const std::vector<std::string>& envOverrides)
+{
+    for (const std::string& envLine : envOverrides)
+    {
+        size_t sep = envLine.find('=');
+        if (sep == std::string::npos || sep == 0)
+        {
+            OH_LOG_WARN(LOG_APP, "[WineChild] ignoring malformed __env token: %{public}s",
+                        envLine.c_str());
+            continue;
+        }
+
+        std::string key = envLine.substr(0, sep);
+        std::string value = envLine.substr(sep + 1);
+        setenv(key.c_str(), value.c_str(), 1);
+        if (key == "WINEHUA_BOOTSTRAP_PHASE")
+            OH_LOG_INFO(LOG_APP, "[WineChild] env override %{public}s=%{public}s",
+                        key.c_str(), value.c_str());
+    }
 }
 
 extern "C" void Main(NativeChildProcess_Args args)
@@ -180,8 +384,16 @@ extern "C" void Main(NativeChildProcess_Args args)
     char* argv[64];
     char* tok;
     const char *winedebug;
+    std::vector<std::string> envOverrides;
     while ((tok = strtok(nullptr, "|")) && argc < 63)
+    {
+        if (strncmp(tok, "__env=", 6) == 0)
+        {
+            envOverrides.emplace_back(tok + 6);
+            continue;
+        }
         argv[argc++] = tok;
+    }
     argv[argc] = nullptr;
 
     OH_LOG_INFO(LOG_APP, "[WineChild] homeDir=%{public}s binDir=%{public}s argc=%{public}d argv[0]=%{public}s",
@@ -208,8 +420,12 @@ extern "C" void Main(NativeChildProcess_Args args)
     }
 
     // 3. 设置 Wine 环境变量
+    apply_entry_param_env_overrides(envOverrides);
     winedebug = select_winedebug_profile(argc, argv);
     setup_wine_env(binDir, homeDir, winedebug);
+    apply_entry_param_env_overrides(envOverrides);
+    if (is_sdl_audio_test_exe(argc, argv))
+        setenv("SDL_MIXER_DEBUG_MUSIC_INTERFACES", "1", 1);
 #ifdef PAD_MODE
     if (should_join_shell_desktop(argc, argv))
     {
@@ -233,6 +449,12 @@ extern "C" void Main(NativeChildProcess_Args args)
     chdir(binDir);
 
     // 启动 stderr reader：Wine 内部 write(2)/WINE_ERR → pipe → hilog + 文件
+    {
+        std::string launchCwd;
+        if (derive_launch_cwd(argc, argv, homeDir, &launchCwd) && chdir(launchCwd.c_str()) == 0)
+            OH_LOG_INFO(LOG_APP, "[WineChild] cwd=%{public}s", launchCwd.c_str());
+    }
+
     int errPipe[2];
     pipe(errPipe);
     dup2(errPipe[1], STDERR_FILENO);
@@ -329,20 +551,21 @@ extern "C" void Main(NativeChildProcess_Args args)
 }
 
 // wineserver 子进程入口
-// entryParams: "homeDir|binDir|wineserver|-f"... (homeDir 跳过)
+// entryParams: "homeDir|binDir|wineserver|-f"...
 extern "C" void WineserverMain(NativeChildProcess_Args args)
 {
     OH_LOG_INFO(LOG_APP, "[WineChild] WineserverMain() ENTER pid=%{public}d", getpid());
 
     const char* ep = args.entryParams ? args.entryParams : "";
     char* buf = strdup(ep);
-    strtok(buf, "|");              // skip homeDir
+    char* homeDir = strtok(buf, "|");
     char* binDir = strtok(nullptr, "|");
     if (!binDir) { free(buf); return; }
 
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step1: setting env...");
-    setenv("WINEPREFIX", WINE_PREFIX, 1);
-    setenv("WINEDEBUG", "-all", 1);
+    setup_wine_env(binDir, homeDir, default_winedebug_profile());
+    OH_LOG_INFO(LOG_APP, "[WineChild] ws env home=%{public}s bin=%{public}s",
+                homeDir ? homeDir : "(null)", binDir);
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step2: mkdir...");
     mkdir(WINE_PREFIX, 0755);
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step3: chdir(%{public}s)...", binDir);

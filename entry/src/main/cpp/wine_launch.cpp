@@ -58,6 +58,186 @@ static bool IsWineserverSocketReady() {
     return found;
 }
 
+static bool FileHasData(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+static bool DirExists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool IsWinePrefixInitialized() {
+    return FileHasData(WINE_PREFIX "/system.reg") &&
+           FileHasData(WINE_PREFIX "/user.reg") &&
+           DirExists(WINE_PREFIX "/drive_c/windows/system32") &&
+           DirExists(WINE_PREFIX "/drive_c/users");
+}
+
+static void RemovePathRecursive(const std::string& path)
+{
+    struct stat st;
+
+    if (lstat(path.c_str(), &st) != 0) return;
+    if (!S_ISDIR(st.st_mode))
+    {
+        unlink(path.c_str());
+        return;
+    }
+
+    DIR* dir = opendir(path.c_str());
+    if (!dir) return;
+
+    while (dirent* entry = readdir(dir))
+    {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        RemovePathRecursive(path + "/" + entry->d_name);
+    }
+    closedir(dir);
+    rmdir(path.c_str());
+}
+
+static void ClearStaleWineserverState()
+{
+    const std::string wineserverDir = WINE_PREFIX "/.wineserver";
+
+    if (DirExists(wineserverDir.c_str()))
+    {
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] clearing stale wineserver state before explorer");
+        RemovePathRecursive(wineserverDir);
+    }
+}
+
+static bool HasRuntimeFileExtension(const char* name)
+{
+    const char* dot = strrchr(name, '.');
+    if (!dot) return false;
+    return !strcasecmp(dot, ".dll") ||
+           !strcasecmp(dot, ".drv") ||
+           !strcasecmp(dot, ".sys") ||
+           !strcasecmp(dot, ".exe");
+}
+
+static bool EnsureDir(const std::string& path, mode_t mode)
+{
+    if (DirExists(path.c_str())) return true;
+    if (mkdir(path.c_str(), mode) == 0 || errno == EEXIST) return DirExists(path.c_str());
+    OH_LOG_ERROR(LOG_APP, "[Launch-Async] mkdir %{public}s failed: %{public}s",
+                 path.c_str(), strerror(errno));
+    return false;
+}
+
+static bool EnsureDirRecursive(const std::string& path, mode_t mode)
+{
+    if (path.empty() || path == "/") return true;
+    if (DirExists(path.c_str())) return true;
+
+    size_t slash = path.find_last_of('/');
+    if (slash != std::string::npos && slash > 0)
+    {
+        if (!EnsureDirRecursive(path.substr(0, slash), mode)) return false;
+    }
+    return EnsureDir(path, mode);
+}
+
+static bool CopyFileIfNeeded(const std::string& src, const std::string& dst)
+{
+    struct stat srcSt;
+    struct stat dstSt;
+    if (stat(src.c_str(), &srcSt) != 0 || !S_ISREG(srcSt.st_mode)) return false;
+    if (stat(dst.c_str(), &dstSt) == 0 && S_ISREG(dstSt.st_mode) && dstSt.st_size == srcSt.st_size)
+        return true;
+
+    int inFd = open(src.c_str(), O_RDONLY);
+    if (inFd < 0)
+    {
+        OH_LOG_ERROR(LOG_APP, "[Launch-Async] open src %{public}s failed: %{public}s",
+                     src.c_str(), strerror(errno));
+        return false;
+    }
+
+    int outFd = open(dst.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (outFd < 0)
+    {
+        OH_LOG_ERROR(LOG_APP, "[Launch-Async] open dst %{public}s failed: %{public}s",
+                     dst.c_str(), strerror(errno));
+        close(inFd);
+        return false;
+    }
+
+    char buffer[64 * 1024];
+    bool ok = true;
+    ssize_t n;
+    while ((n = read(inFd, buffer, sizeof(buffer))) > 0)
+    {
+        char* p = buffer;
+        ssize_t remaining = n;
+        while (remaining > 0)
+        {
+            ssize_t w = write(outFd, p, remaining);
+            if (w < 0)
+            {
+                ok = false;
+                OH_LOG_ERROR(LOG_APP, "[Launch-Async] write dst %{public}s failed: %{public}s",
+                             dst.c_str(), strerror(errno));
+                break;
+            }
+            p += w;
+            remaining -= w;
+        }
+        if (!ok) break;
+    }
+    if (n < 0)
+    {
+        ok = false;
+        OH_LOG_ERROR(LOG_APP, "[Launch-Async] read src %{public}s failed: %{public}s",
+                     src.c_str(), strerror(errno));
+    }
+
+    close(outFd);
+    close(inFd);
+    if (!ok) unlink(dst.c_str());
+    return ok;
+}
+
+static bool EnsureWow64Files(const std::string& binDir)
+{
+    const std::string srcDir = binDir + "/i386-windows";
+    const std::string dstDir = WINE_PREFIX "/drive_c/windows/syswow64";
+
+    DIR* src = opendir(srcDir.c_str());
+    if (!src)
+    {
+        OH_LOG_ERROR(LOG_APP, "[Launch-Async] wow64 source missing %{public}s: %{public}s",
+                     srcDir.c_str(), strerror(errno));
+        return false;
+    }
+    if (!EnsureDirRecursive(dstDir, 0777))
+    {
+        closedir(src);
+        return false;
+    }
+
+    int total = 0;
+    int copied = 0;
+    int failed = 0;
+    while (dirent* entry = readdir(src))
+    {
+        if (entry->d_name[0] == '.' || !HasRuntimeFileExtension(entry->d_name)) continue;
+        total++;
+        std::string srcPath = srcDir + "/" + entry->d_name;
+        std::string dstPath = dstDir + "/" + entry->d_name;
+        if (CopyFileIfNeeded(srcPath, dstPath)) copied++;
+        else failed++;
+    }
+    closedir(src);
+
+    OH_LOG_INFO(LOG_APP, "[Launch-Async] wow64 syswow64 total=%{public}d ok=%{public}d failed=%{public}d",
+                total, copied, failed);
+    return total > 0 && failed == 0;
+}
+
 #ifdef PAD_MODE
 static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     // 通过 fdList 传递 audio bootstrap fd (仅 explorer 需要音频)
@@ -65,6 +245,8 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     audioFdNode.fdName = const_cast<char*>("wine_audio_bootstrap");
     audioFdNode.fd = audioBootstrapFd;
     audioFdNode.next = nullptr;
+
+    ClearStaleWineserverState();
 
     // -- wineserver via NCP --
     {
@@ -97,15 +279,21 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     StartBrokerServer();
     setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
 
-    // -- wineboot --init --
-    bool prefixReady = []() {
-        DIR* d = opendir(WINE_PREFIX "/drive_c");
-        if (d) { closedir(d); return true; }
+    if (!EnsureWow64Files(p->winehuaBin))
+    {
+        OH_LOG_ERROR(LOG_APP, "[Launch-Async] wow64 syswow64 setup failed before wineboot, abort");
+        if (gStateTsfn)
+            napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
         return false;
-    }();
+    }
+
+    // -- wineboot --init --
+    bool prefixReady = IsWinePrefixInitialized();
 
     if (!prefixReady) {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix not ready, running wineboot --init...");
+        auto* ws = WaylandServer::GetInstance();
+        ws->SetDesktopRootRecognitionEnabled(false);
 #ifdef __aarch64__
         std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|wineboot|--init";
 #else
@@ -119,30 +307,25 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         auto ret = OH_Ability_StartNativeChildProcess(
             "libwine_child.so:Main", childArgs, options, &childPid);
         if (ret != NCP_NO_ERROR) {
+            ws->SetDesktopRootRecognitionEnabled(true);
             OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot FAILED ret=%{public}d", (int)ret);
             if (gStateTsfn)
                 napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
             return false;
         }
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot started, pid=%{public}d", childPid);
-        if (!WaitFor("wine prefix drive_c", []() {
-            DIR* d = opendir(WINE_PREFIX "/drive_c");
-            if (d) { closedir(d); return true; }
-            return false;
-        }, 30000, 200)) {
-            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot drive_c timeout, abort");
+        if (!WaitFor("wine prefix initialization", IsWinePrefixInitialized, 60000, 500)) {
+            ws->SetDesktopRootRecognitionEnabled(true);
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot prefix initialization timeout, abort");
             if (gStateTsfn)
                 napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
             return false;
         }
-        char procPath[64];
-        snprintf(procPath, sizeof(procPath), "/proc/%d", childPid);
-        for (int i = 0; i < 120; i++) {
-            if (access(procPath, F_OK) != 0) break;
-            usleep(500000);
-        }
+        ws->SetDesktopRootRecognitionEnabled(true);
+        ws->PromotePendingDesktopRoot();
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot completed");
     } else {
+        WaylandServer::GetInstance()->SetDesktopRootRecognitionEnabled(true);
         OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix already initialized, skipping wineboot");
     }
 

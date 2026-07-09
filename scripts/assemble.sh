@@ -4,6 +4,27 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
+ensure_guest_gfx_bundle() {
+    local bundle="$BUILD_DIR/guest_gfx/$NATIVE_ARCH"
+    local install="$BUILD_DIR/guest_gfx_install/$NATIVE_ARCH"
+
+    if [ -d "$bundle/lib" ]; then
+        echo "$bundle"
+        return 0
+    fi
+
+    if [ -d "$install/lib" ]; then
+        log "  guest_gfx: packaging existing install tree ($NATIVE_ARCH)"
+        NATIVE_ARCH="$NATIVE_ARCH" bash "$SCRIPT_DIR/build_guest_gfx.sh" \
+            --install-root "$install" \
+            --output-root "$bundle"
+        echo "$bundle"
+        return 0
+    fi
+
+    return 1
+}
+
 # ============================================================
 # Pad 模式: 无 HNP — 文件分流到 libs/ + rawfile/
 # ============================================================
@@ -19,6 +40,7 @@ assemble_pad() {
     mkdir -p "$wine_data/share/wine/fonts"
     mkdir -p "$wine_data/share/wine/winmd"
     mkdir -p "$wine_data/share/X11"
+    mkdir -p "$wine_data/audio"
 
     # -- 1. 原生 .so → libs/$NATIVE_ARCH/ (由各 build 脚本完成) --
     mkdir -p "$NATIVE_LIBS"
@@ -99,8 +121,24 @@ assemble_pad() {
         _pick_arm64_native "libxkbregistry.so.0" "libxkbregistry.so"
         _pick_arm64_native "libxml2.so.2"        "libxml2.so"
         _pick_arm64_native "libwayland-client.so.0" "libwayland-client.so"
+        _pick_arm64_native "libwayland-egl.so.1" "libwayland-egl.so"
         _pick_arm64_native "libwayland-server.so.0" "libwayland-server.so"
         _pick_arm64_native "libffi.so.8"         "libffi.so"
+        if [ -f "$SYSROOT/usr/lib/$NATIVE_TARGET/libEGL.so" ]; then
+            cp "$SYSROOT/usr/lib/$NATIVE_TARGET/libEGL.so" "$NATIVE_LIBS/libEGL.so"
+            cp "$SYSROOT/usr/lib/$NATIVE_TARGET/libEGL.so" "$NATIVE_LIBS/libEGL.so.1"
+        else
+            warn "ARM64 native libEGL.so not found; Box64 native EGL bridge may fail"
+        fi
+
+        _require_arm64_native() {
+            local soname="$1"
+            [ -f "$NATIVE_LIBS/$soname" ] || err "ARM64 原生库 $soname 缺失，请先执行: NATIVE_ARCH=arm64-v8a bash scripts/build_native.sh"
+        }
+        for so in libfreetype.so.6 libxkbcommon.so.0 libxkbregistry.so.0 libxml2.so.2 \
+                  libwayland-client.so.0 libwayland-egl.so.1 libwayland-server.so.0 libffi.so.8 libEGL.so.1; do
+            _require_arm64_native "$so"
+        done
 
         # box64.so → libs/arm64-v8a/ (ARM64 原生翻译器)
         if [ -f "$BUILD_DIR/box64_build/box64.so" ]; then
@@ -177,6 +215,17 @@ assemble_pad() {
     done
     log "  x86_64-windows → $(ls "$wine_data/bin/x86_64-windows" | wc -l) files"
 
+    # strip PE 调试符号 (DWARF .debug_*, 缩减 ~50%)
+    log "  stripping debug symbols..."
+    if command -v x86_64-w64-mingw32-strip &>/dev/null; then
+        for f in "$wine_data/bin/x86_64-windows/"*.dll "$wine_data/bin/x86_64-windows/"*.drv "$wine_data/bin/x86_64-windows/"*.exe "$wine_data/bin/x86_64-windows/"*.sys; do
+            [ -f "$f" ] && x86_64-w64-mingw32-strip "$f" 2>/dev/null
+        done
+        log "  64-bit PE stripped"
+    else
+        warn "  x86_64-w64-mingw32-strip not found, skipping strip"
+    fi
+
     # i386-windows/ (32-bit PE DLL for WoW64)
     # 只取核心 DLL (~20 个), 其余 600+ 个 (d3dx9/msi/media等) 暂不需要.
     # 完整列表在 build/wine-i386-pe/dlls/*/i386-windows/*.dll.
@@ -195,12 +244,22 @@ assemble_pad() {
         done
         log "  i386-windows → $(ls "$wine_data/bin/i386-windows" | wc -l) files (ALL)"
 
-        # 32-bit exe stubs (notepad 等), 放在 bin/i386-windows/.
+        # 32-bit exe stubs, 放在 bin/i386-windows/.
+        # rundll32 is required for repairing Wow64 COM registration in existing prefixes.
         # Wine 通过 WINEARCH 或 exe header 判断 32/64, 自动加载对应 DLL.
         for exe in "$BUILD_DIR/wine-i386-pe/programs/notepad/i386-windows/notepad.exe" \
-                   "$BUILD_DIR/wine-i386-pe/programs/winecfg/i386-windows/winecfg.exe"; do
+                   "$BUILD_DIR/wine-i386-pe/programs/winecfg/i386-windows/winecfg.exe" \
+                   "$BUILD_DIR/wine-i386-pe/programs/rundll32/i386-windows/rundll32.exe"; do
             [ -f "$exe" ] && cp "$exe" "$wine_data/bin/i386-windows/"
         done
+        if command -v i686-w64-mingw32-strip &>/dev/null; then
+            for f in "$wine_data/bin/i386-windows/"*.dll "$wine_data/bin/i386-windows/"*.drv "$wine_data/bin/i386-windows/"*.exe "$wine_data/bin/i386-windows/"*.sys; do
+                [ -f "$f" ] && i686-w64-mingw32-strip "$f" 2>/dev/null
+            done
+            log "  32-bit PE stripped"
+        else
+            warn "  i686-w64-mingw32-strip not found, skipping strip"
+        fi
         log "  i386 exe stubs → $(ls "$wine_data/bin/i386-windows"/*.exe 2>/dev/null | wc -l) files"
     else
         warn "  i386-windows: SKIP (build/wine-i386-pe not found)"
@@ -234,15 +293,36 @@ HKLM,%FontSubStr%,"Courier New",,"Noto Sans Mono"' "$wine_data/share/wine/wine.i
     # XKB
     if [ -d "$SYSROOT_EXT_SHARE/X11/xkb" ]; then
         cp -r "$SYSROOT_EXT_SHARE/X11/xkb" "$wine_data/share/X11/"
+    elif [ -d "$ROOT/thirdparty/xkeyboard-config/rules" ]; then
+        mkdir -p "$wine_data/share/X11/xkb"
+        cp -r "$ROOT/thirdparty/xkeyboard-config/compat" \
+              "$ROOT/thirdparty/xkeyboard-config/geometry" \
+              "$ROOT/thirdparty/xkeyboard-config/keycodes" \
+              "$ROOT/thirdparty/xkeyboard-config/rules" \
+              "$ROOT/thirdparty/xkeyboard-config/symbols" \
+              "$ROOT/thirdparty/xkeyboard-config/types" \
+              "$wine_data/share/X11/xkb/"
+        log "  xkb: copied from thirdparty/xkeyboard-config"
+    else
+        err "xkb 数据未找到 ($SYSROOT_EXT_SHARE/X11/xkb 或 thirdparty/xkeyboard-config)"
     fi
 
     # guest GPU 库 (Mesa/VirGL, 供 GraphicsBroker 注入到 Wine LD_LIBRARY_PATH)
-    if [ -d "$BUILD_DIR/guest_gfx/$NATIVE_ARCH/lib" ]; then
+    local guest_gfx_bundle
+    if guest_gfx_bundle="$(ensure_guest_gfx_bundle)"; then
         mkdir -p "$wine_data/bin/guest_gfx"
-        cp -a "$BUILD_DIR/guest_gfx/$NATIVE_ARCH/"* "$wine_data/bin/guest_gfx/"
+        cp -a "$guest_gfx_bundle/"* "$wine_data/bin/guest_gfx/"
         log "  guest_gfx ($NATIVE_ARCH): $(ls "$wine_data/bin/guest_gfx/lib"/*.so* 2>/dev/null | wc -l) .so files"
     else
         log "  guest_gfx: SKIP (build/guest_gfx/$NATIVE_ARCH/lib not found)"
+    fi
+
+    local sf2="$WINEHUA/entry/src/main/resources/rawfile/winehua-gm.sf2"
+    if [ -f "$sf2" ]; then
+        cp "$sf2" "$wine_data/audio/winehua-gm.sf2"
+        log "  MIDI soundfont → wine-data/audio/winehua-gm.sf2 ($(du -h "$sf2" | cut -f1))"
+    else
+        warn "  MIDI soundfont not found: $sf2"
     fi
 
     # -- 3. 打包 zip → rawfile (不带 wine-data/ 前缀) --
@@ -420,9 +500,10 @@ else
 fi
 
 # ---- guest GPU 库 (Mesa/VirGL, 供 GraphicsBroker 注入到 Wine LD_LIBRARY_PATH) ----
-if [ -d "$BUILD_DIR/guest_gfx/$NATIVE_ARCH/lib" ]; then
+guest_gfx_bundle=""
+if guest_gfx_bundle="$(ensure_guest_gfx_bundle)"; then
     mkdir -p "$BIN/guest_gfx"
-    cp -a "$BUILD_DIR/guest_gfx/$NATIVE_ARCH/"* "$BIN/guest_gfx/"
+    cp -a "$guest_gfx_bundle/"* "$BIN/guest_gfx/"
     log "  guest_gfx ($NATIVE_ARCH): $(ls "$BIN/guest_gfx/lib"/*.so* 2>/dev/null | wc -l) .so files"
 else
     log "  guest_gfx: SKIP (build/guest_gfx/$NATIVE_ARCH/lib not found)"

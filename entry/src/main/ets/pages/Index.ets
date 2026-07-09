@@ -1,6 +1,6 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
-import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { zlib } from '@kit.BasicServicesKit';
 
 const DOMAIN = 0x0000;
@@ -16,9 +16,7 @@ const WINE_ROOT_PAD = `${FILES_BASE}/wine`;
 const WINE_BIN_PAD = `${WINE_ROOT_PAD}/bin`;
 const WINE_LIB_PAD = `${WINE_BIN_PAD}/x86_64-unix`;
 const WINE_RUNTIME_STAMP = `${FILES_BASE}/wine-data.stamp`;
-const MIDI_SOUNDFONT_RAW = 'winehua-gm.sf2';
-const MIDI_SOUNDFONT_DIR = `${FILES_BASE}/audio`;
-const MIDI_SOUNDFONT_PATH = `${MIDI_SOUNDFONT_DIR}/winehua-gm.sf2`;
+const Z_HOME = '/storage/Users/currentUser/Download/app.hackeris.winehua/';
 
 // 运行时检测: 如果 HNP 路径不存在则使用 Pad 路径
 let WINE_BIN = WINE_BIN_PC;
@@ -81,6 +79,18 @@ function writeTextFile(path: string, text: string): void {
   }
 }
 
+function ensureDirectory(path: string): boolean {
+  try {
+    if (!pathExists(path)) {
+      fs.mkdirSync(path, true);
+    }
+    return pathExists(path);
+  } catch (e) {
+    hilog.warn(DOMAIN, 'wine', 'mkdir failed path=%{public}s err=%{public}s', path, JSON.stringify(e));
+    return false;
+  }
+}
+
 function removePathRecursive(path: string): void {
   let st: fs.Stat;
   try {
@@ -121,7 +131,10 @@ struct Index {
   @State entries: string[] = [];
   @State dirStack: string[] = [];
   @State processList: ProcessInfo[] = [];
+  @State initOverlayVisible: boolean = false;
+  @State initOverlayText: string = '';
   private hasRawfileWineData: boolean = false;
+  private zHome: string = Z_HOME;
   _wow64Done: boolean = false;
 
   aboutToAppear(): void {
@@ -137,33 +150,34 @@ struct Index {
       const stateMsg = colonIdx >= 0 ? s.substring(colonIdx + 1) : s;
 
       if (stateMsg == 'wineserver-starting' || stateMsg == 'wineboot-starting') {
-        this.statusText = 'Wine 正在初始化...';
+        this.setInitStatus('Wine 正在初始化...', true);
       } else if (stateMsg == 'wine-ready') {
-        this.statusText = '已就绪';
+        this.setInitStatus('已就绪', false);
         // wineboot 可能还在后台初始化 prefix，轮询等待 drive_c 就绪
         this.waitForPrefix();
         // 一次性: 填充 syswow64/ (OHOS 沙箱不支持 symlink, wineboot Wow64Install 失败)
         if (!this._wow64Done) {
-          this._wow64Done = true;
           setTimeout(() => { this.setupWow64(); }, 3000);
         }
       } else if (stateMsg == 'wine-running') {
-        this.statusText = '运行中';
+        this.setInitStatus('运行中', false);
         this.refreshProcessList();
       } else if (stateMsg == 'exited') {
         this.refreshProcessList();
         const running = this.processList.filter(p => p.state === 'running');
         if (running.length === 0) {
-          this.statusText = '已就绪';
+          this.setInitStatus('已就绪', false);
         }
       } else if (stateMsg == 'wine-failed') {
-        this.statusText = '启动失败';
+        this.setInitStatus('启动失败', false);
         this.refreshProcessList();
       }
     });
     this.refreshPrefix();
     // 下一帧自动初始化 (避免阻塞 UI 首次渲染)
-    setTimeout(() => this.doInit(), 0);
+    setTimeout((): void => {
+      this.doInit();
+    }, 300);
   }
 
   private detectRawfileWineData(): boolean {
@@ -178,6 +192,12 @@ struct Index {
       hilog.info(DOMAIN, 'wine', 'rawfile: wine-data.zip not packaged');
       return false;
     }
+  }
+
+  private setInitStatus(text: string, visible: boolean): void {
+    this.statusText = text;
+    this.initOverlayText = text;
+    this.initOverlayVisible = visible;
   }
 
   // Pad: 从 rawfile 取出 wine-data.zip → zlib.decompressFile 解压到 files/wine/
@@ -261,61 +281,9 @@ struct Index {
     }
   }
 
-  private async ensureMidiSoundFont(): Promise<void> {
-    hilog.info(DOMAIN, 'wine', 'midi-sf2: check %{public}s', MIDI_SOUNDFONT_PATH);
-    try {
-      const ctx = getContext(this);
-      const rm = ctx.resourceManager;
-      let dst: fs.File | undefined = undefined;
-      fs.mkdirSync(MIDI_SOUNDFONT_DIR, true);
-
-      const rawFd = rm.getRawFdSync(MIDI_SOUNDFONT_RAW);
-      try {
-        try {
-          const st = fs.statSync(MIDI_SOUNDFONT_PATH);
-          if (st.size === rawFd.length) {
-            hilog.info(DOMAIN, 'wine', 'midi-sf2: already available');
-            return;
-          }
-          hilog.warn(DOMAIN, 'wine', 'midi-sf2: size mismatch existing=%{public}d raw=%{public}d, recopy',
-            st.size, rawFd.length);
-        } catch (_) {}
-
-        dst = fs.openSync(MIDI_SOUNDFONT_PATH,
-          fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
-        const chunkSize = 1024 * 1024;
-        const buf = new ArrayBuffer(chunkSize);
-        let pos = rawFd.offset;
-        const end = rawFd.offset + rawFd.length;
-        let totalWritten = 0;
-
-        while (pos < end) {
-          const toRead = Math.min(chunkSize, end - pos);
-          const n = fs.readSync(rawFd.fd, buf, { offset: pos, length: toRead });
-          if (n <= 0) {
-            break;
-          }
-          fs.writeSync(dst.fd, buf, { length: n });
-          pos += n;
-          totalWritten += n;
-        }
-
-        hilog.info(DOMAIN, 'wine', 'midi-sf2: copied %{public}d bytes', totalWritten);
-      } finally {
-        if (dst) {
-          fs.closeSync(dst);
-        }
-        rm.closeRawFdSync(MIDI_SOUNDFONT_RAW);
-      }
-    } catch (e) {
-      hilog.warn(DOMAIN, 'wine', 'midi-sf2 copy failed: %{public}s', JSON.stringify(e));
-    }
-  }
-
   private refreshPrefix = (): void => {
     try {
-      let names = fs.listFileSync(DRIVE_C);
-      this.prefixReady = names.length > 0;
+      this.prefixReady = testNapi.checkWinePrefix();
       if (this.prefixReady) {
         this.curDir = DRIVE_C;
         this.dirStack = [];
@@ -329,20 +297,22 @@ struct Index {
     }
   }
 
-  // wineboot 后台异步初始化 prefix，轮询直到 drive_c 有内容
+  // wineboot 后台异步初始化 prefix，轮询直到 registry 和核心目录完整
   private waitForPrefix = async (): Promise<void> => {
     for (let i = 0; i < 90; i++) {
       try {
-        let names = fs.listFileSync(DRIVE_C);
-        if (names.length > 0) {
+        if (testNapi.checkWinePrefix()) {
           this.prefixReady = true;
+          this.initOverlayVisible = false;
           this.curDir = DRIVE_C;
           this.dirStack = [];
           this.listDir(DRIVE_C);
           return;
         }
       } catch (e) { /* drive_c 还没出现 */ }
-      await new Promise<void>(r => setTimeout(r, 1000));
+      await new Promise<void>((resolve: () => void): void => {
+        setTimeout(resolve, 1000);
+      });
     }
     // 超时，仍然尝试刷新一次
     this.refreshPrefix();
@@ -354,14 +324,30 @@ struct Index {
     try {
       let syswow64 = FILES_BASE + '/.wine/drive_c/windows/syswow64';
       let srcDir = WINE_BIN + '/i386-windows';
-      fs.mkdirSync(syswow64, true);
+      if (!pathExists(syswow64)) {
+        fs.mkdirSync(syswow64, true);
+      }
       let dllFiles = fs.listFileSync(srcDir);
       let count = 0;
       for (let f of dllFiles) {
         if (f.endsWith('.dll') || f.endsWith('.drv') || f.endsWith('.sys') || f.endsWith('.exe')) {
-          fs.copyFileSync(srcDir + '/' + f, syswow64 + '/' + f);
+          let src = srcDir + '/' + f;
+          let dst = syswow64 + '/' + f;
+          try {
+            const srcStat = fs.statSync(src);
+            const dstStat = fs.statSync(dst);
+            if (srcStat.size === dstStat.size) {
+              count++;
+              continue;
+            }
+            fs.unlinkSync(dst);
+          } catch (_) {}
+          fs.copyFileSync(src, dst);
           count++;
         }
+      }
+      if (count > 0) {
+        this._wow64Done = true;
       }
       hilog.info(DOMAIN, 'wow64', 'syswow64 populated: %{public}d DLLs', count);
     } catch (e) {
@@ -433,10 +419,10 @@ struct Index {
   }
 
   private doInit = async (): Promise<void> => {
-    // HOME 目录 (Z: 映射目标), 通过 DocumentViewPicker 获取 Download 路径
-    const documentViewPicker = new picker.DocumentViewPicker();
-    let documentSaveResult = await documentViewPicker.save({ pickerMode: picker.DocumentPickerMode.DOWNLOAD });
-    const zHome = new fileUri.FileUri(documentSaveResult[0]).path + '/';
+    // HOME 目录 (Z: 映射目标)。Pad 自动启动不能依赖 DocumentPicker，否则首启链路会被系统 UI 阻塞。
+    this.zHome = Z_HOME;
+    ensureDirectory(this.zHome);
+    hilog.info(DOMAIN, 'wine', 'auto-init: zHome=%{public}s', this.zHome);
     // Pad: 检查是否需要解压 wine 数据文件
     let isPC = false;
     if (this.hasRawfileWineData) {
@@ -447,42 +433,42 @@ struct Index {
     }
     hilog.info(DOMAIN, 'wine', 'auto-init: isPC=%{public}s', String(isPC));
     if (!isPC) {
-      this.statusText = '解压数据...';
+      this.setInitStatus('解压数据...', true);
       hilog.info(DOMAIN, 'wine', 'auto-init: extracting wine data...');
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      await new Promise<void>((resolve) => setTimeout(resolve, 300));
       await this.extractWineData();
     }
-    await this.ensureMidiSoundFont();
     hilog.info(DOMAIN, 'wine', 'auto-init: starting Wine...');
-    this.statusText = '启动服务...';
+    this.setInitStatus('启动服务...', true);
     const ok: boolean = testNapi.startServer(SOCK);
     if (!ok) {
-      this.statusText = '启动服务失败';
+      this.setInitStatus('启动服务失败', false);
       return;
     }
-    testNapi.launchClient(BOX64, [], SOCK, `${BIN_DIR}:${WINE_LIB}`, zHome);
+    testNapi.launchClient(BOX64, [], SOCK, `${BIN_DIR}:${WINE_LIB}`, this.zHome);
   }
 
   private doReset = (): void => {
-    this.statusText = '正在清空...';
+    this.setInitStatus('正在清空...', true);
     try {
       testNapi.resetWinePrefix();
       this.state = 'idle';
       this.prefixReady = false;
       this.processList = [];
       this.entries = [];
-      this.statusText = '已清空';
+      this.setInitStatus('已清空', false);
       setTimeout(() => this.doInit(), 500);
     } catch (e) {
       hilog.error(DOMAIN, 'wine', 'reset error: %{public}s', JSON.stringify(e));
-      this.statusText = '清空失败';
+      this.setInitStatus('清空失败', false);
     }
   }
 
   private doRun = (name: string): void => {
     this.statusText = '启动中...';
     let exePath = this.curDir + '/' + name;
-    testNapi.runWineExe(BIN_DIR, SOCK, `${WINE_BIN}:${WINE_LIB}`, exePath);
+    ensureDirectory(this.zHome);
+    testNapi.runWineExe(BIN_DIR, SOCK, `${WINE_BIN}:${WINE_LIB}`, exePath, this.zHome);
   }
 
   private relPath = (): string => {
@@ -491,6 +477,7 @@ struct Index {
   }
 
   build() {
+    Stack() {
     Row() {
       // ============================================================
       //  侧边栏
@@ -674,6 +661,33 @@ struct Index {
       }
       .layoutWeight(1).height('100%')
       .backgroundColor('#111')
+    }
+    .width('100%').height('100%')
+    if (this.initOverlayVisible && !this.prefixReady) {
+      Column() {
+        LoadingProgress()
+          .width(42)
+          .height(42)
+          .color('#7db8ff')
+          .margin({ bottom: 18 })
+        Text('正在准备 Wine')
+          .fontSize(20)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#f4f7fb')
+          .margin({ bottom: 8 })
+        Text(this.initOverlayText)
+          .fontSize(15)
+          .fontColor('#aeb8c6')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .width(360)
+      .padding({ left: 28, right: 28, top: 26, bottom: 26 })
+      .backgroundColor('#20242b')
+      .borderRadius(8)
+      .alignItems(HorizontalAlign.Center)
+      .shadow({ radius: 18, color: '#66000000', offsetX: 0, offsetY: 8 })
+    }
     }
     .width('100%').height('100%')
   }

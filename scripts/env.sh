@@ -96,16 +96,19 @@ HOST_TOOLS_DIR="$BUILD_DIR/host-tools"
 
 ensure_wayland_scanner() {
     if [ -n "${WAYLAND_SCANNER:-}" ] && [ -x "$WAYLAND_SCANNER" ]; then
+        ensure_wayland_scanner_pc
         return 0
     fi
     if command -v wayland-scanner >/dev/null 2>&1; then
         WAYLAND_SCANNER="$(command -v wayland-scanner)"
         export WAYLAND_SCANNER
+        ensure_wayland_scanner_pc
         return 0
     fi
     if [ -x "$HOST_TOOLS_DIR/bin/wayland-scanner" ]; then
         WAYLAND_SCANNER="$HOST_TOOLS_DIR/bin/wayland-scanner"
         export WAYLAND_SCANNER
+        ensure_wayland_scanner_pc
         return 0
     fi
 
@@ -126,6 +129,23 @@ ensure_wayland_scanner() {
     fi
     WAYLAND_SCANNER="$HOST_TOOLS_DIR/bin/wayland-scanner"
     export WAYLAND_SCANNER
+    ensure_wayland_scanner_pc
+}
+
+ensure_wayland_scanner_pc() {
+    [ -n "${WAYLAND_SCANNER:-}" ] || return 0
+    mkdir -p "$HOST_TOOLS_DIR/lib/pkgconfig"
+    cat > "$HOST_TOOLS_DIR/lib/pkgconfig/wayland-scanner.pc" << EOF
+prefix=$HOST_TOOLS_DIR
+bindir=\${prefix}/bin
+datadir=\${prefix}/share
+pkgdatadir=\${datadir}/wayland
+
+Name: Wayland Scanner
+Description: Wayland scanner
+Version: 1.22.0
+wayland_scanner=$WAYLAND_SCANNER
+EOF
 }
 
 # 生成 meson cross file (路径依赖 ROOT, 不能硬编码)

@@ -157,26 +157,27 @@ static napi_value LaunchClient(napi_env env, napi_callback_info info) {
 
 napi_value RunWineExe(napi_env env, napi_callback_info info);
 
-// -- NAPI: checkWinePrefix -- 检测 .wine/drive_c 是否已初始化且有内容 --
-static napi_value CheckWinePrefix(napi_env env, napi_callback_info info) {
-    const char *prefix = getenv("WINEPREFIX");
-    if (!prefix) prefix = WINE_PREFIX;
-    char drive_c[512];
-    snprintf(drive_c, sizeof(drive_c), "%s/drive_c", prefix);
+static bool FileHasData(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+}
 
-    bool ok = false;
-    DIR *d = opendir(drive_c);
-    if (d) {
-        struct dirent *e;
-        int count = 0;
-        while ((e = readdir(d)) != nullptr) {
-            if (e->d_name[0] == '.') continue;
-            count++;
-        }
-        closedir(d);
-        ok = (count > 0);
-    }
-    OH_LOG_INFO(LOG_APP, "[Wine] checkWinePrefix: drive_c ready=%{public}s", ok ? "yes" : "no");
+static bool DirExists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool IsWinePrefixInitialized() {
+    return FileHasData(WINE_PREFIX "/system.reg") &&
+           FileHasData(WINE_PREFIX "/user.reg") &&
+           DirExists(WINE_PREFIX "/drive_c/windows/system32") &&
+           DirExists(WINE_PREFIX "/drive_c/users");
+}
+
+// -- NAPI: checkWinePrefix -- 检测 .wine 是否已完整初始化 --
+static napi_value CheckWinePrefix(napi_env env, napi_callback_info info) {
+    bool ok = IsWinePrefixInitialized();
+    OH_LOG_INFO(LOG_APP, "[Wine] checkWinePrefix: initialized=%{public}s", ok ? "yes" : "no");
     napi_value r;
     napi_get_boolean(env, ok, &r);
     return r;
