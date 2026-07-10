@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #undef LOG_TAG
@@ -239,6 +240,35 @@ static bool EnsureWow64Files(const std::string& binDir)
 }
 
 #ifdef PAD_MODE
+static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
+{
+    std::string sockDir = params.sockDir;
+    std::string wineBin = params.winehuaBin;
+
+    std::thread([sockDir, wineBin]() {
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] preparing GL env for desktop child processes");
+        auto& gb = winehua::GraphicsBroker::GetInstance();
+        gb.SetWineRuntimeBinaryDir(wineBin);
+        gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
+        gb.EnsureStarted(sockDir);
+
+        winehua::GraphicsBackendState state = gb.GetState();
+        if (state.active != winehua::GraphicsBackend::Virgl) {
+            OH_LOG_ERROR(LOG_APP,
+                         "[Launch-Async] desktop GL env unavailable: requested=%{public}s active=%{public}s error=%{public}s",
+                         winehua::GraphicsBroker::BackendName(state.requested),
+                         winehua::GraphicsBroker::BackendName(state.active),
+                         state.lastError.c_str());
+            return;
+        }
+
+        std::vector<std::string> env;
+        gb.AppendWineEnv(env);
+        SetBrokerSessionEnv(std::move(env));
+        LogGraphicsBackendStateForLaunch("DesktopSession");
+    }).detach();
+}
+
 static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
     // 通过 fdList 传递 audio bootstrap fd (仅 explorer 需要音频)
     NativeChildProcess_Fd audioFdNode;
@@ -276,6 +306,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-starting"), napi_tsfn_blocking);
 
     gBrokerHomeDir = p->homeDir;
+    ClearBrokerSessionEnv();
     StartBrokerServer();
     setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
 
@@ -351,7 +382,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
             "libwine_child.so:Main", exArgs, exOpts, &exPid);
         OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d ret=%{public}d",
                     exPid, (int)exRet);
+        if (exRet != NCP_NO_ERROR) return false;
     }
+    PrepareDesktopSessionGraphicsEnv(*p);
     return true;
 }
 #else

@@ -13,6 +13,7 @@
 #include "broker.h"
 #include "wait_utils.h"
 #include "wine_constants.h"
+#include "wine_env.h"
 #include "audio_broker.h"
 // 由 LaunchPadMode 在启动 Broker 前设置
 std::string gBrokerHomeDir;
@@ -25,6 +26,9 @@ std::string gBrokerHomeDir;
 #include <cstdlib>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <utility>
+#include <vector>
 #include <AbilityKit/native_child_process.h>
 
 #undef LOG_DOMAIN
@@ -36,6 +40,8 @@ std::string gBrokerHomeDir;
 static const char* kBrokerSocketPath = WINE_BROKER_SOCKET;
 
 static std::atomic<bool> gBrokerRunning{false};
+static std::mutex gBrokerSessionEnvMutex;
+static std::vector<std::string> gBrokerSessionEnv;
 
 static bool EntryParamsAlreadyHasHomePrefix(const char* entryParams)
 {
@@ -135,6 +141,19 @@ static void HandleRequest(int conn_fd)
     std::string fullParams = (!gBrokerHomeDir.empty() && !EntryParamsAlreadyHasHomePrefix(entryParamsRaw))
                             ? (gBrokerHomeDir + "|" + entryParamsRaw)
                             : entryParamsRaw;
+    std::vector<std::string> sessionEnv;
+    {
+        std::lock_guard<std::mutex> lock(gBrokerSessionEnvMutex);
+        sessionEnv = gBrokerSessionEnv;
+    }
+    if (!sessionEnv.empty()) {
+        size_t appended = AppendMissingEntryParamsEnvOverrides(fullParams, sessionEnv);
+        if (appended > 0) {
+            OH_LOG_INFO(LOG_APP,
+                        "[Broker] appended missing session env overrides count=%{public}zu/%{public}zu",
+                        appended, sessionEnv.size());
+        }
+    }
     char* entryParamsCopy = strdup(fullParams.c_str());
 
     NativeChildProcess_Fd fdNode = {};
@@ -191,6 +210,25 @@ static void HandleRequest(int conn_fd)
     }
 
     close(conn_fd);
+}
+
+void SetBrokerSessionEnv(std::vector<std::string> env)
+{
+    size_t count = env.size();
+    {
+        std::lock_guard<std::mutex> lock(gBrokerSessionEnvMutex);
+        gBrokerSessionEnv = std::move(env);
+    }
+    OH_LOG_INFO(LOG_APP, "[Broker] session env set count=%{public}zu", count);
+}
+
+void ClearBrokerSessionEnv()
+{
+    {
+        std::lock_guard<std::mutex> lock(gBrokerSessionEnvMutex);
+        gBrokerSessionEnv.clear();
+    }
+    OH_LOG_INFO(LOG_APP, "[Broker] session env cleared");
 }
 
 // Broker 线程主循环
