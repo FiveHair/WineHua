@@ -1199,8 +1199,18 @@ void WaylandServer::NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t
     wl_display* dpy = wl_client_get_display(client);
     xdg_surface_send_configure(xdg->xdgSurface, wl_display_next_serial(dpy));
 
-    OH_LOG_INFO(LOG_APP, "[MW] NotifyToplevelResize id=%{public}u → %{public}dx%{public}d maximized=%{public}s",
-                toplevelId, w, h, (sd && sd->maximized) ? "yes" : "no");
+    // 桌面 root 尺寸变化 → 同步更新 output 尺寸, 影响:
+    //   - wl_output 上报的物理尺寸
+    //   - xdg_toplevel_set_maximized / set_max_size 的基准值
+    //   - FindToplevelAt / RaiseToplevel 的边界判断
+    if (IsDesktopMode() && toplevelId == desktopRootToplevelId_) {
+        SetOutputSize(w, h);
+        OH_LOG_INFO(LOG_APP, "[MW] NotifyToplevelResize root=%{public}u → output %{public}dx%{public}d",
+                    toplevelId, w, h);
+    } else {
+        OH_LOG_INFO(LOG_APP, "[MW] NotifyToplevelResize id=%{public}u → %{public}dx%{public}d maximized=%{public}s",
+                    toplevelId, w, h, (sd && sd->maximized) ? "yes" : "no");
+    }
 }
 
 // -- toplevelId -> wl_surface 映射 (供 Seat::InjectPointerEnter 查找) --
