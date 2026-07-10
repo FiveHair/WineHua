@@ -166,7 +166,7 @@ $$(STAMPS)/$(1)/native: $(SCRIPTS)/build_native.sh $(SCRIPTS)/env.sh FORCE | $$(
 	    [ -f "$$$$libs_dir/libxkbcommon.so.0" ] && \
 	    [ -f "$$$$libs_dir/libxkbregistry.so.0" ] && \
 	    [ -f "$$$$libs_dir/libwayland-egl.so.1" ] && \
-	    [ -f "$$$$libs_dir/libEGL.so.1" ] && \
+	    [ -f "$$$$libs_dir/libwinehua_vtest_server.so" ] && \
 	    ! find $(ROOT)/thirdparty/wayland \
 	           $(ROOT)/thirdparty/libffi \
 	           $(ROOT)/thirdparty/freetype \

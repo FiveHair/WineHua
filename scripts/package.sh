@@ -274,10 +274,19 @@ with open('$module_json', 'r') as f:
     content = f.read()
 # 移除 hnpPackages 块 (含前导逗号)
 content = re.sub(r',?\s*\"hnpPackages\"\s*:\s*\[[^][]*\]', '', content)
+content = re.sub(r'\s*\"extractNativeLibs\"\s*:\s*(true|false)\s*,', '\n', content)
+content = re.sub(r'\s*\"executableBinaryPaths\"\s*:\s*\[[\s\S]*?\]\s*,', '\n', content)
+content = re.sub(
+    r'\"compressNativeLibs\"\s*:\s*(true|false)\s*,',
+    '\"compressNativeLibs\": false,\\n    \"extractNativeLibs\": true,',
+    content,
+    count=1,
+)
 with open('$module_json', 'w') as f:
     f.write(content)
 "
         log "  已移除 hnpPackages 配置"
+        log "  已启用 native libs 解压"
 
         # 通过 cppFlags 注入 PAD_MODE (hvigorw 不会透传环境变量给 CMake)
         local profile="$WINEHUA/entry/build-profile.json5"

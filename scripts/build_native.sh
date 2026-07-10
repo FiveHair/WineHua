@@ -79,16 +79,10 @@ copy_soname_with_linker_alias() {
 }
 
 # ── 2. ARM64 bridge libs used by Box64 wrapped native libraries ──
-copy_native_egl_alias() {
-    local egl="$SYSROOT/usr/lib/$NATIVE_TARGET/libEGL.so"
-
-    if [ -f "$egl" ]; then
-        cp "$egl" "$NATIVE_LIBS/libEGL.so"
-        cp "$egl" "$NATIVE_LIBS/libEGL.so.1"
-        log "EGL native alias ($NATIVE_ARCH) -> $NATIVE_LIBS/libEGL.so.1"
-    else
-        warn "native EGL source missing: $egl"
-    fi
+remove_native_egl_linker_stubs() {
+    # The Native SDK files are link-time stubs. OHOS host processes must load
+    # the public runtime implementations from /system/lib64 instead.
+    rm -f "$NATIVE_LIBS/libEGL.so" "$NATIVE_LIBS/libEGL.so.1"
 }
 
 build_native_freetype() {
@@ -322,7 +316,14 @@ find_python_with_yaml() {
 }
 
 build_virglrenderer() {
-    if [ -f "$NATIVE_LIBS/libvirglrenderer.so.1" ] && [ -x "$NATIVE_LIBS/virgl_test_server" ]; then
+    # Older Pad builds copied the vtest executable under a .so name. NCP loads
+    # only the callable shared entry below, so never let that stale file reach
+    # HAP native libraries.
+    rm -f "$NATIVE_LIBS/libvirgl_test_server.so"
+
+    if [ -f "$NATIVE_LIBS/libvirglrenderer.so.1" ] && \
+       [ -f "$NATIVE_LIBS/libwinehua_vtest_server.so" ] && \
+       [ -x "$NATIVE_LIBS/virgl_test_server" ]; then
         log "virglrenderer ($NATIVE_ARCH) 已就绪，跳过"
         return 0
     fi
@@ -371,6 +372,9 @@ build_virglrenderer() {
         find "$build" -name 'virgl_test_server' -type f -exec cp {} "$NATIVE_LIBS/virgl_test_server" \;
     cp "$build/install/bin/virgl_test_server" "$NATIVE_LIBS/" 2>/dev/null || true
     chmod +x "$NATIVE_LIBS/virgl_test_server" 2>/dev/null || true
+    cp "$build/install/lib/libwinehua_vtest_server.so" "$NATIVE_LIBS/" 2>/dev/null || \
+        find "$build" -name 'libwinehua_vtest_server.so' -type f -exec cp {} "$NATIVE_LIBS/libwinehua_vtest_server.so" \;
+    rm -f "$NATIVE_LIBS/libvirgl_test_server.so"
 
     log "virglrenderer ($NATIVE_ARCH) → $NATIVE_LIBS"
 }
@@ -381,7 +385,7 @@ build_native_freetype
 build_native_libxml2
 build_native_xkbcommon
 build_wayland
-copy_native_egl_alias
+remove_native_egl_linker_stubs
 build_protocols
 install_headers
 build_libepoxy

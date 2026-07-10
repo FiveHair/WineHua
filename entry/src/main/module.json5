@@ -9,6 +9,8 @@
       "tablet"
     ],
     "compressNativeLibs": false,
+    "extractNativeLibs": true,
+
     "requestPermissions": [
       {
         "name": "ohos.permission.kernel.ALLOW_WRITABLE_CODE_MEMORY"

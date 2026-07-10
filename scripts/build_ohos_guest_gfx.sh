@@ -361,8 +361,8 @@ pkg-config = '$PKG_CONFIG_BIN'
 wayland-scanner = '$WAYLAND_SCANNER'
 
 [built-in options]
-c_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls']
-cpp_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls']
+c_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls', '-DDETECT_OS_OHOS=0']
+cpp_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC', '-fno-emulated-tls', '-DDETECT_OS_OHOS=0']
 c_link_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-fuse-ld=lld', '-L$SYSROOT_EXT_LIB']
 cpp_link_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-fuse-ld=lld', '-L$SYSROOT_EXT_LIB']
 pkg_config_path = ['$SYSROOT_EXT_PC', '$SYSROOT/usr/lib/pkgconfig']

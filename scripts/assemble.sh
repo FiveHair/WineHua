@@ -4,9 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
+GUEST_GFX_DIRNAME="guest_gfx"
+GUEST_GFX_ARCH="x86_64"
+
 ensure_guest_gfx_bundle() {
-    local bundle="$BUILD_DIR/guest_gfx/$NATIVE_ARCH"
-    local install="$BUILD_DIR/guest_gfx_install/$NATIVE_ARCH"
+    local bundle="$BUILD_DIR/guest_gfx/$GUEST_GFX_ARCH"
+    local install="$BUILD_DIR/guest_gfx_install/$GUEST_GFX_ARCH"
 
     if [ -d "$bundle/lib" ]; then
         echo "$bundle"
@@ -14,8 +17,8 @@ ensure_guest_gfx_bundle() {
     fi
 
     if [ -d "$install/lib" ]; then
-        log "  guest_gfx: packaging existing install tree ($NATIVE_ARCH)"
-        NATIVE_ARCH="$NATIVE_ARCH" bash "$SCRIPT_DIR/build_guest_gfx.sh" \
+        log "  guest_gfx: packaging existing install tree ($GUEST_GFX_ARCH)"
+        NATIVE_ARCH="$GUEST_GFX_ARCH" bash "$SCRIPT_DIR/build_guest_gfx.sh" \
             --install-root "$install" \
             --output-root "$bundle"
         echo "$bundle"
@@ -124,19 +127,19 @@ assemble_pad() {
         _pick_arm64_native "libwayland-egl.so.1" "libwayland-egl.so"
         _pick_arm64_native "libwayland-server.so.0" "libwayland-server.so"
         _pick_arm64_native "libffi.so.8"         "libffi.so"
-        if [ -f "$SYSROOT/usr/lib/$NATIVE_TARGET/libEGL.so" ]; then
-            cp "$SYSROOT/usr/lib/$NATIVE_TARGET/libEGL.so" "$NATIVE_LIBS/libEGL.so"
-            cp "$SYSROOT/usr/lib/$NATIVE_TARGET/libEGL.so" "$NATIVE_LIBS/libEGL.so.1"
-        else
-            warn "ARM64 native libEGL.so not found; Box64 native EGL bridge may fail"
-        fi
+        # Do not package the Native SDK's link-only EGL stubs. Host-side
+        # libepoxy opens the OHOS public runtime libraries by their system names.
+        rm -f "$NATIVE_LIBS/libEGL.so" "$NATIVE_LIBS/libEGL.so.1"
+        # Obsolete builds disguised the vtest executable as a shared library.
+        # Pad NCP uses libwinehua_vtest_server.so instead.
+        rm -f "$NATIVE_LIBS/libvirgl_test_server.so"
 
         _require_arm64_native() {
             local soname="$1"
             [ -f "$NATIVE_LIBS/$soname" ] || err "ARM64 原生库 $soname 缺失，请先执行: NATIVE_ARCH=arm64-v8a bash scripts/build_native.sh"
         }
         for so in libfreetype.so.6 libxkbcommon.so.0 libxkbregistry.so.0 libxml2.so.2 \
-                  libwayland-client.so.0 libwayland-egl.so.1 libwayland-server.so.0 libffi.so.8 libEGL.so.1; do
+                  libwayland-client.so.0 libwayland-egl.so.1 libwayland-server.so.0 libffi.so.8; do
             _require_arm64_native "$so"
         done
 
@@ -310,9 +313,9 @@ HKLM,%FontSubStr%,"Courier New",,"Noto Sans Mono"' "$wine_data/share/wine/wine.i
     # guest GPU 库 (Mesa/VirGL, 供 GraphicsBroker 注入到 Wine LD_LIBRARY_PATH)
     local guest_gfx_bundle
     if guest_gfx_bundle="$(ensure_guest_gfx_bundle)"; then
-        mkdir -p "$wine_data/bin/guest_gfx"
-        cp -a "$guest_gfx_bundle/"* "$wine_data/bin/guest_gfx/"
-        log "  guest_gfx ($NATIVE_ARCH): $(ls "$wine_data/bin/guest_gfx/lib"/*.so* 2>/dev/null | wc -l) .so files"
+        mkdir -p "$wine_data/bin/$GUEST_GFX_DIRNAME"
+        cp -a "$guest_gfx_bundle/"* "$wine_data/bin/$GUEST_GFX_DIRNAME/"
+        log "  guest_gfx ($GUEST_GFX_ARCH guest): $(ls "$wine_data/bin/$GUEST_GFX_DIRNAME/lib"/*.so* 2>/dev/null | wc -l) .so files"
     else
         log "  guest_gfx: SKIP (build/guest_gfx/$NATIVE_ARCH/lib not found)"
     fi
