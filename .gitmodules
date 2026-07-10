@@ -1,11 +1,11 @@
 [submodule "thirdparty/wine"]
 	path = thirdparty/wine
 	url = git@github.com:winehua/wine.git
-	branch = master
+	branch = dev
 [submodule "thirdparty/box64"]
 	path = thirdparty/box64
 	url = git@github.com:winehua/box64.git
-	branch = main
+	branch = dev
 [submodule "thirdparty/wayland"]
 	path = thirdparty/wayland
 	url = https://gitlab.freedesktop.org/wayland/wayland.git
@@ -30,9 +30,11 @@
 [submodule "thirdparty/virglrenderer"]
 	path = thirdparty/virglrenderer
 	url = https://github.com/winehua/virglrenderer.git
+	branch = dev
 [submodule "thirdparty/libepoxy"]
 	path = thirdparty/libepoxy
-	url = https://github.com/anholt/libepoxy.git
+	url = https://github.com/winehua/libepoxy.git
+	branch = dev
 [submodule "thirdparty/mesa"]
 	path = thirdparty/mesa
 	url = https://gitee.com/openharmony/third_party_mesa3d.git
