@@ -1,7 +1,6 @@
 #include <napi/native_api.h>
 #include "wine_env.h"
 #include "wine_process.h"
-#include "graphics_broker.h"
 #include "wayland_server.h"
 
 #include <unistd.h>
@@ -41,9 +40,14 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
     {
         std::string lower = exePath;
         for (auto& c : lower) c = tolower(c);
-        if (lower.find("/drive_c/") != std::string::npos) {
-            auto slash = exePath.find_last_of('/');
-            if (slash != std::string::npos) exePath = exePath.substr(slash + 1);
+        const std::string driveMarker = "/drive_c/";
+        auto drivePos = lower.find(driveMarker);
+        if (drivePos != std::string::npos) {
+            std::string tail = exePath.substr(drivePos + driveMarker.size());
+            for (auto& c : tail) {
+                if (c == '/') c = '\\';
+            }
+            exePath = "C:\\" + tail;
         }
     }
 #endif
@@ -60,35 +64,8 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
     audioBootstrapFd = CreateAudioBootstrapFd(sockDir);
 #endif
 
-    bool isGraphicsSmoke = IsGraphicsSmokeExePath(exePath);
-    bool restoreGraphicsBackend = false;
-    winehua::GraphicsBackend previousBackend = winehua::GraphicsBackend::Shm;
-    if (isGraphicsSmoke) {
-        auto& gb = winehua::GraphicsBroker::GetInstance();
-        gb.SetWineRuntimeBinaryDir(binDir);
-        winehua::GraphicsBackendState st = gb.GetState();
-        previousBackend = st.requested;
-        if (st.requested != winehua::GraphicsBackend::Virgl) {
-            gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
-            restoreGraphicsBackend = true;
-            OH_LOG_INFO(LOG_APP, "[Wine] temporarily switching to VirGL for graphics smoke");
-        }
-        gb.EnsureStarted(sockDir);
-        LogGraphicsBackendStateForLaunch("Wine");
-    }
-
     std::string homeDir = homeArg[0] ? homeArg : "/storage/Users/currentUser/Download";
     std::vector<std::string> envStrs = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd, homeDir);
-    if (restoreGraphicsBackend) {
-        winehua::GraphicsBroker::GetInstance().SetRequestedBackend(previousBackend);
-        OH_LOG_INFO(LOG_APP, "[Wine] restored graphics backend after env setup");
-    }
-    if (isGraphicsSmoke) {
-        envStrs.push_back("WINEHUA_GRAPHICS_FORCE_GL=1");
-        envStrs.push_back("WINEHUA_OPENGL_DIAG=1");
-        envStrs.push_back("EGL_LOG_LEVEL=debug");
-        OH_LOG_INFO(LOG_APP, "[Wine] forcing graphics smoke to continue into OpenGL diagnostics");
-    }
     std::vector<char*> envp;
     for (auto& s : envStrs) envp.push_back((char*)s.c_str());
     envp.push_back(nullptr);
@@ -100,6 +77,7 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
 #else
         std::string entryParams = homeDir + "|" + binDir + "|wine|" + exePath;
 #endif
+        AppendMissingEntryParamsEnvOverrides(entryParams, envStrs);
         OH_LOG_INFO(LOG_APP, "[Wine] runWineExe via broker: %{public}s", entryParams.c_str());
 
         int broker_fd = socket(AF_UNIX, SOCK_STREAM, 0);
