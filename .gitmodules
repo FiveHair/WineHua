@@ -1,10 +1,10 @@
 [submodule "thirdparty/wine"]
 	path = thirdparty/wine
-	url = git@github.com:winehua/wine.git
+	url = https://github.com/winehua/wine.git
 	branch = dev
 [submodule "thirdparty/box64"]
 	path = thirdparty/box64
-	url = git@github.com:winehua/box64.git
+	url = https://github.com/winehua/box64.git
 	branch = dev
 [submodule "thirdparty/wayland"]
 	path = thirdparty/wayland
