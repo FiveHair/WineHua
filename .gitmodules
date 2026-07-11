@@ -8,25 +8,25 @@
 	branch = dev
 [submodule "thirdparty/wayland"]
 	path = thirdparty/wayland
-	url = https://gitlab.freedesktop.org/wayland/wayland.git
+	url = https://github.com/winehua/wayland.git
 [submodule "thirdparty/libffi"]
 	path = thirdparty/libffi
 	url = https://github.com/libffi/libffi.git
 [submodule "thirdparty/wayland-protocols"]
 	path = thirdparty/wayland-protocols
-	url = https://gitlab.freedesktop.org/wayland/wayland-protocols.git
+	url = https://github.com/winehua/wayland-protocols.git
 [submodule "thirdparty/libxkbcommon"]
 	path = thirdparty/libxkbcommon
 	url = https://github.com/xkbcommon/libxkbcommon.git
 [submodule "thirdparty/libxml2"]
 	path = thirdparty/libxml2
-	url = https://gitlab.gnome.org/GNOME/libxml2.git
+	url = https://github.com/winehua/libxml2.git
 [submodule "thirdparty/freetype"]
 	path = thirdparty/freetype
 	url = https://github.com/freetype/freetype.git
 [submodule "thirdparty/xkeyboard-config"]
 	path = thirdparty/xkeyboard-config
-	url = https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config.git
+	url = https://github.com/winehua/xkeyboard-config.git
 [submodule "thirdparty/virglrenderer"]
 	path = thirdparty/virglrenderer
 	url = https://github.com/winehua/virglrenderer.git
@@ -37,9 +37,9 @@
 	branch = dev
 [submodule "thirdparty/mesa"]
 	path = thirdparty/mesa
-	url = https://gitee.com/openharmony/third_party_mesa3d.git
+	url = https://github.com/winehua/mesa-ohos.git
 	branch = OpenHarmony-6.0-Beta1
 [submodule "thirdparty/libdrm"]
 	path = thirdparty/libdrm
-	url = https://gitee.com/openharmony/third_party_libdrm.git
+	url = https://github.com/winehua/libdrm-ohos.git
 	branch = OpenHarmony-6.0-Beta1
