@@ -29,10 +29,10 @@
 #include "broker.h"
 #include "wait_utils.h"
 
-#ifdef PAD_MODE
+#ifdef __OHOS__
 #include <AbilityKit/native_child_process.h>
 
-// Pad: 从 envp 重建 environ (fork 后 __wine_main / main 从 environ 读环境变量)
+// Rebuild environ from envp for Wine entry points running in an OHOS child process.
 static void rebuild_environ(char* const* envp) {
     extern char** environ;
     environ = (char**)envp;
@@ -75,6 +75,10 @@ static bool IsWinePrefixInitialized() {
            DirExists(WINE_PREFIX "/drive_c/windows/system32") &&
            DirExists(WINE_PREFIX "/drive_c/users");
 }
+
+#ifdef __OHOS__
+static bool IsWow64PrefixInitialized();
+#endif
 
 static void RemovePathRecursive(const std::string& path)
 {
@@ -239,38 +243,33 @@ static bool EnsureWow64Files(const std::string& binDir)
     return total > 0 && failed == 0;
 }
 
-#ifdef PAD_MODE
+#ifdef __OHOS__
 static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
 {
-    std::string sockDir = params.sockDir;
-    std::string wineBin = params.winehuaBin;
+    OH_LOG_INFO(LOG_APP, "[Launch-Async] preparing GL env for desktop child processes");
+    auto& gb = winehua::GraphicsBroker::GetInstance();
+    gb.SetWineRuntimeBinaryDir(params.winehuaBin);
+    gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
+    gb.EnsureStarted(params.sockDir);
 
-    std::thread([sockDir, wineBin]() {
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] preparing GL env for desktop child processes");
-        auto& gb = winehua::GraphicsBroker::GetInstance();
-        gb.SetWineRuntimeBinaryDir(wineBin);
-        gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
-        gb.EnsureStarted(sockDir);
+    winehua::GraphicsBackendState state = gb.GetState();
+    if (state.active != winehua::GraphicsBackend::Virgl) {
+        OH_LOG_ERROR(LOG_APP,
+                     "[Launch-Async] desktop GL env unavailable: requested=%{public}s active=%{public}s error=%{public}s",
+                     winehua::GraphicsBroker::BackendName(state.requested),
+                     winehua::GraphicsBroker::BackendName(state.active),
+                     state.lastError.c_str());
+        return;
+    }
 
-        winehua::GraphicsBackendState state = gb.GetState();
-        if (state.active != winehua::GraphicsBackend::Virgl) {
-            OH_LOG_ERROR(LOG_APP,
-                         "[Launch-Async] desktop GL env unavailable: requested=%{public}s active=%{public}s error=%{public}s",
-                         winehua::GraphicsBroker::BackendName(state.requested),
-                         winehua::GraphicsBroker::BackendName(state.active),
-                         state.lastError.c_str());
-            return;
-        }
-
-        std::vector<std::string> env;
-        gb.AppendWineEnv(env);
-        SetBrokerSessionEnv(std::move(env));
-        LogGraphicsBackendStateForLaunch("DesktopSession");
-    }).detach();
+    std::vector<std::string> env;
+    gb.AppendWineEnv(env);
+    SetBrokerSessionEnv(std::move(env));
+    LogGraphicsBackendStateForLaunch("DesktopSession");
 }
 
 static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
-    // 通过 fdList 传递 audio bootstrap fd (仅 explorer 需要音频)
+    // Pass the audio bootstrap descriptor to Explorer through the NCP fd list.
     NativeChildProcess_Fd audioFdNode;
     audioFdNode.fdName = const_cast<char*>("wine_audio_bootstrap");
     audioFdNode.fd = audioBootstrapFd;
@@ -318,8 +317,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         return false;
     }
 
-    // -- wineboot --init --
+    // -- wineboot --init / repair an inherited 64-bit-only prefix --
     bool prefixReady = IsWinePrefixInitialized();
+    bool wow64Ready = IsWow64PrefixInitialized();
 
     if (!prefixReady) {
         OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix not ready, running wineboot --init...");
@@ -345,9 +345,11 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
             return false;
         }
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot started, pid=%{public}d", childPid);
-        if (!WaitFor("wine prefix initialization", IsWinePrefixInitialized, 60000, 500)) {
+        if (!WaitFor("Wine + WoW64 prefix initialization", [] {
+                return IsWinePrefixInitialized() && IsWow64PrefixInitialized();
+            }, 60000, 500)) {
             ws->SetDesktopRootRecognitionEnabled(true);
-            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot prefix initialization timeout, abort");
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot WoW64 initialization timeout, abort");
             if (gStateTsfn)
                 napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
             return false;
@@ -355,10 +357,44 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         ws->SetDesktopRootRecognitionEnabled(true);
         ws->PromotePendingDesktopRoot();
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot completed");
+    } else if (!wow64Ready) {
+        OH_LOG_WARN(LOG_APP, "[Launch-Async] existing prefix lacks 32-bit COM registration; running wineboot --update");
+        auto* ws = WaylandServer::GetInstance();
+        ws->SetDesktopRootRecognitionEnabled(false);
+#ifdef __aarch64__
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|wineboot|--update";
+#else
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|wine|wineboot|--update";
+#endif
+        NativeChildProcess_Args childArgs = {};
+        childArgs.entryParams = const_cast<char*>(entryParams.c_str());
+        NativeChildProcess_Options options = {};
+        options.isolationMode = NCP_ISOLATION_MODE_NORMAL;
+        int32_t childPid = -1;
+        auto ret = OH_Ability_StartNativeChildProcess(
+            "libwine_child.so:Main", childArgs, options, &childPid);
+        if (ret != NCP_NO_ERROR ||
+            !WaitFor("WoW64 COM registration", IsWow64PrefixInitialized, 60000, 500)) {
+            ws->SetDesktopRootRecognitionEnabled(true);
+            OH_LOG_ERROR(LOG_APP,
+                         "[Launch-Async] wineboot --update failed/timeout ret=%{public}d pid=%{public}d",
+                         (int)ret, childPid);
+            if (gStateTsfn)
+                napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
+            return false;
+        }
+        ws->SetDesktopRootRecognitionEnabled(true);
+        ws->PromotePendingDesktopRoot();
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] WoW64 COM registration repaired");
     } else {
         WaylandServer::GetInstance()->SetDesktopRootRecognitionEnabled(true);
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] prefix already initialized, skipping wineboot");
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] Wine + WoW64 prefix already initialized, skipping wineboot");
     }
+
+    // Wineboot stays on the baseline environment. Publish the guest GL
+    // environment only after prefix initialization, but before Explorer can
+    // ask the broker to create desktop child processes.
+    PrepareDesktopSessionGraphicsEnv(*p);
 
     // -- explorer desktop shell --
     {
@@ -368,9 +404,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
         char desktopArg[128];
         snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d", dw, dh);
 #ifdef __aarch64__
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|explorer|" + desktopArg;
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|__winehua_desktop__|explorer|" + desktopArg;
 #else
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|wine|explorer|" + desktopArg;
+        std::string exEntry = p->homeDir + "|" + p->winehuaBin + "|__winehua_desktop__|wine|explorer|" + desktopArg;
 #endif
         NativeChildProcess_Args exArgs = {};
         exArgs.entryParams = const_cast<char*>(exEntry.c_str());
@@ -384,8 +420,52 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd) {
                     exPid, (int)exRet);
         if (exRet != NCP_NO_ERROR) return false;
     }
-    PrepareDesktopSessionGraphicsEnv(*p);
     return true;
+}
+
+static bool FileContains(const char* path, const char* needle)
+{
+    FILE* file = fopen(path, "rb");
+    if (!file) return false;
+
+    std::string pending;
+    char buffer[8192];
+    const size_t overlap = strlen(needle) > 0 ? strlen(needle) - 1 : 0;
+    bool found = false;
+    while (size_t count = fread(buffer, 1, sizeof(buffer), file))
+    {
+        pending.append(buffer, count);
+        if (pending.find(needle) != std::string::npos)
+        {
+            found = true;
+            break;
+        }
+        if (pending.size() > overlap) pending.erase(0, pending.size() - overlap);
+    }
+    fclose(file);
+    return found;
+}
+
+static bool IsWow64PrefixInitialized()
+{
+    if (!FileHasData(WINE_PREFIX "/drive_c/windows/syswow64/rundll32.exe") ||
+        !FileHasData(WINE_PREFIX "/drive_c/windows/syswow64/shell32.dll") ||
+        !FileHasData(WINE_PREFIX "/drive_c/windows/syswow64/dinput8.dll") ||
+        !FileHasData(WINE_PREFIX "/drive_c/windows/syswow64/dsound.dll") ||
+        !FileHasData(WINE_PREFIX "/drive_c/windows/syswow64/mmdevapi.dll"))
+        return false;
+
+    // system.reg is a 64-bit registry file. Successful Wow64Install writes
+    // the redirected 32-bit COM registrations below Wow6432Node. Checking
+    // representative SDL dependencies prevents an old 64-bit-only prefix
+    // from being mistaken for a complete WoW64 prefix.
+    const char* registry = WINE_PREFIX "/system.reg";
+    return FileContains(registry,
+                        "Wow6432Node\\\\CLSID\\\\{25E609E4-B259-11CF-BFC7-444553540000}") &&
+           FileContains(registry,
+                        "Wow6432Node\\\\CLSID\\\\{3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}") &&
+           FileContains(registry,
+                        "Wow6432Node\\\\CLSID\\\\{BCDE0395-E52F-467C-8E3D-C4579291692E}");
 }
 #else
 static bool LaunchPcMode(LaunchParams* p, int audioBootstrapFd) {
@@ -481,7 +561,7 @@ void LaunchThreadFunc(LaunchParams* p) {
         napi_call_threadsafe_function(gStateTsfn, strdup("wineserver-starting"), napi_tsfn_blocking);
 
     bool ok = false;
-#ifdef PAD_MODE
+#ifdef __OHOS__
     ok = LaunchPadMode(p, audioBootstrapFd);
 #else
     ok = LaunchPcMode(p, audioBootstrapFd);

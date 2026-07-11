@@ -36,7 +36,6 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
         napi_get_value_string_utf8(env, args[4], homeArg, sizeof(homeArg), nullptr);
 
     std::string exePath(wineExe);
-#ifdef PAD_MODE
     {
         std::string lower = exePath;
         for (auto& c : lower) c = tolower(c);
@@ -50,7 +49,6 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
             exePath = "C:\\" + tail;
         }
     }
-#endif
 
     OH_LOG_INFO(LOG_APP, "[Wine] runWineExe bin=%{public}s exe=%{public}s (final=%{public}s)", binDir, wineExe, exePath.c_str());
 
@@ -60,9 +58,6 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
     std::string sockName = (pos == std::string::npos) ? sockStr : sockStr.substr(pos + 1);
 
     int audioBootstrapFd = -1;
-#ifndef PAD_MODE
-    audioBootstrapFd = CreateAudioBootstrapFd(sockDir);
-#endif
 
     std::string homeDir = homeArg[0] ? homeArg : "/storage/Users/currentUser/Download";
     std::vector<std::string> envStrs = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd, homeDir);
@@ -70,7 +65,6 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
     for (auto& s : envStrs) envp.push_back((char*)s.c_str());
     envp.push_back(nullptr);
 
-#ifdef PAD_MODE
     {
 #ifdef __aarch64__
         std::string entryParams = homeDir + "|" + binDir + "|" + exePath;
@@ -134,49 +128,5 @@ napi_value RunWineExe(napi_env env, napi_callback_info info) {
             napi_call_threadsafe_function(gStateTsfn, strdup(msg), napi_tsfn_blocking);
         }
     }
-#else
-    // PC: fork + execve
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
-        OH_LOG_ERROR(LOG_APP, "[Wine] pipe failed: %{public}s", strerror(errno));
-        return nullptr;
-    }
-    fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
-    signal(SIGCHLD, sigchld_handler);
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        if (pipefd[1] > 2) close(pipefd[1]);
-        for (int s = 1; s < 32; ++s) signal(s, SIG_DFL);
-        prctl(PR_SET_NAME, "wl-client", 0, 0, 0);
-        CloseInheritedFds({STDOUT_FILENO, STDERR_FILENO, audioBootstrapFd});
-        chdir(binDir);
-        const char* cargv[] = {"./box64", "./wine", exePath.c_str(), nullptr};
-        execve("./box64", (char* const*)cargv, envp.data());
-        _exit(127);
-    }
-
-    if (audioBootstrapFd >= 0) close(audioBootstrapFd);
-
-    if (pid > 0) {
-        close(pipefd[1]);
-        auto* entry = AddProcess(pid, wineExe, pipefd[0]);
-        std::thread(ReaderThread, pipefd[0], pid, entry->readerActive).detach();
-        OH_LOG_INFO(LOG_APP, "[Wine] wine pid=%{public}d exe=%{public}s reader started", pid, wineExe);
-        if (gStateTsfn) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "%d:wine-running", pid);
-            napi_call_threadsafe_function(gStateTsfn, strdup(msg), napi_tsfn_blocking);
-        }
-    } else {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        OH_LOG_ERROR(LOG_APP, "[Wine] wine fork failed");
-        if (gStateTsfn) napi_call_threadsafe_function(gStateTsfn, strdup("-1:wine-failed"), napi_tsfn_blocking);
-    }
-#endif
     return nullptr;
 }

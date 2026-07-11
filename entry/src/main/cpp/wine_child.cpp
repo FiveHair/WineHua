@@ -232,7 +232,7 @@ static bool derive_launch_cwd(int argc, char *argv[], const char *homeDir, std::
     return false;
 }
 
-#ifdef PAD_MODE
+#ifdef __OHOS__
 static bool should_join_shell_desktop(int argc, char *argv[])
 {
     const char *program;
@@ -320,6 +320,7 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
         setenv("PROCESSBROKER", brokerPath, 1);
     }
     setenv("WINEDATADIR", (shareDir + "/wine").c_str(), 1);
+    setenv("XKB_CONFIG_ROOT", (shareDir + "/X11/xkb").c_str(), 1);
     // WINEBINDIR/WINEUNIXDIR 覆盖 init_paths() 中基于 dladdr(ntdll.so) 推算的错误路径
     // ntdll.so 在 bundle libs 目录，而 PE DLL / Unix SO 数据都在 wine/bin/ 下
     setenv("WINEBINDIR", binDir, 1);   // wine/bin/
@@ -396,23 +397,60 @@ extern "C" void Main(NativeChildProcess_Args args)
     }
     argv[argc] = nullptr;
 
+    // 检查 __winehua_desktop__ 标记: 有 → desktop 模式, 需要传 env 给 wine
+    {
+        for (int i = 0; i < argc; i++) {
+            if (strcmp(argv[i], "__winehua_desktop__") == 0) {
+                setenv("WINEHUA_DESKTOP_MODE", "1", 1);
+                OH_LOG_INFO(LOG_APP, "[WineChild] __winehua_desktop__ → WINEHUA_DESKTOP_MODE=1");
+                for (int j = i; j < argc; j++) argv[j] = argv[j + 1];
+                argc--;
+                break;
+            }
+        }
+    }
+
     OH_LOG_INFO(LOG_APP, "[WineChild] homeDir=%{public}s binDir=%{public}s argc=%{public}d argv[0]=%{public}s",
                 homeDir ? homeDir : "(null)", binDir, argc, argc > 0 ? argv[0] : "(none)");
 
-    // 2. 从父进程 fdList 读取 fds (按 fdName 区分)
+    // 2. Step A: 设置 Wine 环境变量 baseline (硬编码默认值, 确保非 broker 路径可用)
+    // 3. 从父进程 fdList 读取 fds (按 fdName 区分)
+    //    环境变量转发 fd (wine_env) 先读到缓冲区, 最后一步 apply
+    char* envBuf = nullptr;
+    size_t envBufLen = 0;
+    int wsSockFd = -1;   // wineserver fd (per-process, 等 apply 后覆盖)
+    int audioFd = -1;    // audio bootstrap fd (同上)
     for (auto* node = args.fdList.head; node; node = node->next) {
         if (node->fdName && strcmp(node->fdName, "wine_audio_bootstrap") == 0) {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%d", node->fd);
-            setenv("WINE_OHOS_AUDIO_ENABLE", "1", 1);
-            setenv("WINE_OHOS_AUDIO_BOOTSTRAP_FD", buf, 1);
-            setenv("WINE_OHOS_AUDIO_PROTOCOL_VERSION", "1", 1);
-            OH_LOG_INFO(LOG_APP, "[WineChild] audio bootstrap fd=%{public}d", node->fd);
+            audioFd = node->fd;
+            OH_LOG_INFO(LOG_APP, "[WineChild] audio bootstrap fd=%{public}d (assert after env apply)", audioFd);
+            // 不在此处 setenv —— 等 Step B 应用转发 env 后统一覆盖
         } else if (node->fdName && strcmp(node->fdName, "wineserver_sock") == 0) {
-            char sockEnv[64];
-            snprintf(sockEnv, sizeof(sockEnv), "%d", node->fd);
-            setenv("WINESERVERSOCKET", sockEnv, 1);
-            OH_LOG_INFO(LOG_APP, "[WineChild] WINESERVERSOCKET=%{public}s (via Broker)", sockEnv);
+            wsSockFd = node->fd;
+            OH_LOG_INFO(LOG_APP, "[WineChild] wineserver fd=%{public}d (via Broker, assert after env apply)", wsSockFd);
+            // 不在此处 setenv —— 转发 env 可能包含父进程的旧 WINESERVERSOCKET,
+            // 等 apply 完成后再用本进程自己的 fd 覆盖
+        } else if (node->fdName && strcmp(node->fdName, "wine_env") == 0) {
+            // 从 memfd 读取完整 env blob, 稍后 apply
+            off_t end = lseek(node->fd, 0, SEEK_END);
+            if (end > 0 && end <= 65536) {
+                envBuf = (char*)malloc(end + 1);
+                if (envBuf) {
+                    lseek(node->fd, 0, SEEK_SET);
+                    ssize_t r = read(node->fd, envBuf, end);
+                    if (r == end) {
+                        envBufLen = (size_t)end;
+                        OH_LOG_INFO(LOG_APP, "[WineChild] env blob fd=%{public}d len=%{public}zu",
+                                    node->fd, envBufLen);
+                    } else {
+                        free(envBuf); envBuf = nullptr; envBufLen = 0;
+                        OH_LOG_WARN(LOG_APP, "[WineChild] env blob read partial: %{public}zd != %{public}lld", r, (long long)end);
+                    }
+                }
+            } else {
+                OH_LOG_WARN(LOG_APP, "[WineChild] env blob fd=%{public}d invalid size", node->fd);
+            }
+            close(node->fd);  // memfd 读完即关, 所有权转移
         } else {
             OH_LOG_INFO(LOG_APP, "[WineChild] fdList fd=%{public}d name=%{public}s (unrecognized, ignoring)",
                         node->fd, node->fdName ? node->fdName : "(null)");
@@ -420,27 +458,51 @@ extern "C" void Main(NativeChildProcess_Args args)
     }
 
     // 3. 设置 Wine 环境变量
-    apply_entry_param_env_overrides(envOverrides);
     winedebug = select_winedebug_profile(argc, argv);
     setup_wine_env(binDir, homeDir, winedebug);
+    // Step B: 应用转发来的 guest 环境变量 (覆盖 baseline, 复刻 fork+exec 继承)
+    if (envBuf && envBufLen > 0) {
+        char *p = envBuf, *end = envBuf + envBufLen;
+        int applied = 0;
+        while (p < end) {
+            char* eq = strchr(p, '=');
+            if (eq) {
+                *eq = '\0';
+                setenv(p, eq + 1, 1);  // overwrite=1, guest env 优先
+                *eq = '=';
+            }
+            p += strlen(p) + 1;
+            applied++;
+        }
+        OH_LOG_INFO(LOG_APP, "[WineChild] applied %{public}d env vars from forwarded environ", applied);
+        free(envBuf);
+    }
+
     apply_entry_param_env_overrides(envOverrides);
     if (is_sdl_audio_test_exe(argc, argv))
         setenv("SDL_MIXER_DEBUG_MUSIC_INTERFACES", "1", 1);
-#ifdef PAD_MODE
-    if (should_join_shell_desktop(argc, argv))
-    {
-        setenv("WINEHUA_DESKTOP", "shell", 1);
-        OH_LOG_INFO(LOG_APP, "[WineChild] WINEHUA_DESKTOP=shell");
-    }
-    else
-    {
-        unsetenv("WINEHUA_DESKTOP");
-        OH_LOG_INFO(LOG_APP, "[WineChild] WINEHUA_DESKTOP unset");
-    }
+#ifdef __OHOS__
+    if (should_join_shell_desktop(argc, argv)) setenv("WINEHUA_DESKTOP", "shell", 1);
+    else unsetenv("WINEHUA_DESKTOP");
 #endif
+
+    // 覆盖 per-process fd 变量 (转发 env 中的是父进程 fd 号, 本进程无效)
+    // 等价于 fork+exec 路径中 exec_wineloader 的 putenv("WINESERVERSOCKET")
+    if (wsSockFd >= 0) {
+        char wsEnv[64];
+        snprintf(wsEnv, sizeof(wsEnv), "%d", wsSockFd);
+        setenv("WINESERVERSOCKET", wsEnv, 1);
+        OH_LOG_INFO(LOG_APP, "[WineChild] WINESERVERSOCKET=%{public}d (own fd)", wsSockFd);
+    }
+    if (audioFd >= 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", audioFd);
+        setenv("WINE_OHOS_AUDIO_ENABLE", "1", 1);
+        setenv("WINE_OHOS_AUDIO_BOOTSTRAP_FD", buf, 1);
+        setenv("WINE_OHOS_AUDIO_PROTOCOL_VERSION", "1", 1);
+        OH_LOG_INFO(LOG_APP, "[WineChild] AUDIO fd=%{public}d (own fd)", audioFd);
+    }
     OH_LOG_INFO(LOG_APP, "[WineChild] WINEDEBUG=%{public}s", winedebug);
-    if (is_audio_test_exe(argc, argv))
-        OH_LOG_INFO(LOG_APP, "[WineChild] MIDI diagnostic logging enabled for AudioTest");
 
     // 确保 WINEPREFIX 目录存在
     mkdir(WINE_PREFIX, 0755);

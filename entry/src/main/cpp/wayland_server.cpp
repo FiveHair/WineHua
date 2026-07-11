@@ -453,12 +453,12 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
         // 确定实际内容区域: 优先用 window_geometry, 否则全 buffer
         int contentW = w, contentH = h;
         int contentOffX = 0, contentOffY = 0;
-        int screenX = 0, screenY = 0;  // PAD_MODE: 虚拟桌面位置
+        int screenX = 0, screenY = 0;  // 桌面模式: 虚拟桌面位置
         if (sd->hasWindowGeometry && sd->geoW > 0 && sd->geoH > 0) {
             contentW = sd->geoW;
             contentH = sd->geoH;
             if (sd->hasToplevel) {
-                // PAD_MODE: toplevel content 永远从 buffer 原点开始,
+                // 桌面模式: toplevel content 永远从 buffer 原点开始,
                 // geoX/geoY 是虚拟桌面屏幕位置
                 contentOffX = 0;
                 contentOffY = 0;
@@ -1259,8 +1259,18 @@ void WaylandServer::NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t
     wl_display* dpy = wl_client_get_display(client);
     xdg_surface_send_configure(xdg->xdgSurface, wl_display_next_serial(dpy));
 
-    OH_LOG_INFO(LOG_APP, "[MW] NotifyToplevelResize id=%{public}u → %{public}dx%{public}d maximized=%{public}s",
-                toplevelId, w, h, (sd && sd->maximized) ? "yes" : "no");
+    // 桌面 root 尺寸变化 → 同步更新 output 尺寸, 影响:
+    //   - wl_output 上报的物理尺寸
+    //   - xdg_toplevel_set_maximized / set_max_size 的基准值
+    //   - FindToplevelAt / RaiseToplevel 的边界判断
+    if (IsDesktopMode() && toplevelId == desktopRootToplevelId_) {
+        SetOutputSize(w, h);
+        OH_LOG_INFO(LOG_APP, "[MW] NotifyToplevelResize root=%{public}u → output %{public}dx%{public}d",
+                    toplevelId, w, h);
+    } else {
+        OH_LOG_INFO(LOG_APP, "[MW] NotifyToplevelResize id=%{public}u → %{public}dx%{public}d maximized=%{public}s",
+                    toplevelId, w, h, (sd && sd->maximized) ? "yes" : "no");
+    }
 }
 
 // -- toplevelId -> wl_surface 映射 (供 Seat::InjectPointerEnter 查找) --

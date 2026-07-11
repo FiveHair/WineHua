@@ -3,7 +3,7 @@
 #include "wait_utils.h"
 #include "wayland_server.h"
 
-#ifdef PAD_MODE
+#ifdef __OHOS__
 #include <AbilityKit/native_child_process.h>
 #endif
 
@@ -485,7 +485,7 @@ bool GraphicsBroker::EnsureRuntimeLocked(const std::string& runtimeDir)
 
 bool GraphicsBroker::IsVirglServerProcessAliveLocked()
 {
-#ifdef PAD_MODE
+#ifdef __OHOS__
     if (virglServerUsesNcp_)
     {
         if (IsProcessRunningBySignal(virglServerPid_)) return true;
@@ -627,7 +627,7 @@ void GraphicsBroker::StartVirglSocketServerLocked()
         return;
     }
 
-#ifdef PAD_MODE
+#ifdef __OHOS__
     if (virglVtestLibraryPath_.empty() || !FileExists(virglVtestLibraryPath_))
     {
         lastError_ = "ARM64 virgl vtest helper is missing from the bundle";

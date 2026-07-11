@@ -12,8 +12,8 @@ const WINE_BIN_PC = '/data/service/hnp/winehua.org/winehua_0.1.0/opt/winehua/bin
 const WINE_LIB_PC = `${WINE_BIN_PC}/x86_64-unix`;
 
 // Pad 模式 (无 HNP): Wine 运行时从 rawfile 解压到 files/
-const WINE_ROOT_PAD = `${FILES_BASE}/wine`;
-const WINE_BIN_PAD = `${WINE_ROOT_PAD}/bin`;
+const WINE_ROOT = `${FILES_BASE}/wine`;
+const WINE_BIN_PAD = `${WINE_ROOT}/bin`;
 const WINE_LIB_PAD = `${WINE_BIN_PAD}/x86_64-unix`;
 const WINE_RUNTIME_STAMP = `${FILES_BASE}/wine-data.stamp`;
 const Z_HOME = '/storage/Users/currentUser/Download/app.hackeris.winehua/';
@@ -203,7 +203,7 @@ struct Index {
   // Pad: 从 rawfile 取出 wine-data.zip → zlib.decompressFile 解压到 files/wine/
   // 使用 getRawFdSync 流式读取，避免 249MB 一次加载到内存导致 OOM
   private async extractWineData(): Promise<void> {
-    const marker = `${WINE_ROOT_PAD}/share/wine/wine.inf`;
+    const marker = `${WINE_ROOT}/share/wine/wine.inf`;
     const ctx = getContext(this);
     const rm = ctx.resourceManager;
     const rawFd = rm.getRawFdSync('wine-data.zip');
@@ -225,9 +225,9 @@ struct Index {
         hilog.info(DOMAIN, 'wine', 'extract: marker not found, start extracting');
       }
 
-      if (pathExists(WINE_ROOT_PAD)) {
-        hilog.info(DOMAIN, 'wine', 'extract: removing old runtime %{public}s', WINE_ROOT_PAD);
-        removePathRecursive(WINE_ROOT_PAD);
+      if (pathExists(WINE_ROOT)) {
+        hilog.info(DOMAIN, 'wine', 'extract: removing old runtime %{public}s', WINE_ROOT);
+        removePathRecursive(WINE_ROOT);
       }
 
       // 流式拷贝: getRawFdSync 获取 fd → 分块读取 → 写入临时文件
@@ -257,9 +257,9 @@ struct Index {
       hilog.info(DOMAIN, 'wine', 'extract: stream copy ok, totalWritten=%{public}d', totalWritten);
 
       // 确保目标目录存在
-      fs.mkdirSync(WINE_ROOT_PAD, true);
-      hilog.info(DOMAIN, 'wine', 'extract: calling decompressFile → %{public}s', WINE_ROOT_PAD);
-      await zlib.decompressFile(tmpZip, WINE_ROOT_PAD, {});
+      fs.mkdirSync(WINE_ROOT, true);
+      hilog.info(DOMAIN, 'wine', 'extract: calling decompressFile → %{public}s', WINE_ROOT);
+      await zlib.decompressFile(tmpZip, WINE_ROOT, {});
       hilog.info(DOMAIN, 'wine', 'extract: decompress ok');
 
       // 验证
