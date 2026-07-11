@@ -316,6 +316,12 @@ find_python_with_yaml() {
 }
 
 build_virglrenderer() {
+    local src="$ROOT/thirdparty/virglrenderer"
+    local build="$NATIVE_BUILD/virglrenderer"
+    local cross
+    local epoxy_pc="$NATIVE_BUILD/libepoxy/install/lib/pkgconfig"
+    local python_with_yaml
+
     # Older Pad builds copied the vtest executable under a .so name. NCP loads
     # only the callable shared entry below, so never let that stale file reach
     # HAP native libraries.
@@ -323,18 +329,14 @@ build_virglrenderer() {
 
     if [ -f "$NATIVE_LIBS/libvirglrenderer.so.1" ] && \
        [ -f "$NATIVE_LIBS/libwinehua_vtest_server.so" ] && \
-       [ -x "$NATIVE_LIBS/virgl_test_server" ]; then
+       [ -x "$NATIVE_LIBS/virgl_test_server" ] && \
+       ! find "$src" -newer "$NATIVE_LIBS/libwinehua_vtest_server.so" -type f \
+           \( -name '*.c' -o -name '*.h' -o -name 'meson.build' \) 2>/dev/null | grep -q .; then
         log "virglrenderer ($NATIVE_ARCH) 已就绪，跳过"
         return 0
     fi
 
     log "--- virglrenderer ($NATIVE_ARCH) ---"
-    local src="$ROOT/thirdparty/virglrenderer"
-    local build="$NATIVE_BUILD/virglrenderer"
-    local cross
-    local epoxy_pc="$NATIVE_BUILD/libepoxy/install/lib/pkgconfig"
-    local python_with_yaml
-
     [ -d "$src" ] || err "thirdparty/virglrenderer is missing"
     [ -d "$epoxy_pc" ] || err "libepoxy pkg-config directory is missing, build libepoxy first: $epoxy_pc"
     python_with_yaml="$(find_python_with_yaml)"
