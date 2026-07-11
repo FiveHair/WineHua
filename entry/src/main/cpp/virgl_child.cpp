@@ -23,6 +23,8 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "VTEST_USE_GLES" ||
            key == "VTEST_USE_EGL_SURFACELESS" ||
            key == "VIRGL_DISABLE_NATIVE_FENCE_FD" ||
+           key == "WINEHUA_VIRGL_SYNC_MODE" ||
+           key == "WINEHUA_VIRGL_LOG_PATH" ||
            key == "EGL_PLATFORM";
 }
 
@@ -98,11 +100,12 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
         ApplyHostEnv(token);
 
     OH_LOG_INFO(LOG_APP,
-                "[virgl-child] helper=%{public}s socket=%{public}s hostLib=%{public}s egl=%{public}s gles=%{public}s",
+                "[virgl-child] helper=%{public}s socket=%{public}s hostLib=%{public}s egl=%{public}s gles=%{public}s sync=%{public}s",
                 helperPath, socketPath,
                 getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "(unset)",
                 getenv("EGL_PLATFORM") ? getenv("EGL_PLATFORM") : "(unset)",
-                getenv("VTEST_USE_GLES") ? getenv("VTEST_USE_GLES") : "(unset)");
+                getenv("VTEST_USE_GLES") ? getenv("VTEST_USE_GLES") : "(unset)",
+                getenv("WINEHUA_VIRGL_SYNC_MODE") ? getenv("WINEHUA_VIRGL_SYNC_MODE") : "egl-thread");
 
     handle = dlopen(helperPath, RTLD_NOW | RTLD_LOCAL);
     if (!handle)

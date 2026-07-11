@@ -425,6 +425,7 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
             if (DirExists(guestLibDir + "/egl")) env.push_back("EGL_DRIVERS_PATH=" + guestLibDir + "/egl");
         }
         env.push_back("WINEHUA_WAYLAND_READBACK=1");
+        env.push_back("WINEHUA_GL_STALL_DIAG=1");
         for (const std::string& extra : guestEnv) env.push_back(extra);
         if (!state.virglSocketPath.empty()) env.push_back("VTEST_SOCKET_NAME=" + state.virglSocketPath);
     }
@@ -638,12 +639,24 @@ void GraphicsBroker::StartVirglSocketServerLocked()
     ldLibraryPath = serverDir;
     unlink(virglSocketPath_.c_str());
     {
+        const char* requestedSyncMode = getenv("WINEHUA_VIRGL_SYNC_MODE");
+        std::string syncMode = requestedSyncMode ? requestedSyncMode : "egl-thread";
+        if (syncMode != "egl-thread" && syncMode != "egl-main" && syncMode != "native-fd")
+        {
+            OH_LOG_WARN(LOG_APP, "[GraphicsBroker] invalid sync mode %{public}s; using egl-thread",
+                        syncMode.c_str());
+            syncMode = "egl-thread";
+        }
+        std::string virglLogPath = DirNameCopy(virglSocketPath_) + "/virgl_host.log";
         std::string entryParams = virglVtestLibraryPath_ + "|" + virglSocketPath_ +
                                   "|__env=LD_LIBRARY_PATH=" + ldLibraryPath +
                                   "|__env=VTEST_USE_GLES=1" +
                                   "|__env=VTEST_USE_EGL_SURFACELESS=1" +
-                                  "|__env=VIRGL_DISABLE_NATIVE_FENCE_FD=1" +
+                                  "|__env=WINEHUA_VIRGL_SYNC_MODE=" + syncMode +
+                                  "|__env=WINEHUA_VIRGL_LOG_PATH=" + virglLogPath +
                                   "|__env=EGL_PLATFORM=surfaceless";
+        if (syncMode == "egl-thread")
+            entryParams += "|__env=VIRGL_DISABLE_NATIVE_FENCE_FD=1";
         NativeChildProcess_Args childArgs = {};
         NativeChildProcess_Options options = {};
         int32_t childPid = -1;
@@ -654,9 +667,9 @@ void GraphicsBroker::StartVirglSocketServerLocked()
             "libvirgl_child.so:Main", childArgs, options, &childPid);
         OH_LOG_INFO(LOG_APP,
                     "[GraphicsBroker] NCP virgl_child ret=%{public}d pid=%{public}d helper=%{public}s "
-                    "socket=%{public}s hostLib=%{public}s",
+                    "socket=%{public}s hostLib=%{public}s sync=%{public}s log=%{public}s",
                     ret, childPid, virglVtestLibraryPath_.c_str(), virglSocketPath_.c_str(),
-                    ldLibraryPath.c_str());
+                    ldLibraryPath.c_str(), syncMode.c_str(), virglLogPath.c_str());
         if (ret != NCP_NO_ERROR || childPid <= 0)
         {
             lastError_ = "failed to start virgl native child process ret=" + std::to_string(ret);
