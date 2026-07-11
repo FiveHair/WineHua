@@ -647,7 +647,7 @@ void GraphicsBroker::StartVirglSocketServerLocked()
                         syncMode.c_str());
             syncMode = "egl-thread";
         }
-        std::string virglLogPath = DirNameCopy(virglSocketPath_) + "/virgl_host.log";
+        std::string virglLogPath = "/data/storage/el2/base/cache/winehua_virgl_host.log";
         std::string entryParams = virglVtestLibraryPath_ + "|" + virglSocketPath_ +
                                   "|__env=LD_LIBRARY_PATH=" + ldLibraryPath +
                                   "|__env=VTEST_USE_GLES=1" +
