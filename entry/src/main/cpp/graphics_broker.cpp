@@ -640,7 +640,7 @@ void GraphicsBroker::StartVirglSocketServerLocked()
     unlink(virglSocketPath_.c_str());
     {
         const char* requestedSyncMode = getenv("WINEHUA_VIRGL_SYNC_MODE");
-        std::string syncMode = requestedSyncMode ? requestedSyncMode : "egl-thread";
+        std::string syncMode = requestedSyncMode ? requestedSyncMode : "egl-main";
         if (syncMode != "egl-thread" && syncMode != "egl-main" && syncMode != "native-fd")
         {
             OH_LOG_WARN(LOG_APP, "[GraphicsBroker] invalid sync mode %{public}s; using egl-thread",
@@ -652,6 +652,7 @@ void GraphicsBroker::StartVirglSocketServerLocked()
                                   "|__env=LD_LIBRARY_PATH=" + ldLibraryPath +
                                   "|__env=VTEST_USE_GLES=1" +
                                   "|__env=VTEST_USE_EGL_SURFACELESS=1" +
+                                  "|__env=VTEST_SYNC_GL_FINISH=1" +
                                   "|__env=WINEHUA_VIRGL_SYNC_MODE=" + syncMode +
                                   "|__env=WINEHUA_VIRGL_LOG_PATH=" + virglLogPath +
                                   "|__env=EGL_PLATFORM=surfaceless";
