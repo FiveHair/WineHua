@@ -14,8 +14,10 @@ ROOT := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
 # ── 配置 ──
 NATIVE_ARCH ?= x86_64
 DEVICE_TYPE ?= pc
+BUILD_GUEST_GFX ?= 0
 export NATIVE_ARCH
 export DEVICE_TYPE
+export BUILD_GUEST_GFX
 
 CONFIG    := $(NATIVE_ARCH)-$(DEVICE_TYPE)
 BUILD_DIR := $(ROOT)/build
@@ -32,6 +34,7 @@ endif
 # ── 关键产物 (用于验证构建是否完成) ──
 DEPS_SENTINEL   := $(BUILD_DIR)/sysroot-ext/usr/lib/x86_64-linux-ohos/libfreetype.so.6
 WINE_SENTINEL   := $(BUILD_DIR)/wine-native/tools/winegcc/winegcc
+GUEST_GFX_SENTINEL := $(BUILD_DIR)/guest_gfx/$(NATIVE_ARCH)/winehua-guest-gfx.env
 
 # ============================================================
 # 默认目标
@@ -59,7 +62,11 @@ $(STAMPS)/arm64-v8a $(STAMPS)/x86_64:
 deps: $(STAMPS)/deps
 
 $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
-	@if [ -f $@ ] && [ -f $(DEPS_SENTINEL) ] && \
+	@guest_gfx_ready=1; \
+	if [ "$(BUILD_GUEST_GFX)" = "1" ] && [ ! -f "$(GUEST_GFX_SENTINEL)" ]; then \
+	    guest_gfx_ready=0; \
+	fi; \
+	if [ -f $@ ] && [ -f $(DEPS_SENTINEL) ] && [ "$$guest_gfx_ready" = "1" ] && \
 	    ! find $(ROOT)/thirdparty/freetype \
 	           $(ROOT)/thirdparty/libffi \
 	           $(ROOT)/thirdparty/wayland \
@@ -200,15 +207,15 @@ assemble-$(1)-pc:  $$(STAMPS)/$(1)/assemble-pc
 assemble-$(1)-pad: $$(STAMPS)/$(1)/assemble-pad
 
 $$(STAMPS)/$(1)/assemble-pc: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh \
-	$$(STAMPS)/wine-$(1)-pc $$(STAMPS)/$(1)/native | $$(STAMPS)/$(1)
+	$$(STAMPS)/deps $$(STAMPS)/wine-$(1)-pc $$(STAMPS)/$(1)/native | $$(STAMPS)/$(1)
 	@echo "=== assemble ($(1), pc) ==="
-	NATIVE_ARCH=$(1) DEVICE_TYPE=pc bash $(SCRIPTS)/assemble.sh
+	NATIVE_ARCH=$(1) DEVICE_TYPE=pc BUILD_GUEST_GFX=$(BUILD_GUEST_GFX) bash $(SCRIPTS)/assemble.sh
 	@touch $$@
 
 $$(STAMPS)/$(1)/assemble-pad: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh \
-	$$(STAMPS)/wine-$(1)-pad $$(STAMPS)/$(1)/native | $$(STAMPS)/$(1)
+	$$(STAMPS)/deps $$(STAMPS)/wine-$(1)-pad $$(STAMPS)/$(1)/native | $$(STAMPS)/$(1)
 	@echo "=== assemble ($(1), pad) ==="
-	NATIVE_ARCH=$(1) DEVICE_TYPE=pad bash $(SCRIPTS)/assemble.sh
+	NATIVE_ARCH=$(1) DEVICE_TYPE=pad BUILD_GUEST_GFX=$(BUILD_GUEST_GFX) bash $(SCRIPTS)/assemble.sh
 	@touch $$@
 endef
 $(foreach a,arm64-v8a x86_64,$(eval $(call assemble_rule,$(a))))

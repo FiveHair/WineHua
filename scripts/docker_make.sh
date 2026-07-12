@@ -120,6 +120,7 @@ main() {
     docker exec \
         -e NATIVE_ARCH="${NATIVE_ARCH:-arm64-v8a}" \
         -e DEVICE_TYPE="${DEVICE_TYPE:-pad}" \
+        -e BUILD_GUEST_GFX="${BUILD_GUEST_GFX:-0}" \
         "$CONTAINER_NAME" \
         make "$@" > "$tmpfile" 2>&1 || rc=$?
 
