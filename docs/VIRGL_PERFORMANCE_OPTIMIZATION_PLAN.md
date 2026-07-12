@@ -106,7 +106,8 @@ SDLPal 和 Mahjong 用于确认复杂程序仍可启动和绘制。
 
 性能判断：
 
-- 单项优化以 displayed FPS 提升或 frame-time p95 改善至少 10% 为有效信号。
+- 单项优化的 displayed FPS 或 frame-time p95 改善达到 5% 可接受，前提是重复测试稳定且对应热点阶段同向改善。
+- 改善低于 3% 视为噪声并放弃；3% 至 5% 需要增加 A/B 复测，仍不稳定则暂缓。
 - 最终累计目标是 960x540 frame-time p95 至少改善 20%。
 - 只有 producer FPS 提升而 displayed FPS 不变，不算有效。
 - SHM in-flight 必须不超过 3，预热后内存不得线性增长。
