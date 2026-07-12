@@ -598,6 +598,12 @@ void GraphicsBroker::RefreshGuestReceiverStateLocked()
         return;
     }
 
+    if (mode.find("virpipe") != std::string::npos && !FileExists(libDir + "/dri/virtio_gpu_dri.so"))
+    {
+        guestReceiverError_ = "guest receiver is missing lib/dri/virtio_gpu_dri.so in " + libDir;
+        return;
+    }
+
     guestReceiverPresent_ = true;
     guestReceiverEnv_ = std::move(envLines);
 
