@@ -104,12 +104,16 @@ export class WineWindowManager {
         d.width, d.height, this.displayScale.toFixed(2), this.scaleBoost.toFixed(2));
       testNapi.setDisplayScale(this.displayScale * this.scaleBoost);
 
-      // Wine 输出尺寸: 沉浸模式下 avoid area 为 0, 直接用显示尺寸
+      // Tablet desktop is landscape. The display API can briefly report the
+      // pre-rotation portrait size while the Ability is starting.
       const s = this.displayScale * this.scaleBoost;
-      const outW = Math.round(d.width / s);
-      const outH = Math.round(d.height / s);
-      hilog.info(DOMAIN, TAG, '[MW] display %{public}dx%{public}d → output %{public}dx%{public}d',
-        d.width, d.height, outW, outH);
+      const displayW = this.isDesktopMode ? Math.max(d.width, d.height) : d.width;
+      const displayH = this.isDesktopMode ? Math.min(d.width, d.height) : d.height;
+      const outW = Math.round(displayW / s);
+      const outH = Math.round(displayH / s);
+      hilog.info(DOMAIN, TAG,
+        '[MW] display raw=%{public}dx%{public}d normalized=%{public}dx%{public}d → output %{public}dx%{public}d',
+        d.width, d.height, displayW, displayH, outW, outH);
       testNapi.setOutputSize(outW, outH);
     } catch (_) {
       this.displayScale = 1.61;

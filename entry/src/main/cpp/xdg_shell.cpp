@@ -95,7 +95,11 @@ static void tl_set_max_size(wl_client* client, wl_resource* tlRes, int32_t w, in
     // Wine 最大化时不调 set_maximized, 只设 max_size → 主动发 configure
     auto* ws = WaylandServer::GetInstance();
     int32_t workH = ws->GetWorkAreaHeight();
+    const bool workAreaFitsMinimum =
+        (sd->minWidth <= 0 || w >= sd->minWidth) &&
+        (sd->minHeight <= 0 || workH >= sd->minHeight);
     if (!sd->maximized && w >= ws->outputW_ && h >= workH &&
+        workAreaFitsMinimum &&
         sd->toplevelId != ws->GetDesktopRootToplevelId()) {
         sd->preMaxW = ws->GetToplevelW(sd->toplevelId);
         sd->preMaxH = ws->GetToplevelH(sd->toplevelId);
@@ -113,6 +117,10 @@ static void tl_set_max_size(wl_client* client, wl_resource* tlRes, int32_t w, in
         xdg_surface_send_configure(xdg->xdgSurface, wl_display_next_serial(dpy));
         OH_LOG_INFO(LOG_APP, "[XDG] max_size→maximize tl=%{public}u → configure(%{public}d,%{public}d)",
                     sd->toplevelId, w, workH);
+    } else if (!workAreaFitsMinimum && w >= ws->outputW_ && h >= workH) {
+        OH_LOG_INFO(LOG_APP,
+                    "[XDG] skip auto-maximize tl=%{public}u: work=%{public}dx%{public}d min=%{public}dx%{public}d",
+                    sd->toplevelId, w, workH, sd->minWidth, sd->minHeight);
     } else {
         OH_LOG_INFO(LOG_APP, "[XDG] tl_set_max_size toplevel=%{public}u %{public}dx%{public}d",
                     sd->toplevelId, w, h);
@@ -216,13 +224,12 @@ static void xs_destroy(wl_client*, wl_resource* r) {
     auto* d = static_cast<XdgSurface*>(wl_resource_get_user_data(r));
     OH_LOG_INFO(LOG_APP, "[MW-Life] xs_destroy xdg=%{public}p wlSurf=%{public}p",
                 r, d ? d->wlSurface : nullptr);
-    if (d && d->wlSurface) {
-        auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(d->wlSurface));
-        if (sd && sd->hasToplevel) {
-            OH_LOG_INFO(LOG_APP, "[MW-Life] xs_destroy → OnToplevelDestroyed tl=%{public}u", sd->toplevelId);
-            WaylandServer::GetInstance()->OnToplevelDestroyed(sd->toplevelId);
-            WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "destroyed");
-        }
+    if (d && d->toplevelId) {
+        OH_LOG_INFO(LOG_APP, "[MW-Life] xs_destroy -> OnToplevelDestroyed tl=%{public}u",
+                    d->toplevelId);
+        auto* ws = WaylandServer::GetInstance();
+        if (ws->OnToplevelDestroyed(d->toplevelId))
+            ws->FireToplevelEvent(d->toplevelId, "destroyed");
     }
     wl_resource_destroy(r);
 }
@@ -295,15 +302,15 @@ static void xs_resource_destroy(wl_resource* r) {
     // 必须在此处也做 compositor 清理 (等价于 xs_destroy 的逻辑),
     // 否则已断开进程的窗口像素永久滞留。
     auto* d = static_cast<XdgSurface*>(wl_resource_get_user_data(r));
-    if (d && d->wlSurface) {
-        auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(d->wlSurface));
-        if (sd && sd->hasToplevel) {
-            OH_LOG_INFO(LOG_APP, "[MW-Life] xs_resource_destroy → OnToplevelDestroyed tl=%{public}u (client disconnect)", sd->toplevelId);
-            WaylandServer::GetInstance()->OnToplevelDestroyed(sd->toplevelId);
-            WaylandServer::GetInstance()->FireToplevelEvent(sd->toplevelId, "destroyed");
-        }
+    if (d && d->toplevelId) {
+        OH_LOG_INFO(LOG_APP,
+                    "[MW-Life] xs_resource_destroy -> OnToplevelDestroyed tl=%{public}u (client disconnect)",
+                    d->toplevelId);
+        auto* ws = WaylandServer::GetInstance();
+        if (ws->OnToplevelDestroyed(d->toplevelId))
+            ws->FireToplevelEvent(d->toplevelId, "destroyed");
     }
-    delete static_cast<XdgSurface*>(wl_resource_get_user_data(r));
+    delete d;
 }
 
 // -- xdg_wm_base 实现 --

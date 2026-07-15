@@ -224,7 +224,8 @@ void WaylandServer::compositor_create_surface(wl_client* client, wl_resource* co
                 self->toplevelSurfaceMap_.erase(sd->toplevelId);
             }
             InputManager::GetInstance()->OnSurfaceDestroyed(r);
-            self->FireToplevelEvent(sd->toplevelId, "destroyed");
+            if (self->OnToplevelDestroyed(sd->toplevelId))
+                self->FireToplevelEvent(sd->toplevelId, "destroyed");
         }
         delete sd;
     });
@@ -399,17 +400,12 @@ void WaylandServer::surface_destroy(wl_client*, wl_resource* r) {
             self->toplevelSurfaceMap_.erase(sd->toplevelId);
         }
         // 清理 toplevel 像素数据 + 标记 root dirty
-        self->OnToplevelDestroyed(sd->toplevelId);
+        const bool firstDestroy = self->OnToplevelDestroyed(sd->toplevelId);
         // 重置 InputManager 焦点: 防止后续 Inject*Leave 引用已销毁的 surface
         // (否则 Wine 收到 invalid object 协议错误 → 断开连接)
         InputManager::GetInstance()->OnSurfaceDestroyed(r);
-        // 如果是 desktop root 被销毁，重置 root ID，等待下一个 explorer toplevel
-        if (sd->toplevelId == self->GetDesktopRootToplevelId()) {
-            OH_LOG_INFO(LOG_APP, "[MW] desktop root toplevel #%{public}u destroyed, clearing root",
-                        sd->toplevelId);
-            self->SetDesktopRootToplevelId(0);
-        }
-        self->FireToplevelEvent(sd->toplevelId, "destroyed");
+        if (firstDestroy)
+            self->FireToplevelEvent(sd->toplevelId, "destroyed");
     }
     // subsurface 销毁: 清除 layer + 标记 root dirty 触发重绘 (移除残留像素)
     if (sd && sd->isSubsurface) {
@@ -522,6 +518,31 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
             }
             OH_LOG_INFO(LOG_APP, "[MW-GEO] using window_geometry: src=%{public}dx%{public}d geo=(%{public}d,%{public}d %{public}dx%{public}d) screen=(%{public}d,%{public}d)",
                         w, h, contentOffX, contentOffY, contentW, contentH, screenX, screenY);
+        }
+
+        const int requestedOffX = contentOffX;
+        const int requestedOffY = contentOffY;
+        const int requestedContentW = contentW;
+        const int requestedContentH = contentH;
+        contentOffX = std::clamp(contentOffX, 0, w);
+        contentOffY = std::clamp(contentOffY, 0, h);
+        contentW = std::clamp(contentW, 0, w - contentOffX);
+        contentH = std::clamp(contentH, 0, h - contentOffY);
+        if (contentW <= 0 || contentH <= 0) {
+            contentOffX = 0;
+            contentOffY = 0;
+            contentW = w;
+            contentH = h;
+        }
+        if (contentOffX != requestedOffX || contentOffY != requestedOffY ||
+            contentW != requestedContentW || contentH != requestedContentH) {
+            OH_LOG_WARN(LOG_APP,
+                        "[MW-BUFFER] geometry clamped buffer=%{public}dx%{public}d "
+                        "requested=(%{public}d,%{public}d %{public}dx%{public}d) "
+                        "safe=(%{public}d,%{public}d %{public}dx%{public}d)",
+                        w, h, requestedOffX, requestedOffY,
+                        requestedContentW, requestedContentH,
+                        contentOffX, contentOffY, contentW, contentH);
         }
 
         // 复制像素时 strip stride padding, 只提取 content 区域
@@ -1354,8 +1375,9 @@ void WaylandServer::UnregisterToplevelResource(uint32_t toplevelId) {
     }
 }
 
-void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
+bool WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
     std::lock_guard<std::mutex> lk(toplevelMutex_);
+    if (!destroyedToplevels_.insert(toplevelId).second) return false;
     toplevelPixels_.erase(toplevelId);
     toplevelW_.erase(toplevelId);
     toplevelH_.erase(toplevelId);
@@ -1376,6 +1398,14 @@ void WaylandServer::OnToplevelDestroyed(uint32_t toplevelId) {
     if (IsDesktopMode() && toplevelId != desktopRootToplevelId_) {
         if (desktopRootToplevelId_ > 0) toplevelDirty_[desktopRootToplevelId_] = true;
     }
+    if (toplevelId == desktopRootToplevelId_) {
+        OH_LOG_INFO(LOG_APP,
+                    "[MW] desktop root toplevel #%{public}u destroyed, clearing root",
+                    toplevelId);
+        desktopRootToplevelId_ = 0;
+    }
+    desktopCompositionSignature_ = 0;
+    return true;
 }
 
 void WaylandServer::SendToplevelClose(uint32_t toplevelId) {

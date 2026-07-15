@@ -63,7 +63,7 @@ public:
     void RegisterToplevelResource(uint32_t toplevelId, wl_resource* tl);
     void UnregisterToplevelResource(uint32_t toplevelId);
     // 清理 toplevel 像素数据 + 标记 root dirty (desktop mode)
-    void OnToplevelDestroyed(uint32_t toplevelId);
+    bool OnToplevelDestroyed(uint32_t toplevelId);
     void SendToplevelClose(uint32_t toplevelId);
     // 统一状态转换 (确保 minimize/maximize/restore 涉及的 map 操作原子化)
     void SetToplevelMinimized(uint32_t id);
@@ -197,6 +197,7 @@ private:
     std::atomic<uint32_t> nextToplevelId_{1};
     std::unordered_map<uint32_t, wl_resource*> toplevelResources_;
     std::mutex toplevelResMutex_;
+    std::unordered_set<uint32_t> destroyedToplevels_;
 
     // toplevelId -> wl_surface 映射 (input focus 查找)
     std::unordered_map<uint32_t, wl_resource*> toplevelSurfaceMap_;
