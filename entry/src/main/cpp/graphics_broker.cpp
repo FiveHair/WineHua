@@ -715,6 +715,7 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
     env.push_back(std::string("WINEHUA_FRAME_ZERO_COPY=") + (state.zeroCopyFramePath ? "1" : "0"));
     env.push_back("WINEHUA_FRAME_TRANSPORT=" + state.frameTransportMode);
     env.push_back(std::string("WINEHUA_GUEST_GFX_READY=") + (state.guestReceiverPresent ? "1" : "0"));
+    env.push_back("WINEHUA_FULLSCREEN_MODE_EMULATION=1");
     env.push_back("WINEHUA_GUEST_GFX_MODE=" + (state.guestReceiverMode.empty() ? std::string("stock-egl")
                                                                                 : state.guestReceiverMode));
     if (!state.guestReceiverRuntimeDir.empty()) env.push_back("WINEHUA_GUEST_GFX_DIR=" + state.guestReceiverRuntimeDir);
