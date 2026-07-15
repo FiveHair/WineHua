@@ -1,6 +1,6 @@
 # Wine for HarmonyOS — 当前状态
 
-> 更新: 2026-07-13
+> 更新: 2026-07-15
 > 状态: ✅ VirGL | ✅ Audio | ✅ Explorer 桌面 | ✅ 输入 | ✅ 多窗口
 
 ---
@@ -34,6 +34,13 @@ Host-broker 音频引擎：Wine 侧通过 IPC + ring buffer 传输 PCM，宿主�
 ### 7. VirGL / OpenGL ✅
 
 guest Mesa (virpipe Gallium driver) → Unix socket → virgl_test_server (NCP 子进程) → virglrenderer → host EGL。支持 guest Mesa WGL contexts。性能优化：Native VSync 帧同步、帧缓冲复用、subsurface 合成签名。
+
+### 8. Wayland 全屏模式模拟 ✅
+
+Wayland 不允许客户端切换宿主显示模式。WineHua 在同一无边框顶层窗口进入
+`WINE_SWP_FULLSCREEN` 时保留进入前的客户区尺寸，并让 Win32 屏幕指标继续返回该逻辑模式。
+宿主输出尺寸和零拷贝渲染路径保持不变。该机制已验证可避免低分辨率游戏在物理全屏
+切换后按错误 pitch 写入旧缓冲区。
 
 ---
 
@@ -84,6 +91,10 @@ NCP 子进程 (appspawn)
 | dnsapi / nsiproxy 编译错误 | 跳过 | mingw 交叉编译 musl 不兼容 |
 | Explorer 启动的程序 conhost 崩溃 | console 程序无法从桌面启动 | Box64 Signal 3 (SIGTRAP) |
 | WINE_MONO=never 未设置 | wineboot 初始化时 Mono 安装尝试崩溃 | mscoree.dll 触发 install_mono → DialogBoxW |
+| 低分辨率全屏绝对指针不匹配 | 全屏游戏内鼠标位置偏移 | 画面已由逻辑模式扩展到物理窗口，但 Wayland 绝对指针仍按物理窗口坐标进入 Wine；尚未建立渲染变换与输入逆变换的共享契约 |
+| 全屏宽高比适配 | 4:3 内容可能被拉伸到 16:10 | 当前优先保持游戏可运行，尚未加入等比居中和黑边区域输入裁剪 |
+| 旧 DirectDraw 颜色格式 | Rich4 等 15/16 位或调色板游戏仍可能花屏 | 需要分别验证调色板更新、RGB555/RGB565 传输和光标 surface 格式，不能用全局色彩交换修复 |
+| 全屏模式模拟覆盖范围 | 不经过同一窗口“小客户区 → 全屏”转换的程序不会触发 | 后续应从 Wine 显式显示模式状态统一驱动，而不是扩展更多窗口特征判断 |
 
 ---
 
