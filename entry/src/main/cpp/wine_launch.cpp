@@ -29,7 +29,7 @@
 #include "broker.h"
 #include "wait_utils.h"
 
-#include <AbilityKit/native_child_process.h>
+#include "ncp_shim/native_child_process.h"
 
 // -- prefix 初始化检测辅助函数 --
 static bool FileHasData(const char* path) {
@@ -47,6 +47,21 @@ bool IsWinePrefixInitialized() {
            FileHasData(WINE_PREFIX "/user.reg") &&
            DirExists(WINE_PREFIX "/drive_c/windows/system32") &&
            DirExists(WINE_PREFIX "/drive_c/users");
+}
+
+// fork 模式下子进程退出先变僵尸、/proc/<pid> 不消失（NCP 模式由 appspawn 立即 reap）。
+// 存活检测必须识别僵尸，否则 wineboot 等待会白等到 kWinebootHangMs 超时。
+static bool IsProcessAliveNotZombie(pid_t pid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+    FILE* f = fopen(path, "r");
+    if (!f) return false;                       // /proc 消失 = 已退出
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    char* rp = strrchr(buf, ')');               // state 字段在最后一个 ')' 之后
+    return !(rp && rp[2] == 'Z');               // 僵尸 = 已退出
 }
 
 // -- WoW64 syswow64 预填充辅助 --
@@ -295,7 +310,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::stri
         snprintf(procPath, sizeof(procPath), "/proc/%d", childPid);
         constexpr int kWinebootHangMs = 3 * 60 * 1000;
         int aliveMs = 0;
-        while (access(procPath, F_OK) == 0 && aliveMs < kWinebootHangMs) {
+        while (IsProcessAliveNotZombie(childPid) && aliveMs < kWinebootHangMs) {
             usleep(500000);
             aliveMs += 500;
             if (aliveMs % 10000 == 0)

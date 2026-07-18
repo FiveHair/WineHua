@@ -3,7 +3,7 @@
 #include "wait_utils.h"
 #include "wayland_server.h"
 
-#include <AbilityKit/native_child_process.h>
+#include "ncp_shim/native_child_process.h"
 #include <IPCKit/ipc_kit.h>
 #include <native_window/external_window.h>
 
