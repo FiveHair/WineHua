@@ -270,6 +270,13 @@ void InputManager::SetToplevelVisible(uint32_t tl, bool visible) {
     OH_LOG_INFO(LOG_APP, "[Input] SetToplevelVisible tl=%{public}u visible=%{public}s", tl, visible ? "true" : "false");
 }
 
+void InputManager::ClearToplevelVisibility() {
+    std::lock_guard<std::mutex> lk(visibleMutex_);
+    size_t n = toplevelVisible_.size();
+    toplevelVisible_.clear();
+    OH_LOG_INFO(LOG_APP, "[MODE-SW] ClearToplevelVisibility (cleared %{public}zu entries)", n);
+}
+
 void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double py, int button) {
     // 窗口不可见时抑制输入
     {

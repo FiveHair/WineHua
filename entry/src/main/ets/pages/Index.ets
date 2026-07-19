@@ -2,6 +2,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
 import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
 import { zlib } from '@kit.BasicServicesKit';
+import { WineWindowManager } from '../service/WineWindowManager';
 
 const DOMAIN = 0x0000;
 const SOCK = '/data/storage/el2/base/files/.wine/wine-wayland';
@@ -94,11 +95,15 @@ struct Index {
   @State processList: ProcessInfo[] = [];
   @State initOverlayVisible: boolean = false;
   @State initOverlayText: string = '';
+  // 运行时模式切换 (多窗口 ↔ 桌面)
+  @State isDesktop: boolean = false;
+  @State modeSwitching: boolean = false;
   private hasRawfileWineData: boolean = false;
   private zHome: string = '/storage/Users/currentUser/Download';
 
   aboutToAppear(): void {
     this.hasRawfileWineData = this.detectRawfileWineData();
+    this.isDesktop = WineWindowManager.getInstance().getIsDesktopMode();
 
     testNapi.setStateCallback((s: string) => {
       hilog.info(DOMAIN, 'wine', 'state: %{public}s', s);
@@ -369,6 +374,28 @@ struct Index {
     testNapi.runWineExe(BIN_DIR, SOCK, `${WINE_BIN}:${WINE_LIB}`, exePath, this.zHome);
   }
 
+  // 运行时切换 多窗口 ↔ 桌面 模式 (不中断 Wine 应用)
+  private doSwitchMode = async (): Promise<void> => {
+    if (this.modeSwitching) return;
+    this.modeSwitching = true;
+    const target = !this.isDesktop;
+    this.statusText = target ? '切换到桌面模式...' : '切换到窗口模式...';
+    try {
+      const ok = await WineWindowManager.getInstance().switchMode(target);
+      // 失败时 manager 已自动回退, 以 manager 实际模式为准
+      this.isDesktop = WineWindowManager.getInstance().getIsDesktopMode();
+      this.statusText = ok
+        ? (this.isDesktop ? '桌面模式' : '窗口模式')
+        : '模式切换失败, 已回退';
+    } catch (e) {
+      hilog.error(DOMAIN, 'wine', 'switchMode error: %{public}s', JSON.stringify(e));
+      this.isDesktop = WineWindowManager.getInstance().getIsDesktopMode();
+      this.statusText = '模式切换异常';
+    } finally {
+      this.modeSwitching = false;
+    }
+  }
+
   private relPath = (): string => {
     if (this.curDir == DRIVE_C) return 'C:\\';
     return 'C:\\' + this.curDir.substring(DRIVE_C.length + 1).replace(/\//g, '\\');
@@ -423,6 +450,13 @@ struct Index {
             .width('100%').backgroundColor('#652')
             .enabled(this.state != 'wineserver-starting' && this.state != 'wineboot-starting' && this.state != 'wine-running')
             .onClick(this.doInit)
+            .margin({ bottom: 8 })
+          Button(this.modeSwitching ? '切换中...' :
+                 this.isDesktop ? '切换到窗口模式' : '切换到桌面模式')
+            .width('100%').backgroundColor('#256')
+            .enabled(!this.modeSwitching && this.state !== 'idle' &&
+                     this.state != 'wineserver-starting' && this.state != 'wineboot-starting')
+            .onClick(this.doSwitchMode)
             .margin({ bottom: 8 })
         }
 

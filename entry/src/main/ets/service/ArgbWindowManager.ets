@@ -183,6 +183,20 @@ export class ArgbWindowManager {
     }
   }
 
+  // 运行时模式切换: 销毁全部 ARGB 子窗口 (静默, 不通知 Wine;
+  // Wine 窗口存活, 切到桌面模式后由合成器显示)
+  destroyAll(): void {
+    const ids: number[] = [];
+    this.entries.forEach((_, id: number) => { ids.push(id); });
+    this.creating.forEach((id: number) => { if (!ids.includes(id)) ids.push(id); });
+    hilog.info(DOMAIN, TAG, '[ARGB] destroyAll: %{public}d windows', ids.length);
+    for (let i = 0; i < ids.length; i++) {
+      this.destroy(ids[i]);
+      // 渲染器显式销毁 (与 onToplevelDestroyed ARGB 分支同惯例)
+      try { testNapi.destroyToplevel(ids[i]); } catch (_) { /* ignore */ }
+    }
+  }
+
   private async positionEntry(entry: ArgbEntry, scale: number): Promise<void> {
     if (!entry.subWin) return;
     // Wine 虚拟屏幕坐标 → 全局物理像素

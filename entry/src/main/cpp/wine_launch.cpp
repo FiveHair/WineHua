@@ -21,6 +21,7 @@
 #include <strings.h>
 #include <thread>
 #include <vector>
+#include <atomic>
 
 #undef LOG_TAG
 #define LOG_TAG "WL_NAPI"
@@ -218,13 +219,131 @@ static void PrepareGraphicsEnv(const LaunchParams& params)
     LogGraphicsBackendStateForLaunch("GraphicsSession");
 }
 
-static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::string& serializedEnv) {
-    // 通过 fdList 传递 audio bootstrap fd (仅 explorer 需要音频)
+// -- 运行时模式切换: explorer /desktop 进程管理 --
+// LaunchThreadFunc 入口保存启动参数, 供运行时切到桌面模式时重启 explorer;
+// serializedEnv 不保存 — 每次 BuildWineEnv 现算, WINEHUA_DESKTOP_MODE 自动取当前模式
+static LaunchParams gSavedLaunchParams;
+static std::atomic<bool> gLaunchParamsSaved{false};
+static std::atomic<int> gExplorerDesktopPid{0};
+
+bool StartExplorerDesktopProcess() {
+    if (!gLaunchParamsSaved) {
+        OH_LOG_ERROR(LOG_APP, "[MODE-SW] launch params not saved, cannot start explorer desktop");
+        return false;
+    }
+    const LaunchParams& p = gSavedLaunchParams;
+    auto* ws = WaylandServer::GetInstance();
+    ws->SetDesktopRootRecognitionEnabled(true);
+
+    // audio bootstrap fd 每次重建 (AudioBroker::EnsureStarted 幂等, 每次新 fd);
+    // 跟随冷启动惯例不 close — NCP 异步 attach, 每次切换泄 1 个 fd 量级可忽略
+    int audioBootstrapFd = CreateAudioBootstrapFd(p.sockDir);
     NativeChildProcess_Fd audioFdNode;
     audioFdNode.fdName = const_cast<char*>("wine_audio_bootstrap");
     audioFdNode.fd = audioBootstrapFd;
     audioFdNode.next = nullptr;
 
+    std::vector<std::string> wineEnv = BuildWineEnv(p.sockDir, p.sockName, p.libPath,
+                                                     p.winehuaBin, audioBootstrapFd, p.homeDir);
+    std::string serializedEnv = SerializeEnvToEntryParams(wineEnv);
+
+    int dw = ws->outputW_ > 0 ? ws->outputW_ : 1280;
+    int dh = ws->outputH_ > 0 ? ws->outputH_ : 720;
+    OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop size: outputW=%{public}d outputH=%{public}d → %{public}dx%{public}d",
+                ws->outputW_, ws->outputH_, dw, dh);
+    char desktopArg[128];
+    snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d", dw, dh);
+#ifdef __aarch64__
+    std::string exEntry = p.homeDir + "|" + p.winehuaBin + serializedEnv + "|__winehua_desktop__|explorer|" + desktopArg;
+#else
+    std::string exEntry = p.homeDir + "|" + p.winehuaBin + serializedEnv + "|__winehua_desktop__|wine|explorer|" + desktopArg;
+#endif
+    NativeChildProcess_Args exArgs = {};
+    exArgs.entryParams = const_cast<char*>(exEntry.c_str());
+    exArgs.fdList.head = (audioBootstrapFd >= 0) ? &audioFdNode : nullptr;
+    NativeChildProcess_Options exOpts = {};
+    exOpts.isolationMode = NCP_ISOLATION_MODE_NORMAL;
+    int32_t exPid = -1;
+    auto exRet = OH_Ability_StartNativeChildProcess(
+        "libwine_child.so:Main", exArgs, exOpts, &exPid);
+    OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d ret=%{public}d",
+                exPid, (int)exRet);
+    if (exRet == NCP_NO_ERROR && exPid > 0) {
+        gExplorerDesktopPid = exPid;
+        AddProcess(exPid, "explorer.exe", -1);
+        // 竞态防御: NCP 启动慢于 ArkTS 15s 超时回退时, 模式已切回 multi,
+        // 刚启动的 explorer 必须立即杀掉 (否则残留一个 /desktop explorer)
+        if (!ws->IsDesktopMode()) {
+            OH_LOG_WARN(LOG_APP, "[MODE-SW] mode reverted while explorer starting, kill pid=%{public}d",
+                        exPid);
+            StopExplorerDesktopProcess();
+            return false;
+        }
+        return true;
+    }
+    // NCP 启动失败: 清 stale pid, 防止旧 explorer 死后 pid 被复用,
+    // StopExplorerDesktopProcess 误杀无辜进程 (review finding)
+    gExplorerDesktopPid = 0;
+    OH_LOG_ERROR(LOG_APP, "[MODE-SW] explorer desktop NCP failed ret=%{public}d pid=%{public}d",
+                 (int)exRet, exPid);
+    if (gStateTsfn)
+        napi_call_threadsafe_function(gStateTsfn, strdup("explorer-failed"), napi_tsfn_blocking);
+    return false;
+}
+
+bool StartBareExplorerProcess() {
+    if (!gLaunchParamsSaved) {
+        OH_LOG_ERROR(LOG_APP, "[MODE-SW] launch params not saved, cannot start bare explorer");
+        return false;
+    }
+    const LaunchParams& p = gSavedLaunchParams;
+    // 重建 env (IsDesktopMode()=false → WINEHUA_DESKTOP_MODE=0,
+    // 裸 explorer 不含 __winehua_desktop__ 标记, 走非虚拟桌面语义)
+    int audioBootstrapFd = CreateAudioBootstrapFd(p.sockDir);
+    NativeChildProcess_Fd audioFdNode;
+    audioFdNode.fdName = const_cast<char*>("wine_audio_bootstrap");
+    audioFdNode.fd = audioBootstrapFd;
+    audioFdNode.next = nullptr;
+    std::vector<std::string> wineEnv = BuildWineEnv(p.sockDir, p.sockName, p.libPath,
+                                                     p.winehuaBin, audioBootstrapFd, p.homeDir);
+    std::string serializedEnv = SerializeEnvToEntryParams(wineEnv);
+#ifdef __aarch64__
+    std::string exEntry = p.homeDir + "|" + p.winehuaBin + serializedEnv + "|explorer";
+#else
+    std::string exEntry = p.homeDir + "|" + p.winehuaBin + serializedEnv + "|wine|explorer";
+#endif
+    NativeChildProcess_Args exArgs = {};
+    exArgs.entryParams = const_cast<char*>(exEntry.c_str());
+    exArgs.fdList.head = (audioBootstrapFd >= 0) ? &audioFdNode : nullptr;
+    NativeChildProcess_Options exOpts = {};
+    exOpts.isolationMode = NCP_ISOLATION_MODE_NORMAL;
+    int32_t exPid = -1;
+    auto exRet = OH_Ability_StartNativeChildProcess(
+        "libwine_child.so:Main", exArgs, exOpts, &exPid);
+    OH_LOG_INFO(LOG_APP, "[MODE-SW] bare explorer pid=%{public}d ret=%{public}d",
+                exPid, (int)exRet);
+    if (exRet == NCP_NO_ERROR && exPid > 0) {
+        AddProcess(exPid, "explorer.exe", -1);
+        return true;
+    }
+    return false;
+}
+
+pid_t StopExplorerDesktopProcess() {
+    pid_t pid = gExplorerDesktopPid.exchange(0);
+    if (pid > 0) {
+        // SIGKILL 而非 xdg close: 桌面窗口 SC_CLOSE → ExitWindows(0,0)
+        // 会广播 ENDSESSION 杀掉所有 Wine 应用
+        OH_LOG_INFO(LOG_APP, "[MODE-SW] SIGKILL explorer desktop pid=%{public}d", (int)pid);
+        kill(pid, SIGKILL);
+        RemoveProcess(pid);
+    } else {
+        OH_LOG_WARN(LOG_APP, "[MODE-SW] no explorer desktop pid recorded, nothing to stop");
+    }
+    return pid;
+}
+
+static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::string& serializedEnv) {
     // -- wineserver via NCP --
     // wineserver 走 WineserverMain 入口, 不解析 __env__, 不需要环境变量
     {
@@ -327,30 +446,10 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, const std::stri
     // -- explorer (Desktop 或 Pad 模式均启动) --
     if (WaylandServer::GetInstance()->IsDesktopMode())
     {
-        auto* ws = WaylandServer::GetInstance();
-        ws->SetDesktopRootRecognitionEnabled(true);
-        int dw = ws->outputW_ > 0 ? ws->outputW_ : 1280;
-        int dh = ws->outputH_ > 0 ? ws->outputH_ : 720;
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop size: outputW=%{public}d outputH=%{public}d → %{public}dx%{public}d",
-                    ws->outputW_, ws->outputH_, dw, dh);
-        char desktopArg[128];
-        snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d", dw, dh);
-#ifdef __aarch64__
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|__winehua_desktop__|explorer|" + desktopArg;
-#else
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|__winehua_desktop__|wine|explorer|" + desktopArg;
-#endif
-        NativeChildProcess_Args exArgs = {};
-        exArgs.entryParams = const_cast<char*>(exEntry.c_str());
-        exArgs.fdList.head = (audioBootstrapFd >= 0) ? &audioFdNode : nullptr;
-        NativeChildProcess_Options exOpts = {};
-        exOpts.isolationMode = NCP_ISOLATION_MODE_NORMAL;
-        int32_t exPid = -1;
-        auto exRet = OH_Ability_StartNativeChildProcess(
-            "libwine_child.so:Main", exArgs, exOpts, &exPid);
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d ret=%{public}d",
-                    exPid, (int)exRet);
-        ws->PromotePendingDesktopRoot();
+        // 桌面模式 explorer 统一走 StartExplorerDesktopProcess
+        // (冷启动与运行时切换共用: env 现算 + audio fd 重建 + pid 记录)
+        StartExplorerDesktopProcess();
+        WaylandServer::GetInstance()->PromotePendingDesktopRoot();
     }
     else
     {
@@ -377,6 +476,10 @@ void LaunchThreadFunc(LaunchParams* p) {
     OH_LOG_INFO(LOG_APP, "[Launch-Async] wineserver + wineboot + wine starting in background");
     OH_LOG_INFO(LOG_APP, "[Launch-Async] XKB_CONFIG_ROOT=%{public}s",
                 (p->winehuaBin + "/../share/X11/xkb").c_str());
+
+    // 保存启动参数: 运行时切换到桌面模式时重启 explorer 用
+    gSavedLaunchParams = *p;
+    gLaunchParamsSaved = true;
 
     winehua::GraphicsBroker::GetInstance().SetWineRuntimeBinaryDir(p->winehuaBin);
     winehua::GraphicsBroker::GetInstance().EnsureStarted(p->sockDir);

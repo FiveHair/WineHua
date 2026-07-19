@@ -96,11 +96,16 @@ export default class WineWindowAbility extends UIAbility {
           hilog.info(DOMAIN, TAG, '[WWA] #%{public}d  WINDOW_DESTROYED (user closed)', this.toplevelId);
           this.cleanup();
         } else if (eventType === window.WindowEventType.WINDOW_SHOWN) {
-          hilog.info(DOMAIN, TAG, '[WWA] #%{public}d  WINDOW_SHOWN → resume input', this.toplevelId);
-          try { testNapi.setToplevelVisible(this.toplevelId, true); } catch (_) {}
+          if (!WineWindowManager.getInstance().isModeSwitching()) {
+            hilog.info(DOMAIN, TAG, '[WWA] #%{public}d  WINDOW_SHOWN → resume input', this.toplevelId);
+            try { testNapi.setToplevelVisible(this.toplevelId, true); } catch (_) {}
+          }
         } else if (eventType === window.WindowEventType.WINDOW_HIDDEN) {
-          hilog.info(DOMAIN, TAG, '[WWA] #%{public}d  WINDOW_HIDDEN → suppress input', this.toplevelId);
-          try { testNapi.setToplevelVisible(this.toplevelId, false); } catch (_) {}
+          // 模式切换时不标记不可见: desktop 模式下 toplevel 在 root frame 内仍可交互
+          if (!WineWindowManager.getInstance().isModeSwitching()) {
+            hilog.info(DOMAIN, TAG, '[WWA] #%{public}d  WINDOW_HIDDEN → suppress input', this.toplevelId);
+            try { testNapi.setToplevelVisible(this.toplevelId, false); } catch (_) {}
+          }
         }
       });
 
@@ -168,12 +173,23 @@ export default class WineWindowAbility extends UIAbility {
     this.cleanedUp = true;
     hilog.info(DOMAIN, TAG, '[WWA]  cleanup tl=%{public}d START: sendToplevelClose -> destroyToplevel -> unregisterAbility',
       this.toplevelId);
-    try {
-      testNapi.sendToplevelClose(this.toplevelId);
-      hilog.info(DOMAIN, TAG, '[WWA] cleanup tl=%{public}d: sendToplevelClose done', this.toplevelId);
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, '[WWA] ERR cleanup sendToplevelClose EXCEPTION tl=%{public}d: %{public}s',
-        this.toplevelId, JSON.stringify(e));
+    // 模式切换关闭 Ability 时静默: Wine 窗口继续存活 (切到桌面模式后由合成器显示),
+    // 不能给 Wine 发 close; 正常用户关窗才通知。
+    // 按 switchClosingIds 消费式判定 (不能只看 isModeSwitching: AMS 销毁窗口
+    // 可能晚于切换收尾, 迟到的 WINDOW_DESTROYED 会在标志已清后误关 Wine 窗口)
+    const silentClose = WineWindowManager.getInstance().consumeSwitchClosing(this.toplevelId)
+      || WineWindowManager.getInstance().isModeSwitching();
+    if (!silentClose) {
+      try {
+        testNapi.sendToplevelClose(this.toplevelId);
+        hilog.info(DOMAIN, TAG, '[WWA] cleanup tl=%{public}d: sendToplevelClose done', this.toplevelId);
+      } catch (e) {
+        hilog.error(DOMAIN, TAG, '[WWA] ERR cleanup sendToplevelClose EXCEPTION tl=%{public}d: %{public}s',
+          this.toplevelId, JSON.stringify(e));
+      }
+    } else {
+      hilog.info(DOMAIN, TAG, '[MODE-SW] cleanup tl=%{public}d: mode switching, skip sendToplevelClose',
+        this.toplevelId);
     }
     try {
       testNapi.destroyToplevel(this.toplevelId);

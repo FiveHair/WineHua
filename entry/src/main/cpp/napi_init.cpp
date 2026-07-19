@@ -410,6 +410,78 @@ static napi_value GetDesktopRootId(napi_env env, napi_callback_info) {
     return r;
 }
 
+// -- 运行时模式切换 NAPI --
+// 防重入: ArkTS modeSwitching + Index 按钮禁用之外的最后一道闸
+static std::atomic<bool> gModeSwitchInFlight{false};
+
+// switchCompositorMode(desktop: boolean): boolean — compositor 状态迁移 (同步)
+static napi_value SwitchCompositorMode(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool ok = false;
+    if (argc >= 1) {
+        bool on;
+        napi_get_value_bool(env, args[0], &on);
+        OH_LOG_INFO(LOG_APP, "[MODE-SW] NAPI switchCompositorMode -> %{public}s",
+                    on ? "desktop" : "multi");
+        WaylandServer::GetInstance()->SwitchCompositorMode(on);
+        ok = true;
+    }
+    napi_value r;
+    napi_get_boolean(env, ok, &r);
+    return r;
+}
+
+// replayToplevels(excludePid: number): void — desktop→multi 补发 created 等事件
+static napi_value ReplayToplevels(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    uint32_t excludePid = 0;
+    if (argc >= 1) napi_get_value_uint32(env, args[0], &excludePid);
+    WaylandServer::GetInstance()->ReplayToplevelsForMulti(excludePid);
+    return nullptr;
+}
+
+// startExplorerDesktop(): boolean — 后台线程异步启动 explorer /desktop
+// (NCP 启动惯例在后台线程, 见 LaunchClient); 返回 true = 已派发,
+// 真实失败经 gStateTsfn 发 "explorer-failed", ArkTS 等 desktop_root 超时兜底
+static napi_value StartExplorerDesktop(napi_env env, napi_callback_info) {
+    bool expected = false;
+    if (!gModeSwitchInFlight.compare_exchange_strong(expected, true)) {
+        OH_LOG_WARN(LOG_APP, "[MODE-SW] startExplorerDesktop rejected: switch in flight");
+        napi_value r;
+        napi_get_boolean(env, false, &r);
+        return r;
+    }
+    std::thread([]() {
+        StartExplorerDesktopProcess();
+        gModeSwitchInFlight = false;
+    }).detach();
+    napi_value r;
+    napi_get_boolean(env, true, &r);
+    return r;
+}
+
+// stopExplorerDesktop(): number — SIGKILL explorer /desktop, 返回被杀 pid (0=无)
+static napi_value StopExplorerDesktop(napi_env env, napi_callback_info) {
+    pid_t pid = StopExplorerDesktopProcess();
+    napi_value r;
+    napi_create_uint32(env, pid > 0 ? static_cast<uint32_t>(pid) : 0, &r);
+    return r;
+}
+
+// startBareExplorer(): boolean — 启动裸 explorer (无 /desktop),
+// desktop→multi 切换后恢复 systray/ShellExecute 等基础 shell 服务
+static napi_value StartBareExplorer(napi_env env, napi_callback_info) {
+    // 裸 explorer 启动快 (~1s), NCP 内部同步, 无需异步线程
+    bool ok = StartBareExplorerProcess();
+    napi_value r;
+    napi_get_boolean(env, ok, &r);
+    return r;
+}
+
 // -- NAPI: takeWindowMask -- (ARGB 异型窗口剪影掩码, ArkTS 轮询拉取)
 static napi_value TakeWindowMask(napi_env env, napi_callback_info info) {
     size_t argc = 1;
@@ -645,6 +717,12 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"setDisplayScale",  nullptr, SetDisplayScale,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setDesktopMode",   nullptr, SetDesktopMode,   nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getDesktopRootId", nullptr, GetDesktopRootId, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // 运行时模式切换 (多窗口 ↔ 桌面)
+        {"switchCompositorMode", nullptr, SwitchCompositorMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"replayToplevels",      nullptr, ReplayToplevels,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startExplorerDesktop", nullptr, StartExplorerDesktop, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopExplorerDesktop",  nullptr, StopExplorerDesktop,  nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startBareExplorer",    nullptr, StartBareExplorer,    nullptr, nullptr, nullptr, napi_default, nullptr},
         // ArkTS input forwarding (unified InputManager path)
         {"sendPointerEvent", nullptr, SendPointerEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendKeyEvent",     nullptr, SendKeyEvent,     nullptr, nullptr, nullptr, napi_default, nullptr},

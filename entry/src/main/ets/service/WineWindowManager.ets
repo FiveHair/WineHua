@@ -51,6 +51,19 @@ export class WineWindowManager {
   // 主窗口 windowStage (ARGB 异型子窗口/popup 回退宿主)
   private mainWindowStage: window.WindowStage | null = null;
 
+  // -- 运行时模式切换 (多窗口 ↔ 桌面) --
+  private modeSwitching: boolean = false;
+  // 切换窗口期缓冲的事件 (destroyed/desktop_root 除外), 切换收尾后按新模式语义重放
+  private switchBuffer: Array<[number, string, string]> = [];
+  // DesktopAbility 的 context (terminateSelf 用, onCreate 注册 / onDestroy 注销)
+  private desktopAbilityCtx: common.UIAbilityContext | null = null;
+  // 等待 desktop_root 事件的 resolver (multi→desktop 切换同步点)
+  private desktopRootWaiter: (() => void) | null = null;
+  // 因模式切换而被 terminateSelf 的 toplevel: WWA cleanup 据此静默 (跳过
+  // sendToplevelClose)。不能只看 modeSwitching — AMS 销毁窗口可能晚于切换收尾,
+  // 迟到的 WINDOW_DESTROYED 会在标志已清后误关 Wine 窗口。消费式: 查一次即删
+  private switchClosingIds: Set<number> = new Set();
+
   // toplevelId -> 聚合状态 (WineWindowEntry)
   private entries: Map<number, WineWindowEntry> = new Map();
   // toplevelId -> 已销毁标记 (WineWindowAbility.onCreate 竞态拦截)。
@@ -286,6 +299,13 @@ export class WineWindowManager {
 
   // -- toplevel 事件分发 --
   private onToplevelEvent(id: number, event: string, data: string): void {
+    // 模式切换窗口期: 除 destroyed(需实时清理)/desktop_root(切换同步点)外
+    // 全部缓冲, 切换收尾后按新模式语义 drain (created 时机语义两模式不同)
+    if (this.modeSwitching && event !== 'desktop_root' && event !== 'destroyed') {
+      this.switchBuffer.push([id, event, data]);
+      hilog.info(DOMAIN, TAG, '[MODE-SW] buffer event #%{public}d %{public}s (switching)', id, event);
+      return;
+    }
     hilog.info(DOMAIN, TAG, '[MW] onToplevelEvent #%{public}d event=%{public}s hasWindow=%{public}s',
       id, event, this.entries.get(id)?.win ? 'yes' : 'no');
 
@@ -303,6 +323,8 @@ export class WineWindowManager {
         hilog.info(DOMAIN, TAG, '[MW] desktop_root toplevel #%{public}d → start DesktopAbility', id);
         this.desktopRootId = id;
         this.startDesktopAbility(id);
+        // multi→desktop 切换同步点: 唤醒 waitDesktopRoot
+        if (this.desktopRootWaiter) this.desktopRootWaiter();
         break;
       case 'destroyed':
         hilog.info(DOMAIN, TAG, '[MW] -> onToplevelDestroyed(#%{public}d)', id);
@@ -568,7 +590,7 @@ export class WineWindowManager {
   }
 
   // -- startAbility 启动 multiton 实例 --
-  private startWineWindowAbility(id: number, data: string): void {
+  private startWineWindowAbility(id: number, data: string, isRetry: boolean = false): void {
     const e = this.ensureEntry(id);
     if (e.starting || e.ctx) {
       hilog.warn(DOMAIN, TAG, '[MW] startWineWindowAbility #%{public}d: already in flight/alive, skip', id);
@@ -610,7 +632,17 @@ export class WineWindowManager {
     }).catch((err: Error) => {
       hilog.error(DOMAIN, TAG, '[MW] ERR startAbility #%{public}d REJECTED: %{public}s',
         id, JSON.stringify(err));
-      // 启动失败: 整体清档 (含已积压事件, 旧实现会遗留 pendingEvents 永不 flush)
+      if (!isRetry) {
+        // 首次失败重试一次: 模式切换的 startAbility 风暴可能被 AMS 限流,
+        // 直接 sendToplevelClose 会误关正在运行的应用窗口
+        hilog.warn(DOMAIN, TAG, '[MODE-SW] retry startAbility #%{public}d in 500ms', id);
+        e.starting = false;
+        setTimeout(() => {
+          if (!this.destroyed.has(id)) this.startWineWindowAbility(id, data, true);
+        }, 500);
+        return;
+      }
+      // 重试仍失败: 整体清档 (含已积压事件, 旧实现会遗留 pendingEvents 永不 flush)
       this.entries.delete(id);
       // 通知 Wine 窗口创建失败
       hilog.info(DOMAIN, TAG, '[MW] -> sendToplevelClose #%{public}d (fail recovery)', id);
@@ -687,4 +719,147 @@ export class WineWindowManager {
   }
 
   getDesktopRootId(): number { return this.desktopRootId; }
+
+  // -- 运行时模式切换 (多窗口 ↔ 桌面) --
+
+  isModeSwitching(): boolean { return this.modeSwitching; }
+
+  // WWA cleanup 查询: 本窗口是否因模式切换被关闭 (消费式, 查一次即删)
+  consumeSwitchClosing(id: number): boolean {
+    return this.switchClosingIds.delete(id);
+  }
+
+  getIsDesktopMode(): boolean { return this.isDesktopMode; }
+
+  // DesktopAbility 生命周期回填 (onCreate 注册 / onDestroy 注销)
+  registerDesktopAbility(ctx: common.UIAbilityContext): void {
+    this.desktopAbilityCtx = ctx;
+    hilog.info(DOMAIN, TAG, '[MODE-SW] registerDesktopAbility');
+  }
+
+  unregisterDesktopAbility(): void {
+    this.desktopAbilityCtx = null;
+    this.desktopAbilityRunning = false;
+    hilog.info(DOMAIN, TAG, '[MODE-SW] unregisterDesktopAbility');
+  }
+
+  // 唯一切换入口。返回 false = 正在切换中被拒 / multi→desktop 失败已回退。
+  // 不中断 Wine: 应用进程/窗口资源全程不动, 只重建呈现层 (Ability/renderer)
+  // 与 explorer 进程 (desktop 专属)。
+  async switchMode(desktop: boolean): Promise<boolean> {
+    if (this.modeSwitching) {
+      hilog.warn(DOMAIN, TAG, '[MODE-SW] switchMode rejected: already switching');
+      return false;
+    }
+    if (this.isDesktopMode === desktop) {
+      hilog.info(DOMAIN, TAG, '[MODE-SW] switchMode: already in target mode, no-op');
+      return true;
+    }
+    this.modeSwitching = true;
+    hilog.info(DOMAIN, TAG, '[MODE-SW] ===== switchMode -> %{public}s =====',
+      desktop ? 'desktop' : 'multi');
+    try {
+      if (desktop) {
+        return await this.switchToDesktop();
+      }
+      return this.switchToMulti(-1);
+    } finally {
+      this.modeSwitching = false;
+      this.drainSwitchBuffer();
+      hilog.info(DOMAIN, TAG, '[MODE-SW] ===== switchMode done, mode=%{public}s =====',
+        this.isDesktopMode ? 'desktop' : 'multi');
+    }
+  }
+
+  // multi→desktop: compositor 迁移 → 静默关全部 PC 窗口 → 启 explorer → 等 desktop_root
+  private async switchToDesktop(): Promise<boolean> {
+    this.isDesktopMode = true;
+    testNapi.switchCompositorMode(true);
+    // 关闭全部 PC 侧窗口 (静默: cleanup 按 switchClosingIds 跳过 sendToplevelClose)
+    ArgbWindowManager.getInstance().destroyAll();
+    PopupWindowManager.getInstance().destroyAll();
+    const doomed: number[] = [];
+    this.entries.forEach((_e: WineWindowEntry, id: number) => { doomed.push(id); });
+    for (let i = 0; i < doomed.length; i++) {
+      const id = doomed[i];
+      const e = this.entries.get(id);
+      if (!e) continue;
+      this.switchClosingIds.add(id);
+      if (e.ctx) {
+        hilog.info(DOMAIN, TAG, '[MODE-SW] terminateSelf WWA #%{public}d (silent)', id);
+        e.ctx.terminateSelf().catch((err: Error) => {
+          hilog.warn(DOMAIN, TAG, '[MODE-SW] terminateSelf #%{public}d failed: %{public}s',
+            id, JSON.stringify(err));
+        });
+      }
+      // 立即删档: AMS 销毁是异步的, 若快速切回 multi, 残留 entry.ctx 会让
+      // replay 的 created 被 starting/ctx 去重误跳过 → 窗口丢失
+      this.entries.delete(id);
+    }
+    // 启动 explorer /desktop → 等 desktop_root (现有识别/DesktopAbility 机制复用)
+    const dispatched: boolean = testNapi.startExplorerDesktop();
+    if (dispatched && await this.waitDesktopRoot(15000)) {
+      hilog.info(DOMAIN, TAG, '[MODE-SW] switch to desktop OK, root=#%{public}d', this.desktopRootId);
+      return true;
+    }
+    // 回退: 杀可能半启动的 explorer, 反向切回 multi (复用 desktop→multi 路径)
+    hilog.error(DOMAIN, TAG, '[MODE-SW] explorer desktop failed (dispatched=%{public}s), rollback to multi',
+      String(dispatched));
+    this.switchToMulti(-1);
+    return false;
+  }
+
+  // desktop→multi: 杀 explorer(SIGKILL, 严禁 xdg close) → compositor 迁移 →
+  // 关 DesktopAbility → replay 现存窗口 (created 风暴逐个开 WineWindowAbility)
+  private switchToMulti(killedExplorerPid: number): boolean {
+    const exPid: number = killedExplorerPid >= 0 ? killedExplorerPid : testNapi.stopExplorerDesktop();
+    testNapi.switchCompositorMode(false);
+    this.isDesktopMode = false;
+    this.desktopRootId = 0;
+    if (this.desktopAbilityCtx) {
+      hilog.info(DOMAIN, TAG, '[MODE-SW] terminateSelf DesktopAbility');
+      this.desktopAbilityCtx.terminateSelf().catch((err: Error) => {
+        hilog.warn(DOMAIN, TAG, '[MODE-SW] terminate DesktopAbility failed: %{public}s',
+          JSON.stringify(err));
+      });
+      this.desktopAbilityCtx = null;
+    }
+    this.desktopAbilityRunning = false;
+    testNapi.replayToplevels(exPid > 0 ? exPid : 0);
+    hilog.info(DOMAIN, TAG, '[MODE-SW] switch to multi done (killed explorer pid=%{public}d)', exPid);
+    return true;
+  }
+
+  // multi→desktop 同步点: desktop_root 事件到达 resolve(true), 超时 resolve(false)
+  private waitDesktopRoot(timeoutMs: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (!done) {
+          done = true;
+          this.desktopRootWaiter = null;
+          resolve(false);
+        }
+      }, timeoutMs);
+      this.desktopRootWaiter = () => {
+        if (!done) {
+          done = true;
+          clearTimeout(timer);
+          this.desktopRootWaiter = null;
+          resolve(true);
+        }
+      };
+    });
+  }
+
+  // 切换收尾: 缓冲事件按新模式语义重放 (created 去重靠 e.starting/e.ctx 与墓碑)
+  private drainSwitchBuffer(): void {
+    if (this.switchBuffer.length === 0) return;
+    const buf = this.switchBuffer;
+    this.switchBuffer = [];
+    hilog.info(DOMAIN, TAG, '[MODE-SW] drain %{public}d buffered events', buf.length);
+    for (let i = 0; i < buf.length; i++) {
+      this.onToplevelEvent(buf[i][0], buf[i][1], buf[i][2]);
+    }
+  }
 }

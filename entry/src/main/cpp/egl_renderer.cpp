@@ -777,8 +777,14 @@ void EglRenderer::RenderLoop() {
         int zeroCopyHeight = 0;
         uint32_t useToplevel = toplevelId_;
         WaylandServer* ws = WaylandServer::GetInstance();
-        // Desktop mode: root toplevel may be recreated, always use current ID
-        if (ws->IsDesktopMode()) useToplevel = ws->GetDesktopRootToplevelId();
+        // Desktop mode: root toplevel may be recreated, always use current ID.
+        // 仅桌面 renderer (toplevelId_==rootId, MoveRendererToToplevel 同步)
+        // 允许取 root 帧 — 运行时切换过渡期, 尚未销毁的旧窗口 renderer 若
+        // 抢先消费 root 帧 dirty, 真正的桌面 renderer 将取不到帧 (静止桌面黑屏)
+        if (ws->IsDesktopMode()) {
+            uint32_t rootId = ws->GetDesktopRootToplevelId();
+            useToplevel = (rootId == 0 || toplevelId_ == rootId) ? rootId : 0;
+        }
         TryAttachZeroCopySurface(useToplevel);
         const bool zeroCopyGeometryFrame = zeroCopyGeometryDirty_;
         zeroCopyGeometryDirty_ = false;

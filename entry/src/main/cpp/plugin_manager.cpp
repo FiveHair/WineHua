@@ -106,6 +106,9 @@ void PluginManager::MoveRendererToToplevel(uint32_t oldId, uint32_t newId) {
         return;
     }
     OH_LOG_INFO(LOG_APP, "[MW-Plug] MoveRenderer tl #%{public}u -> #%{public}u", oldId, newId);
+    // 同步 renderer 内部 id: RenderLoop 依据 toplevelId_==rootId 判定
+    // 自己是否桌面 renderer (运行时切换过渡期防旧窗口 renderer 抢 root 帧)
+    it->second->SetToplevelId(newId);
     toplevelRenderers_[newId] = std::move(it->second);
     toplevelRenderers_.erase(it);
 }

@@ -261,6 +261,20 @@ export class PopupWindowManager {
     }
   }
 
+  // 运行时模式切换: 销毁全部 popup 子窗口
+  // (C++ 侧 popup 记录已由 SwitchCompositorMode 清除, renderer 随子窗口销毁)
+  destroyAll(): void {
+    const doomed: PopupEntry[] = [];
+    this.popups.forEach((entry) => { doomed.push(entry); });
+    hilog.info(DOMAIN, TAG, '[POPUP] destroyAll: %{public}d popups', doomed.length);
+    for (const entry of doomed) {
+      this.destroyEntry(entry);
+    }
+    // 创建中的 popup 标记延迟销毁, 积压事件作废
+    this.creating.forEach((id: number) => { this.pendingDestroy.add(id); });
+    this.pendingEvents.clear();
+  }
+
   // 父窗口移动/缩放 → 重新定位其全部 popup
   // (全局坐标 = 父窗口内容原点 + offset × scale, 无论 OHOS 是否自动跟随都收敛到正确位置)
   repositionPopups(parentToplevel: number, parentWin: window.Window, scale: number): void {

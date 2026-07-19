@@ -30,6 +30,18 @@ uint32_t GetWaylandClientPid(wl_client* client)
     return pid > 0 ? static_cast<uint32_t>(pid) : 0;
 }
 
+// JSON 字符串值转义 (窗口标题嵌入事件 JSON 用): 引号/反斜杠加转义, 控制字符丢弃
+std::string JsonEscape(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        if (c == '"' || c == '\\') { out.push_back('\\'); out.push_back(c); }
+        else if (static_cast<unsigned char>(c) >= 0x20) out.push_back(c);
+    }
+    return out;
+}
+
 // 全屏变换: 保比例缩放 + 居中黑边 (letterbox)。
 // Wine 全屏窗口可坚持自己的分辨率 (小于输出尺寸, 见 winewayland
 // wayland_surface_config_is_compatible 对 fullscreen "任意尺寸兼容" 的注释),
@@ -422,13 +434,12 @@ void WaylandServer::subsurface_set_position(wl_client*, wl_resource* ssRes,
             auto rit = self->popups_.find(pit->second);
             if (rit != self->popups_.end()) {
                 auto& rec = rit->second;
-                int32_t geoX = 0, geoY = 0;
-                if (sd->parentSurface) {
-                    auto* parentSd = static_cast<SurfaceData*>(wl_resource_get_user_data(sd->parentSurface));
-                    if (parentSd) { geoX = parentSd->geoX; geoY = parentSd->geoY; }
-                }
-                rec.offX = x - geoX;
-                rec.offY = y - geoY;
+                // popup 偏移直接用 subsurface offset: 本 compositor 的 toplevel
+                // 内容原点恒为 buffer (0,0), multi 模式下 parent geo 恒 0,0 减法
+                // 本是 no-op; 但 desktop 模式启动的旧进程 (geo=屏幕坐标) 运行时
+                // 切到 multi 后, 减 geo 会把窗口屏幕坐标错误扣进菜单偏移 → 解耦
+                rec.offX = x;
+                rec.offY = y;
                 movePopupId = rec.popupId;
                 moveParent = rec.parentToplevel;
                 moveOffX = rec.offX;
@@ -1149,8 +1160,11 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
                      * popup_show, ArkTS 侧因窗口不存在而积压 (竞态极小, 仅微量
                      * 内存)。如需根治可在此处检查 parentId 是否仍存活。
                      */
-                    int32_t offX = sd->subsurfaceX - parentSd->geoX;
-                    int32_t offY = sd->subsurfaceY - parentSd->geoY;
+                    // 偏移直接用 subsurface offset (不减 parent geo, 理由见
+                    // subsurface_set_position 处注释: 运行时切换模式后旧进程的
+                    // geo 可能是屏幕坐标, 减法会污染菜单偏移)
+                    int32_t offX = sd->subsurfaceX;
+                    int32_t offY = sd->subsurfaceY;
                     int dispW = sd->w, dispH = sd->h;
                     int cropX = 0, cropY = 0;
                     if (sd->vpSrcW > 0 && sd->vpSrcH > 0) {
@@ -1988,6 +2002,175 @@ void WaylandServer::PromotePendingDesktopRoot() {
     OH_LOG_INFO(LOG_APP, "[MW] pending desktop root promoted: #%{public}u", id);
     PluginManager::GetInstance()->MoveRendererToToplevel(0, id);
     FireToplevelEvent(id, "desktop_root", "{}");
+}
+
+void WaylandServer::SwitchCompositorMode(bool desktop) {
+    OH_LOG_INFO(LOG_APP, "[MODE-SW] SwitchCompositorMode -> %{public}s",
+                desktop ? "desktop" : "multi");
+    // 悬垂 move grab 会吞掉后续 motion, 先复位 (自带锁; PC 模式会发 move_end)
+    EndMoveGrab();
+    std::vector<uint32_t> restoreIds;  // 锁外 SetToplevelRestored (需发 configure)
+    {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        desktopMode_ = desktop;
+        desktopRootToplevelId_ = 0;
+        pendingDesktopRootToplevelId_ = 0;
+        desktopRootRecognitionEnabled_ = true;
+        // popup 记录清空 (含 toplevels_ 伪条目/surface 映射):
+        // multi→desktop 时 ArkTS 侧自行销毁子窗口, 这里只清数据;
+        // desktop→multi 方向通常为空, 防御性清理
+        std::vector<uint32_t> popupIds;
+        popupIds.reserve(popups_.size());
+        for (auto& [pid, rec] : popups_) popupIds.push_back(pid);
+        for (uint32_t pid : popupIds) RemovePopupDataLocked(pid);
+        // 菜单层作废: 打开中的菜单下次 commit 按新模式路径重建
+        subsurfaceLayers_.clear();
+        toplevelZOrder_.clear();
+        desktopCompositionSignature_ = 0;
+        desktopOutputInitialized_ = false;
+        desktopRootFrameSerial_ = 0;
+        desktopOutputRootFrameSerial_ = 0;
+        // desktop→multi: 复位所有窗口坐标为 (0,0)。
+        // 旧进程 env=1 的 desktop 坐标在 multi 下无意义 (每个窗口是独立
+        // OHOS 子窗口, 位置由窗口管理器决定)。若不复位, ARGB 窗口后续
+        // commit 会把旧 desktop 坐标当作 OHOS 全局位置发送 argb_move,
+        // 导致 ARGB 子窗口错误定位 (review F2/F3)。
+        if (!desktop) {
+            for (auto& [tid, st] : toplevels_) {
+                if (st.hasPosition) { st.x = 0; st.y = 0; st.wineX = 0; st.wineY = 0; }
+            }
+        }
+        if (desktop) {
+            // maximized 状态在 SurfaceData 上: 先建 id → SurfaceData 映射
+            // (surfaceResources_ 同受 toplevelMutex_ 保护, 见 IsSurfaceAlive)
+            std::unordered_map<uint32_t, SurfaceData*> sdById;
+            for (auto& [key, res] : surfaceResources_) {
+                auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(res));
+                if (sd && sd->hasToplevel) sdById[sd->toplevelId] = sd;
+            }
+            // 现存应用窗口重建 zOrder (id 升序 ≈ 创建顺序, 尾部=最顶);
+            // multi 下 compositor 不知窗口屏幕位置 (drv env=0 时 geo 恒 0,0),
+            // 普通窗口赋级联坐标避免全部叠在左上角
+            std::vector<uint32_t> ids;
+            for (auto& [tid, st] : toplevels_) {
+                if (!HasFrame(st) || st.isBackground || !st.hasPosition) continue;
+                ids.push_back(tid);
+            }
+            std::sort(ids.begin(), ids.end());
+            int i = 0;
+            for (uint32_t tid : ids) {
+                auto* st = FindToplevelLocked(tid);
+                if (!st) continue;
+                toplevelZOrder_.push_back(tid);
+                auto sit = sdById.find(tid);
+                bool maximized = (sit != sdById.end() && sit->second->maximized);
+                if (!st->fullscreen && !maximized && st->x == 0 && st->y == 0) {
+                    st->x = 48 + 36 * (i % 8);
+                    st->y = 48 + 32 * (i % 8);
+                }
+                st->dirty = true;
+                if (st->minimized) restoreIds.push_back(tid);
+                OH_LOG_INFO(LOG_APP,
+                            "[MODE-SW] tl=%{public}u -> zOrder pos=(%{public}d,%{public}d) fs=%{public}d max=%{public}d min=%{public}d",
+                            tid, st->x, st->y, st->fullscreen ? 1 : 0,
+                            maximized ? 1 : 0, st->minimized ? 1 : 0);
+                i++;
+            }
+        }
+    }
+    // multi→desktop: 最小化窗口自动还原 — 应用都在 "Default" desktop,
+    // 新 explorer("shell") 的任务栏枚举不到它们, 保持最小化会无处还原
+    for (uint32_t id : restoreIds) {
+        OH_LOG_INFO(LOG_APP, "[MODE-SW] auto-restore minimized tl=%{public}u", id);
+        SetToplevelRestored(id);
+    }
+    // desktop 模式: 清空窗口可见性表。WWA 销毁时 WINDOW_HIDDEN 事件
+    // 会标记 toplevel 不可见, 但这些 toplevel 在 root frame 内依旧可见
+    // 可交互 — 不可见标记会阻断 SendPointerEvent 注入 (input_manager.cpp:277)
+    if (desktop)
+        InputManager::GetInstance()->ClearToplevelVisibility();
+}
+
+void WaylandServer::ReplayToplevelsForMulti(uint32_t excludeClientPid) {
+    struct ReplayItem {
+        uint32_t id = 0;
+        uint32_t shmFormat = 1;
+        int x = 0, y = 0, w = 0, h = 0;
+        std::string title;
+        bool maximized = false, minimized = false;
+        bool hasLimits = false;
+        int minW = 0, minH = 0, maxW = 0, maxH = 0;
+    };
+    std::vector<ReplayItem> items;
+    {
+        std::lock_guard<std::mutex> lk(toplevelMutex_);
+        for (auto& [key, res] : surfaceResources_) {
+            auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(res));
+            if (!sd || !sd->hasToplevel) continue;
+            // 被杀 explorer 的窗口: 断连可能尚未被 Wayland 线程处理, 主动跳过
+            // (漏网者靠随后的 destroyed 事件自动关闭 Ability, 无害)
+            if (excludeClientPid && sd->clientPid == excludeClientPid) continue;
+            auto* st = FindToplevelLocked(sd->toplevelId);
+            if (!st || !HasFrame(*st) || st->isBackground) continue;
+            ReplayItem item;
+            item.id = sd->toplevelId;
+            item.shmFormat = st->shmFormat;
+            item.x = st->x;
+            item.y = st->y;
+            item.w = st->w;
+            item.h = st->h;
+            item.title = sd->title;
+            item.maximized = sd->maximized;
+            item.minimized = st->minimized;
+            item.hasLimits = sd->hasSizeLimits;
+            item.minW = sd->minWidth;
+            item.minH = sd->minHeight;
+            item.maxW = sd->maxWidth;
+            item.maxH = sd->maxHeight;
+            items.push_back(std::move(item));
+        }
+    }
+    std::sort(items.begin(), items.end(),
+              [](const ReplayItem& a, const ReplayItem& b) { return a.id < b.id; });
+    // 按 PC 首帧语义逐窗补发 (tsfn 单队列保序: created 必先于其余事件到达 ArkTS)
+    for (auto& item : items) {
+        char json[512];
+        if (item.shmFormat == 0) {
+            // ARGB 异型窗口 → 子窗口路线; 掩码等下次 commit 的 mask_dirty 自然到达。
+            // 坐标固定 (0,0): replay 读的 st.x/st.y 是 desktop 模式的屏���坐标,
+            // multi 模式下 ArgbWindowManager 用它们设置子窗口全局位置 → 错误。
+            // ARGB 窗口位置在 multi 模式由 Wine 的后续 argb_move 驱动。
+            snprintf(json, sizeof(json), "{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}",
+                     0, 0, item.w, item.h);
+            FireToplevelEvent(item.id, "argb_created", json);
+        } else {
+            std::string esc = JsonEscape(item.title);
+            snprintf(json, sizeof(json), "{\"w\":%d,\"h\":%d,\"title\":\"%s\"}",
+                     item.w, item.h, esc.c_str());
+            FireToplevelEvent(item.id, "created", json);
+            if (!item.title.empty()) {
+                snprintf(json, sizeof(json), "{\"title\":\"%s\"}", esc.c_str());
+                FireToplevelEvent(item.id, "title", json);
+            }
+            if (item.hasLimits) {
+                snprintf(json, sizeof(json),
+                         "{\"minW\":%d,\"minH\":%d,\"maxW\":%d,\"maxH\":%d}",
+                         item.minW, item.minH, item.maxW, item.maxH);
+                FireToplevelEvent(item.id, "limits", json);
+            }
+            // created 不驱动 resize 逻辑, 显式补发保证窗口按内容尺寸开出
+            snprintf(json, sizeof(json), "{\"w\":%d,\"h\":%d}", item.w, item.h);
+            FireToplevelEvent(item.id, "resize", json);
+            if (item.maximized) FireToplevelEvent(item.id, "maximized");
+            if (item.minimized) FireToplevelEvent(item.id, "minimized");
+        }
+        OH_LOG_INFO(LOG_APP,
+                    "[MODE-SW] replay tl=%{public}u fmt=%{public}u %{public}dx%{public}d max=%{public}d min=%{public}d",
+                    item.id, item.shmFormat, item.w, item.h,
+                    item.maximized ? 1 : 0, item.minimized ? 1 : 0);
+    }
+    OH_LOG_INFO(LOG_APP, "[MODE-SW] replayed %{public}zu toplevels (excludePid=%{public}u)",
+                items.size(), excludeClientPid);
 }
 
 void WaylandServer::RegisterToplevelResource(uint32_t toplevelId, wl_resource* tl) {

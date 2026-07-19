@@ -68,6 +68,9 @@ public:
 
     // -- 窗口可见性 (输入抑制) --
     void SetToplevelVisible(uint32_t tl, bool visible);
+    // 清除所有窗口可见性标记: desktop 模式下 WWA 销毁时的 WINDOW_HIDDEN
+    // 不应影响 compositor 内的输入路由 (窗口在 root frame 内依旧可见可交互)
+    void ClearToplevelVisibility();
 
     // -- Focus 查询 (线程安全) --
     bool HasPointerFocus() const { return pointerFocusedToplevel_.load() != 0; }

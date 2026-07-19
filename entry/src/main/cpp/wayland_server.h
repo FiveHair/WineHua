@@ -166,6 +166,15 @@ public:
     uint32_t GetDesktopRootToplevelId() const { return desktopRootToplevelId_; }
     void SetDesktopRootRecognitionEnabled(bool enabled);
     void PromotePendingDesktopRoot();
+    // 运行时切换 desktop/multi 模式: 复位模式伴生状态 (root/zOrder/菜单层/popup 记录),
+    // multi→desktop 时把现存应用窗口重建进 zOrder 并赋级联坐标 (multi 下 compositor
+    // 不知窗口屏幕位置, drv env=0 时 geo 恒 0,0)。应用 Wine 进程/窗口资源全部不动。
+    void SwitchCompositorMode(bool desktop);
+    // desktop→multi: 对现存应用 toplevel 补发 created/argb_created/title/limits/
+    // resize/maximized/minimized 事件 (PC 语义), 驱动 ArkTS 逐个开 WineWindowAbility。
+    // excludeClientPid: 跳过该客户端的窗口 (刚被 SIGKILL 的 explorer,
+    // 断连可能尚未被 Wayland 线程处理完; 0 = 不排除)
+    void ReplayToplevelsForMulti(uint32_t excludeClientPid);
 
     // -- wayland 协议实现 --
     static void compositor_bind(wl_client*, void*, uint32_t, uint32_t);
@@ -303,7 +312,8 @@ private:
     std::mutex toplevelSurfaceMutex_;
 
     // Desktop 合成模式
-    bool desktopMode_ = false;
+    // (运行时可切换; 渲染线程/Wayland 线程/NAPI 线程无锁读 → atomic)
+    std::atomic<bool> desktopMode_{false};
     uint32_t desktopRootToplevelId_ = 0;
     uint32_t pendingDesktopRootToplevelId_ = 0;
     bool desktopRootRecognitionEnabled_ = true;
@@ -343,7 +353,7 @@ private:
         uint32_t parentToplevel = 0;
         wl_resource* surface = nullptr;  // popup 的 wl_surface (pointer enter 目标)
         uint64_t surfaceKey = 0;
-        int32_t offX = 0, offY = 0;      // 相对父窗口内容原点 (= subsurfaceX/Y - geoX/Y)
+        int32_t offX = 0, offY = 0;      // 相对父窗口原点 (= subsurfaceX/Y, 不减 geo)
         int w = 0, h = 0;
     };
     std::unordered_map<uint64_t, uint32_t> popupBySurfaceKey_;  // surfaceKey → popupId
