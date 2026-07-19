@@ -4,16 +4,18 @@
  * 鸿蒙手机平台限制 OH_Ability_*NativeChildProcess*（仅 2in1 可用），
  * 本文件提供相同 ABI 的 fork 替代实现：
  *   - OH_Ability_StartNativeChildProcess: fork + dlopen + dlsym(entry) + entry(args)
- *   - OH_Ability_CreateNativeChildProcess: 快速失败（virgl ZC 依赖 Binder 跨进程
- *     传递 OHNativeWindow，fork 无法等价，交由 GraphicsBroker 的 shm fallback）
+ *   - OH_Ability_CreateNativeChildProcess: fork + dlopen + NativeChildProcess_MainProc，
+ *     并建立 socketpair 作为"配置通道"替代系统 Binder 通道（virgl 控制面用）
  *
  * 与官方 NCP 的语义差异处理：
  *   1. fork 子进程继承 Ark 主进程低 4GB 映射 → child 里 UnmapLowAnonRegions()
  *   2. NCP 的 fd 所有权转移 → fork 后 parent 显式 close，防泄漏/EOF 语义错乱
  *   3. NCP 子进程由 appspawn 收尸 → 安装 SIGCHLD reaper 防僵尸
  *   4. NCP 同步返回 so 加载结果 → 握手 pipe 模拟同步错误语义
+ *   5. Create 的 Binder 通道 → socketpair，child 侧 fd 经 WINEHUA_NCP_SHIM_CFG_FD 传入；
+ *      回调返回 DUMMY proxy，由 graphics_broker 的包装函数识别后走 socket
  */
-#include "native_child_process.h"   // 同目录 shim 头（官方头副本）
+#include "native_child_process.h"   // 同目录 shim 头（官方头副本 + 扩展声明）
 
 #include <dlfcn.h>
 #include <dirent.h>
@@ -27,10 +29,12 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <string>
+#include <thread>
 #include <vector>
 
 #undef LOG_TAG
@@ -55,7 +59,7 @@ void InstallReaperOnce() {
     });
 }
 
-// ---- 关闭除 keep 外的所有继承 fd（listen/conn/Ark/gfx 全收掉）----
+// ---- 关闭除 keep 外的所有继承 fd ----
 void CloseAllFdsExcept(const std::vector<int>& keep) {
     DIR* d = opendir("/proc/self/fd");
     if (!d) return;
@@ -74,8 +78,6 @@ void CloseAllFdsExcept(const std::vector<int>& keep) {
 }
 
 // ---- 释放继承自 Ark 主进程的低 4GB anon/ark 映射 ----
-// NCP 子进程由 appspawn fork，低 4GB 天然干净；fork 子进程必须自己让位，
-// 否则 Wine WoW64/box32 的 MAP_FIXED 低地址分配会冲突。
 void UnmapLowAnonRegions() {
     FILE* f = fopen("/proc/self/maps", "r");
     if (!f) return;
@@ -136,7 +138,7 @@ void* DlopenWithFallback(const std::string& so) {
 // ---- Start 版 child：复刻官方伪代码 dlopen → dlsym(func) → func(args) ----
 [[noreturn]] void StartChildMain(std::string so, std::string func,
                                  NativeChildProcess_Args args, int handshakeWfd) {
-    for (int s = 1; s < 32; ++s) signal(s, SIG_DFL);   // 不继承主进程 handler（含 reaper）
+    for (int s = 1; s < 32; ++s) signal(s, SIG_DFL);
 
     std::vector<int> keep{handshakeWfd};
     for (auto* p = args.fdList.head; p; p = p->next) keep.push_back(p->fd);
@@ -149,17 +151,48 @@ void* DlopenWithFallback(const std::string& so) {
         fprintf(stderr, "[ncp_shim] dlopen %s failed: %s\n", so.c_str(), dlerror());
         _exit(125);
     }
-    using EntryFn = void (*)(NativeChildProcess_Args);   // 官方约定入口签名
+    using EntryFn = void (*)(NativeChildProcess_Args);
     auto fn = (EntryFn)dlsym(h, func.c_str());
     if (!fn) {
         fprintf(stderr, "[ncp_shim] dlsym %s failed\n", func.c_str());
         _exit(126);
     }
 
-    ChildHandshakeOk(handshakeWfd);   // 入口就绪，通知 parent 返回成功
-    fn(args);                          // Main 返回 = 子进程退出（官方语义）
+    ChildHandshakeOk(handshakeWfd);
+    fn(args);
     _exit(0);
 }
+
+// ---- Create 版 child：dlopen + NativeChildProcess_MainProc ----
+// 跳过 OnConnect（Binder stub 无人连接）；配置 socket fd 经环境变量传给 MainProc
+[[noreturn]] void CreateChildMain(std::string so, int handshakeWfd, int cfgFd) {
+    for (int s = 1; s < 32; ++s) signal(s, SIG_DFL);
+    CloseAllFdsExcept({handshakeWfd, cfgFd});
+    UnmapLowAnonRegions();
+    prctl(PR_SET_NAME, so.substr(0, 15).c_str(), 0, 0, 0);
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", cfgFd);
+    setenv("WINEHUA_NCP_SHIM_CFG_FD", buf, 1);
+
+    void* h = DlopenWithFallback(so);
+    if (!h) {
+        fprintf(stderr, "[ncp_shim] dlopen %s failed: %s\n", so.c_str(), dlerror());
+        _exit(125);
+    }
+    using MainProcFn = void (*)();
+    auto fn = (MainProcFn)dlsym(h, "NativeChildProcess_MainProc");
+    if (!fn) {
+        fprintf(stderr, "[ncp_shim] dlsym NativeChildProcess_MainProc failed\n");
+        _exit(126);
+    }
+
+    ChildHandshakeOk(handshakeWfd);
+    fn();
+    _exit(0);
+}
+
+int g_cfgSockParent = -1;   // virgl server 同时只有一个
 
 } // namespace
 
@@ -194,12 +227,11 @@ Ability_NativeChildProcess_ErrCode OH_Ability_StartNativeChildProcess(
     // ---- parent ----
     close(hs[1]);
     bool ok = ParentWaitHandshake(hs[0]);
-    // NCP "fd 所有权转移给子进程"在 fork 下要显式实现：关闭 parent 侧拷贝，
-    // 否则 fd 泄漏 + 对端（wineserver/audio）永远收不到 EOF
+    // NCP "fd 所有权转移"在 fork 下要显式实现：关闭 parent 侧拷贝
     for (auto* p = args.fdList.head; p; p = p->next) close(p->fd);
     if (!ok) {
         *pid = -1;
-        return NCP_ERR_LIB_LOADING_FAILED;   // 与官方"so 加载失败"语义一致
+        return NCP_ERR_LIB_LOADING_FAILED;
     }
     *pid = child;
     return NCP_NO_ERROR;
@@ -208,14 +240,52 @@ Ability_NativeChildProcess_ErrCode OH_Ability_StartNativeChildProcess(
 int OH_Ability_CreateNativeChildProcess(
     const char* libName, OH_Ability_OnNativeChildProcessStarted onProcessStarted)
 {
-    (void)libName;
-    (void)onProcessStarted;
-    // L0: virgl ZC 通道依赖 Binder 跨进程传 OHNativeWindow，fork 无法等价。
-    // 快速失败 → GraphicsBroker 走 shm fallback。
-    // 已确认调用方在 ret != NCP_NO_ERROR 时不等回调、直接降级，路径安全。
-    OH_LOG_WARN(LOG_APP, "[ncp_shim] CreateNativeChildProcess(%{public}s) -> NOT_SUPPORTED",
-                libName ? libName : "(null)");
-    return NCP_ERR_NOT_SUPPORTED;
+    if (!libName || !onProcessStarted) return NCP_ERR_INVALID_PARAM;
+    InstallReaperOnce();
+
+    int hs[2], cfg[2];
+    if (pipe(hs) != 0) return NCP_ERR_INTERNAL;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, cfg) != 0) {
+        close(hs[0]); close(hs[1]);
+        return NCP_ERR_INTERNAL;
+    }
+
+    pid_t child = fork();
+    if (child < 0) {
+        close(hs[0]); close(hs[1]); close(cfg[0]); close(cfg[1]);
+        return NCP_ERR_INTERNAL;
+    }
+    if (child == 0) {
+        close(hs[0]); close(cfg[0]);
+        CreateChildMain(libName, hs[1], cfg[1]);   // 不返回
+    }
+
+    // ---- parent ----
+    close(hs[1]); close(cfg[1]);
+    bool ok = ParentWaitHandshake(hs[0]);
+    if (ok) {
+        if (g_cfgSockParent >= 0) close(g_cfgSockParent);   // 清理上一个残留
+        g_cfgSockParent = cfg[0];
+    } else {
+        close(cfg[0]);
+    }
+    int err = ok ? NCP_NO_ERROR : NCP_ERR_LIB_LOADING_FAILED;
+    // 官方语义：启动结果在独立线程回调；proxy 给 DUMMY 魔数，
+    // graphics_broker 的包装函数识别后走配置 socket
+    std::thread([onProcessStarted, err] {
+        onProcessStarted(err, err == NCP_NO_ERROR
+            ? (OHIPCRemoteProxy*)OH_NCP_SHIM_DUMMY_PROXY : nullptr);
+    }).detach();
+    return NCP_NO_ERROR;
+}
+
+// ---- shim 扩展 API ----
+bool OH_NCPShim_IsDummyProxy(const OHIPCRemoteProxy* p) {
+    return p == (const OHIPCRemoteProxy*)OH_NCP_SHIM_DUMMY_PROXY;
+}
+int OH_NCPShim_GetConfigSocket() { return g_cfgSockParent; }
+void OH_NCPShim_CloseConfigSocket() {
+    if (g_cfgSockParent >= 0) { close(g_cfgSockParent); g_cfgSockParent = -1; }
 }
 
 } // extern "C"

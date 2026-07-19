@@ -519,6 +519,12 @@ Ability_NativeChildProcess_ErrCode OH_Ability_KillChildProcess(int32_t pid)
 __attribute__((__availability__(ohos, introduced=22.0.0)));
 
 #ifdef __cplusplus
+
+/* ===== WineHua fork-shim 扩展（非官方 API）===== */
+#define OH_NCP_SHIM_DUMMY_PROXY ((void*)0x4E435031)  /* 'NCP1' 魔数，标识非真 IPC proxy */
+bool OH_NCPShim_IsDummyProxy(const OHIPCRemoteProxy* p);
+int  OH_NCPShim_GetConfigSocket(void);               /* parent 侧配置 socket */
+void OH_NCPShim_CloseConfigSocket(void);
 } // extern "C"
 #endif
 
