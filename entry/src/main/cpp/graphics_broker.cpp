@@ -7,127 +7,7 @@
 #include "phone_adapter/phone_adapter.h"
 #include <IPCKit/ipc_kit.h>
 #include <native_window/external_window.h>
-
-// ==================== 手机适配层：virgl IPC 中继 ====================
-// 系统 NCP 的 Binder 通道由系统框架建立；手机 fork 路径下没有它，改用配置 socket
-// 做请求/响应中继。线协议（native 字节序）：
-//   请求: [u32 code][u32 payloadLen][payload]
-//   响应: [u32 payloadLen][payload]   （query=原始 struct 字节；其余=int32 result）
-// payload 字段顺序与 virgl_child.cpp OnVirglIpcRequest 的 parcel 解析严格一致。
-#include <sys/socket.h>
-#include <cerrno>
-#include <vector>
 #include "virgl_ipc_protocol.h"
-
-namespace {
-
-constexpr int kPhoneVirglRelayError = -1001;        // 调用方只判断 == OH_IPC_SUCCESS
-constexpr int32_t kPhoneVirglAttachDenied = -100; // Attach 被 shim 拒绝 → 上层走 shm
-std::mutex g_phoneVirglRelayMutex;                 // 单 socket 流，串行化请求/响应
-
-bool PhoneSockWriteAll(int fd, const void* buf, size_t len) {
-    const uint8_t* p = static_cast<const uint8_t*>(buf);
-    while (len > 0) {
-        ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
-        if (n < 0) { if (errno == EINTR) continue; return false; }
-        p += n; len -= static_cast<size_t>(n);
-    }
-    return true;
-}
-
-bool PhoneSockReadAll(int fd, void* buf, size_t len) {
-    uint8_t* p = static_cast<uint8_t*>(buf);
-    while (len > 0) {
-        ssize_t n = recv(fd, p, len, 0);
-        if (n < 0) { if (errno == EINTR) continue; return false; }
-        if (n == 0) return false;                 // EOF = child 已退出
-        p += n; len -= static_cast<size_t>(n);
-    }
-    return true;
-}
-
-template <typename T> bool PhoneSockWritePod(int fd, const T& v) {
-    return PhoneSockWriteAll(fd, &v, sizeof(v));
-}
-
-bool PhoneSockWriteStr(int fd, const char* s) {
-    uint32_t len = s ? static_cast<uint32_t>(strlen(s)) + 1 : 0;
-    return PhoneSockWritePod(fd, len) && (len == 0 || PhoneSockWriteAll(fd, s, len));
-}
-
-int PhoneVirglRelayRequestLocked(uint32_t code, const OHIPCParcel* data, OHIPCParcel* reply) {
-    namespace vi = winehua::virgl_ipc;
-    int fd = PhoneAdapter_GetConfigSocket();
-    if (fd < 0 || !data) return kPhoneVirglRelayError;
-
-    if (!PhoneSockWritePod(fd, code)) return kPhoneVirglRelayError;
-
-    switch (code) {
-    case vi::kConfigureRequest: {
-        int32_t version = 0;
-        const char* s[5] = {};
-        if (OH_IPCParcel_ReadInt32(data, &version) != OH_IPC_SUCCESS) return kPhoneVirglRelayError;
-        uint32_t len = sizeof(version);
-        for (int i = 0; i < 5; ++i) {
-            s[i] = OH_IPCParcel_ReadString(data);
-            if (!s[i]) return kPhoneVirglRelayError;
-            len += sizeof(uint32_t) + static_cast<uint32_t>(strlen(s[i])) + 1;
-        }
-        if (!PhoneSockWritePod(fd, len) || !PhoneSockWritePod(fd, version)) return kPhoneVirglRelayError;
-        for (int i = 0; i < 5; ++i) if (!PhoneSockWriteStr(fd, s[i])) return kPhoneVirglRelayError;
-        break;
-    }
-    case vi::kDetachSurfaceRequest: {
-        int32_t version = 0; int64_t key = 0;
-        if (OH_IPCParcel_ReadInt32(data, &version) != OH_IPC_SUCCESS ||
-            OH_IPCParcel_ReadInt64(data, &key) != OH_IPC_SUCCESS) return kPhoneVirglRelayError;
-        uint32_t len = sizeof(version) + sizeof(key);
-        if (!PhoneSockWritePod(fd, len) || !PhoneSockWritePod(fd, version) ||
-            !PhoneSockWritePod(fd, key)) return kPhoneVirglRelayError;
-        break;
-    }
-    case vi::kSetFramePeriodRequest: {
-        int32_t version = 0; int64_t key = 0, period = 0;
-        if (OH_IPCParcel_ReadInt32(data, &version) != OH_IPC_SUCCESS ||
-            OH_IPCParcel_ReadInt64(data, &key) != OH_IPC_SUCCESS ||
-            OH_IPCParcel_ReadInt64(data, &period) != OH_IPC_SUCCESS) return kPhoneVirglRelayError;
-        uint32_t len = sizeof(version) + sizeof(key) + sizeof(period);
-        if (!PhoneSockWritePod(fd, len) || !PhoneSockWritePod(fd, version) ||
-            !PhoneSockWritePod(fd, key) || !PhoneSockWritePod(fd, period)) return kPhoneVirglRelayError;
-        break;
-    }
-    case vi::kShutdownRequest:
-    case vi::kQuerySurfacesRequest: {
-        int32_t version = 0;
-        if (OH_IPCParcel_ReadInt32(data, &version) != OH_IPC_SUCCESS) return kPhoneVirglRelayError;
-        uint32_t len = sizeof(version);
-        if (!PhoneSockWritePod(fd, len) || !PhoneSockWritePod(fd, version)) return kPhoneVirglRelayError;
-        break;
-    }
-    default:
-        return kPhoneVirglRelayError;
-    }
-
-    uint32_t rlen = 0;
-    if (!PhoneSockReadAll(fd, &rlen, sizeof(rlen)) || rlen == 0 || rlen > 4096)
-        return kPhoneVirglRelayError;
-    if (code == vi::kQuerySurfacesRequest) {
-        std::vector<uint8_t> buf(rlen);
-        if (!PhoneSockReadAll(fd, buf.data(), rlen)) return kPhoneVirglRelayError;
-        if (reply &&
-            OH_IPCParcel_WriteBuffer(reply, buf.data(), static_cast<int32_t>(rlen)) != OH_IPC_SUCCESS)
-            return kPhoneVirglRelayError;
-    } else {
-        int32_t result = -1;
-        if (rlen != sizeof(result) || !PhoneSockReadAll(fd, &result, sizeof(result)))
-            return kPhoneVirglRelayError;
-        if (reply && OH_IPCParcel_WriteInt32(reply, result) != OH_IPC_SUCCESS)
-            return kPhoneVirglRelayError;
-    }
-    return OH_IPC_SUCCESS;
-}
-
-} // namespace
 
 // ---- 与 OH_IPCRemoteProxy_* 签名兼容的包装：真 proxy 走原 API，dummy 走 socket relay ----
 static int SendVirglRequestLocked(OHIPCRemoteProxy* proxy, uint32_t code,
@@ -136,19 +16,17 @@ static int SendVirglRequestLocked(OHIPCRemoteProxy* proxy, uint32_t code,
     if (!PhoneAdapter_IsDummyProxy(proxy)) {
         return OH_IPCRemoteProxy_SendRequest(proxy, code, data, reply, option);
     }
-    std::lock_guard<std::mutex> lock(g_phoneVirglRelayMutex);
     if (code == winehua::virgl_ipc::kAttachSurfaceRequest) {
         // OHNativeWindow 依赖 Binder 跨进程，手机 fork 路径下不可达 → 伪造失败，走 shm
         OH_LOG_WARN(LOG_APP, "[PhoneVirgl] AttachSurface denied in phone mode, fallback to shm");
         if (reply) OH_IPCParcel_WriteInt32(reply, kPhoneVirglAttachDenied);
         return OH_IPC_SUCCESS;
     }
-    return PhoneVirglRelayRequestLocked(code, data, reply);
+    return PhoneVirgl_RelayRequest(code, data, reply);  // → phone_adapter/phone_virgl_relay.cpp
 }
 
 static void VirglProxyDestroy(OHIPCRemoteProxy* proxy) {
-    // dummy proxy 的 socket 由手机适配层管理；此处置空操作，防竞态误关新 fd
-    if (PhoneAdapter_IsDummyProxy(proxy)) return;
+    if (PhoneAdapter_IsDummyProxy(proxy)) return;   // dummy proxy 的 socket 由手机适配层管理
     OH_IPCRemoteProxy_Destroy(proxy);
 }
 
@@ -158,9 +36,9 @@ static int VirglProxyIsRemoteDead(OHIPCRemoteProxy* proxy) {
     if (fd < 0) return 1;
     char c;
     ssize_t n = recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
-    if (n == 0) return 1;                          // EOF → child 已退出
+    if (n == 0) return 1;
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return 1;
-    return 0;                                       // 与真 API 一致：0 = 存活
+    return 0;
 }
 
 #include "virgl_ipc_protocol.h"

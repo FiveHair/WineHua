@@ -1,23 +1,14 @@
 /*
- * phone_adapter.cpp — 手机适配层：fork 版 native_child_process 实现
+ * phone_process.cpp — 手机适配层：fork 进程创建实现
  *
  * 鸿蒙手机上 OH_Ability_*NativeChildProcess* 不可用（仅 2in1 支持），
- * 本文件提供相同 ABI 的 fork 替代实现：
- *   - OH_Ability_StartNativeChildProcess: fork + dlopen + dlsym(entry) + entry(args)
- *   - OH_Ability_CreateNativeChildProcess: fork + dlopen + NativeChildProcess_MainProc，
- *     并建立 socketpair 作为"配置通道"替代系统 Binder 通道（virgl 控制面用）
- *
- * 与系统 NCP 的语义差异处理：
- *   1. fork 子进程继承 Ark 主进程低 4GB 映射 → child 里 UnmapLowAnonRegions()
- *   2. NCP 的 fd 所有权转移 → fork 后 parent 显式 close，防泄漏/EOF 语义错乱
- *   3. NCP 子进程由 appspawn 收尸 → 安装 SIGCHLD reaper 防僵尸
- *   4. NCP 同步返回 so 加载结果 → 握手 pipe 模拟同步错误语义
- *   5. Create 的 Binder 通道 → socketpair，child 侧 fd 经 WINEHUA_PHONE_CFG_FD 传入；
- *      回调返回 dummy proxy，由 graphics_broker 的包装函数识别后走 socket
+ * 本文件提供 fork 版替代实现。
+ * 路由逻辑在 ncp_dispatch.cpp，virgl relay/dispatch 在 phone_virgl_relay.cpp/dispatch.cpp。
  */
-#include "phone_adapter.h"                     // 手机适配层扩展声明
-#include <AbilityKit/native_child_process.h>   // 系统 NCP 类型定义
-#include <IPCKit/ipc_kit.h>                    // OHIPCRemoteProxy
+#include "phone_process.h"
+#include "phone_adapter.h"                     // PHONE_ADAPTER_DUMMY_PROXY
+#include <AbilityKit/native_child_process.h>
+#include <IPCKit/ipc_kit.h>
 
 #include <dlfcn.h>
 #include <dirent.h>
@@ -42,17 +33,6 @@
 #undef LOG_TAG
 #define LOG_TAG "PhoneAdapt"
 #include <hilog/log.h>
-
-// ====== 手机设备标志 ======
-// 由 EntryAbility 在 onWindowStageCreate 中根据 deviceType==='phone' 设置。
-// true  = 手机（系统 NCP 不可用）→ fork + socket relay
-// false = 2in1/Pad（系统 NCP 可用）→ 系统 Binder IPC
-// 必须在首次 NCP 调用前设置（首次调用在 Index.doInit 异步回调中）。
-static bool g_isPhone = false;
-
-extern "C" void PhoneAdapter_SetPhoneMode(bool phone) {
-    g_isPhone = phone;
-}
 
 namespace {
 
@@ -209,19 +189,9 @@ int g_cfgSockParent = -1;   // virgl server 同时只有一个
 
 } // namespace
 
-// 获取系统 libchild_process.so 的原始 NCP 函数指针。
-// 不能用 RTLD_NEXT（libchild_process.so 在 entry.so 之前加载，NEXT 搜不到），
-// 改用 dlopen(NOLOAD) 获取已加载的 libchild_process.so 句柄再 dlsym。
-template<typename Fn>
-static Fn GetRealNcp(const char* name) {
-    void* h = dlopen("libchild_process.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!h) return nullptr;
-    return reinterpret_cast<Fn>(dlsym(h, name));
-}
+// ====== fork 进程创建实现 ======
 
-extern "C" {
-
-static Ability_NativeChildProcess_ErrCode Phone_StartNativeChildProcess(
+Ability_NativeChildProcess_ErrCode Phone_StartNativeChildProcess(
     const char* entry, NativeChildProcess_Args args,
     NativeChildProcess_Options /* options 忽略：fork 天然同域 = NORMAL */, int32_t* pid)
 {
@@ -244,23 +214,18 @@ static Ability_NativeChildProcess_ErrCode Phone_StartNativeChildProcess(
     }
     if (child == 0) {
         close(hs[0]);
-        StartChildMain(e.substr(0, pos), e.substr(pos + 1), args, hs[1]);  // 不返回
+        StartChildMain(e.substr(0, pos), e.substr(pos + 1), args, hs[1]);
     }
 
-    // ---- parent ----
     close(hs[1]);
     bool ok = ParentWaitHandshake(hs[0]);
-    // NCP "fd 所有权转移"在 fork 下要显式实现：关闭 parent 侧拷贝
     for (auto* p = args.fdList.head; p; p = p->next) close(p->fd);
-    if (!ok) {
-        *pid = -1;
-        return NCP_ERR_LIB_LOADING_FAILED;
-    }
+    if (!ok) { *pid = -1; return NCP_ERR_LIB_LOADING_FAILED; }
     *pid = child;
     return NCP_NO_ERROR;
 }
 
-static int Phone_CreateNativeChildProcess(
+int Phone_CreateNativeChildProcess(
     const char* libName, OH_Ability_OnNativeChildProcessStarted onProcessStarted)
 {
     if (!libName || !onProcessStarted) return NCP_ERR_INVALID_PARAM;
@@ -280,21 +245,18 @@ static int Phone_CreateNativeChildProcess(
     }
     if (child == 0) {
         close(hs[0]); close(cfg[0]);
-        CreateChildMain(libName, hs[1], cfg[1]);   // 不返回
+        CreateChildMain(libName, hs[1], cfg[1]);
     }
 
-    // ---- parent ----
     close(hs[1]); close(cfg[1]);
     bool ok = ParentWaitHandshake(hs[0]);
     if (ok) {
-        if (g_cfgSockParent >= 0) close(g_cfgSockParent);   // 清理上一个残留
+        if (g_cfgSockParent >= 0) close(g_cfgSockParent);
         g_cfgSockParent = cfg[0];
     } else {
         close(cfg[0]);
     }
     int err = ok ? NCP_NO_ERROR : NCP_ERR_LIB_LOADING_FAILED;
-    // 官方语义：启动结果在独立线程回调；proxy 给 DUMMY 魔数，
-    // graphics_broker 的包装函数识别后走配置 socket
     std::thread([onProcessStarted, err] {
         onProcessStarted(err, err == NCP_NO_ERROR
             ? (OHIPCRemoteProxy*)PHONE_ADAPTER_DUMMY_PROXY : nullptr);
@@ -302,36 +264,8 @@ static int Phone_CreateNativeChildProcess(
     return NCP_NO_ERROR;
 }
 
-// ====== 对外路由 wrapper（符号覆盖点，覆盖 libchild_process.so 的实现）======
-// g_isPhone=true (手机): 走上面的 fork 实现
-// g_isPhone=false (2in1/Pad): GetRealNcp 找到系统 NCP 实现，转发调用
+// ====== Proxy 查询接口 ======
 
-Ability_NativeChildProcess_ErrCode OH_Ability_StartNativeChildProcess(
-    const char* entry, NativeChildProcess_Args args,
-    NativeChildProcess_Options options, int32_t* pid)
-{
-    if (!g_isPhone) {
-        auto realFn = GetRealNcp<decltype(&OH_Ability_StartNativeChildProcess)>(
-            "OH_Ability_StartNativeChildProcess");
-        if (realFn) return realFn(entry, args, options, pid);
-        return NCP_ERR_INTERNAL;
-    }
-    return Phone_StartNativeChildProcess(entry, args, options, pid);
-}
-
-int OH_Ability_CreateNativeChildProcess(
-    const char* libName, OH_Ability_OnNativeChildProcessStarted onProcessStarted)
-{
-    if (!g_isPhone) {
-        auto realFn = GetRealNcp<decltype(&OH_Ability_CreateNativeChildProcess)>(
-            "OH_Ability_CreateNativeChildProcess");
-        if (realFn) return realFn(libName, onProcessStarted);
-        return NCP_ERR_INTERNAL;
-    }
-    return Phone_CreateNativeChildProcess(libName, onProcessStarted);
-}
-
-// ---- 手机适配层扩展 API ----
 bool PhoneAdapter_IsDummyProxy(const void* p) {
     return p == (const void*)PHONE_ADAPTER_DUMMY_PROXY;
 }
@@ -339,5 +273,3 @@ int PhoneAdapter_GetConfigSocket() { return g_cfgSockParent; }
 void PhoneAdapter_CloseConfigSocket() {
     if (g_cfgSockParent >= 0) { close(g_cfgSockParent); g_cfgSockParent = -1; }
 }
-
-} // extern "C"
