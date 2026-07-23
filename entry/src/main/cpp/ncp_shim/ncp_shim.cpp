@@ -15,7 +15,9 @@
  *   5. Create 的 Binder 通道 → socketpair，child 侧 fd 经 WINEHUA_NCP_SHIM_CFG_FD 传入；
  *      回调返回 DUMMY proxy，由 graphics_broker 的包装函数识别后走 socket
  */
-#include "native_child_process.h"   // 同目录 shim 头（官方头副本 + 扩展声明）
+#include "ncp_shim.h"                           // fork-shim 扩展声明
+#include <AbilityKit/native_child_process.h>   // 系统 NCP 类型定义
+#include <IPCKit/ipc_kit.h>                    // OHIPCRemoteProxy
 
 #include <dlfcn.h>
 #include <dirent.h>
@@ -40,6 +42,17 @@
 #undef LOG_TAG
 #define LOG_TAG "NCP_Shim"
 #include <hilog/log.h>
+
+// ====== 手机设备标志 ======
+// 由 EntryAbility 在 onWindowStageCreate 中根据 deviceType==='phone' 设置。
+// true  = 手机（系统 NCP 不可用）→ fork + socket relay
+// false = 2in1/Pad（系统 NCP 可用）→ 系统 Binder IPC
+// 必须在首次 NCP 调用前设置（首次调用在 Index.doInit 异步回调中）。
+static bool g_isPhone = false;
+
+extern "C" void OH_NCPShim_SetPhoneMode(bool phone) {
+    g_isPhone = phone;
+}
 
 namespace {
 
@@ -196,9 +209,19 @@ int g_cfgSockParent = -1;   // virgl server 同时只有一个
 
 } // namespace
 
+// 获取系统 libchild_process.so 的原始 NCP 函数指针。
+// 不能用 RTLD_NEXT（libchild_process.so 在 entry.so 之前加载，NEXT 搜不到），
+// 改用 dlopen(NOLOAD) 获取已加载的 libchild_process.so 句柄再 dlsym。
+template<typename Fn>
+static Fn GetRealNcp(const char* name) {
+    void* h = dlopen("libchild_process.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!h) return nullptr;
+    return reinterpret_cast<Fn>(dlsym(h, name));
+}
+
 extern "C" {
 
-Ability_NativeChildProcess_ErrCode OH_Ability_StartNativeChildProcess(
+static Ability_NativeChildProcess_ErrCode Fork_StartNativeChildProcess(
     const char* entry, NativeChildProcess_Args args,
     NativeChildProcess_Options /* options 忽略：fork 天然同域 = NORMAL */, int32_t* pid)
 {
@@ -237,7 +260,7 @@ Ability_NativeChildProcess_ErrCode OH_Ability_StartNativeChildProcess(
     return NCP_NO_ERROR;
 }
 
-int OH_Ability_CreateNativeChildProcess(
+static int Fork_CreateNativeChildProcess(
     const char* libName, OH_Ability_OnNativeChildProcessStarted onProcessStarted)
 {
     if (!libName || !onProcessStarted) return NCP_ERR_INVALID_PARAM;
@@ -279,9 +302,38 @@ int OH_Ability_CreateNativeChildProcess(
     return NCP_NO_ERROR;
 }
 
+// ====== 对外路由 wrapper（符号覆盖点，覆盖 libchild_process.so 的实现）======
+// g_isPhone=true (手机): 走上面的 fork 实现
+// g_isPhone=false (2in1/Pad): GetRealNcp 找到系统 NCP 实现，转发调用
+
+Ability_NativeChildProcess_ErrCode OH_Ability_StartNativeChildProcess(
+    const char* entry, NativeChildProcess_Args args,
+    NativeChildProcess_Options options, int32_t* pid)
+{
+    if (!g_isPhone) {
+        auto realFn = GetRealNcp<decltype(&OH_Ability_StartNativeChildProcess)>(
+            "OH_Ability_StartNativeChildProcess");
+        if (realFn) return realFn(entry, args, options, pid);
+        return NCP_ERR_INTERNAL;
+    }
+    return Fork_StartNativeChildProcess(entry, args, options, pid);
+}
+
+int OH_Ability_CreateNativeChildProcess(
+    const char* libName, OH_Ability_OnNativeChildProcessStarted onProcessStarted)
+{
+    if (!g_isPhone) {
+        auto realFn = GetRealNcp<decltype(&OH_Ability_CreateNativeChildProcess)>(
+            "OH_Ability_CreateNativeChildProcess");
+        if (realFn) return realFn(libName, onProcessStarted);
+        return NCP_ERR_INTERNAL;
+    }
+    return Fork_CreateNativeChildProcess(libName, onProcessStarted);
+}
+
 // ---- shim 扩展 API ----
-bool OH_NCPShim_IsDummyProxy(const OHIPCRemoteProxy* p) {
-    return p == (const OHIPCRemoteProxy*)OH_NCP_SHIM_DUMMY_PROXY;
+bool OH_NCPShim_IsDummyProxy(const void* p) {
+    return p == (const void*)OH_NCP_SHIM_DUMMY_PROXY;
 }
 int OH_NCPShim_GetConfigSocket() { return g_cfgSockParent; }
 void OH_NCPShim_CloseConfigSocket() {

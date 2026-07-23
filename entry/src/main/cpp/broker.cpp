@@ -27,7 +27,7 @@ std::string gBrokerHomeDir;
 #include <atomic>
 #include <utility>
 #include <vector>
-#include "ncp_shim/native_child_process.h"
+#include <AbilityKit/native_child_process.h>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG

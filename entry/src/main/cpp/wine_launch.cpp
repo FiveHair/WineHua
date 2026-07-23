@@ -29,7 +29,7 @@
 #include "broker.h"
 #include "wait_utils.h"
 
-#include "ncp_shim/native_child_process.h"
+#include <AbilityKit/native_child_process.h>
 
 // -- prefix 初始化检测辅助函数 --
 static bool FileHasData(const char* path) {

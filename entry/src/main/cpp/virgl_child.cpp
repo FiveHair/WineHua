@@ -1,4 +1,4 @@
-#include "ncp_shim/native_child_process.h"
+#include <AbilityKit/native_child_process.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
