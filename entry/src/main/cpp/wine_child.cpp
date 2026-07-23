@@ -10,7 +10,7 @@
  *
  * fdList 的第一个 fd 为 wineserver socket，设为 WINESERVERSOCKET。
  */
-#include <AbilityKit/native_child_process.h>
+#include "ncp_shim/native_child_process.h"
 #include <hilog/log.h>
 #include <unistd.h>
 #include <errno.h>
