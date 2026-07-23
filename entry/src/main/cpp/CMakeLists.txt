@@ -31,7 +31,7 @@ add_library(entry SHARED
     wine_exe.cpp
     wine_mmap_test.cpp
     broker.cpp
-    ncp_shim/ncp_shim.cpp
+    phone_adapter/phone_adapter.cpp
     wayland_server.cpp
     egl_renderer.cpp
     plugin_manager.cpp

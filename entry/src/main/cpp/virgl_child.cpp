@@ -262,13 +262,13 @@ int OnVtestPresent(uint32_t texId, uint32_t width, uint32_t height,
 
 extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_Args args);
 
-// ==================== fork-shim dispatch（手机端） ====================
-// fork 模式下没有 Binder 驱动回调 OnVirglIpcRequest；本线程从 shim 配置 socket
+// ==================== 手机适配层：virgl IPC dispatch ====================
+// fork 模式下没有 Binder 驱动回调 OnVirglIpcRequest；本线程从配置 socket
 // 读请求、按 virgl_ipc 协议构造 parcel、直接调用 OnVirglIpcRequest，并回送 reply。
-// 线协议与 graphics_broker.cpp 的 VirglShimSendRequestLocked 严格对应。
+// 线协议与 graphics_broker.cpp 的 PhoneVirglRelayRequestLocked 严格对应。
 namespace {
-constexpr uint32_t kShimMaxPayload = 4096;
-bool ShimReadAll(int fd, void* buf, size_t len) {
+constexpr uint32_t kPhoneMaxPayload = 4096;
+bool PhoneSockReadAll(int fd, void* buf, size_t len) {
     uint8_t* p = static_cast<uint8_t*>(buf);
     while (len > 0) {
         ssize_t n = recv(fd, p, len, 0);
@@ -278,7 +278,7 @@ bool ShimReadAll(int fd, void* buf, size_t len) {
     }
     return true;
 }
-bool ShimWriteAll(int fd, const void* buf, size_t len) {
+bool PhoneSockWriteAll(int fd, const void* buf, size_t len) {
     const uint8_t* p = static_cast<const uint8_t*>(buf);
     while (len > 0) {
         ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
@@ -287,24 +287,24 @@ bool ShimWriteAll(int fd, const void* buf, size_t len) {
     }
     return true;
 }
-template <typename T> bool ShimReadPod(int fd, T& v) { return ShimReadAll(fd, &v, sizeof(v)); }
-template <typename T> bool ShimWritePod(int fd, const T& v) { return ShimWriteAll(fd, &v, sizeof(v)); }
-bool ShimReadStr(int fd, std::string& out) {
+template <typename T> bool PhoneSockReadPod(int fd, T& v) { return PhoneSockReadAll(fd, &v, sizeof(v)); }
+template <typename T> bool PhoneSockWritePod(int fd, const T& v) { return PhoneSockWriteAll(fd, &v, sizeof(v)); }
+bool PhoneSockReadStr(int fd, std::string& out) {
     uint32_t len = 0;
-    if (!ShimReadPod(fd, len) || len > 1024) return false;
+    if (!PhoneSockReadPod(fd, len) || len > 1024) return false;
     if (len == 0) { out.clear(); return true; }
     std::vector<char> buf(len);
-    if (!ShimReadAll(fd, buf.data(), len)) return false;
+    if (!PhoneSockReadAll(fd, buf.data(), len)) return false;
     out.assign(buf.data(), len - 1);   // 去掉 NUL 结尾
     return true;
 }
-void ShimDispatchLoop(int fd) {
+void PhoneVirglDispatchLoop(int fd) {
     namespace vi = winehua::virgl_ipc;
-    OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][SHIM] dispatch loop start fd=%{public}d pid=%{public}d",
+    OH_LOG_INFO(LOG_APP, "[PhoneVirgl] dispatch loop start fd=%{public}d pid=%{public}d",
                 fd, getpid());
     while (true) {
         uint32_t code = 0, len = 0;
-        if (!ShimReadPod(fd, code) || !ShimReadPod(fd, len) || len > kShimMaxPayload) break;
+        if (!PhoneSockReadPod(fd, code) || !PhoneSockReadPod(fd, len) || len > kPhoneMaxPayload) break;
         OHIPCParcel* data = OH_IPCParcel_Create();
         OHIPCParcel* reply = OH_IPCParcel_Create();
         bool ok = (data && reply);
@@ -312,8 +312,8 @@ void ShimDispatchLoop(int fd) {
             switch (code) {
             case vi::kConfigureRequest: {
                 int32_t version = 0; std::string s[5];
-                ok = ShimReadPod(fd, version);
-                for (int i = 0; ok && i < 5; ++i) ok = ShimReadStr(fd, s[i]);
+                ok = PhoneSockReadPod(fd, version);
+                for (int i = 0; ok && i < 5; ++i) ok = PhoneSockReadStr(fd, s[i]);
                 if (ok) {
                     OH_IPCParcel_WriteInt32(data, version);
                     for (int i = 0; i < 5; ++i) OH_IPCParcel_WriteString(data, s[i].c_str());
@@ -322,7 +322,7 @@ void ShimDispatchLoop(int fd) {
             }
             case vi::kDetachSurfaceRequest: {
                 int32_t version = 0; int64_t key = 0;
-                ok = ShimReadPod(fd, version) && ShimReadPod(fd, key);
+                ok = PhoneSockReadPod(fd, version) && PhoneSockReadPod(fd, key);
                 if (ok) {
                     OH_IPCParcel_WriteInt32(data, version);
                     OH_IPCParcel_WriteInt64(data, key);
@@ -331,7 +331,7 @@ void ShimDispatchLoop(int fd) {
             }
             case vi::kSetFramePeriodRequest: {
                 int32_t version = 0; int64_t key = 0, period = 0;
-                ok = ShimReadPod(fd, version) && ShimReadPod(fd, key) && ShimReadPod(fd, period);
+                ok = PhoneSockReadPod(fd, version) && PhoneSockReadPod(fd, key) && PhoneSockReadPod(fd, period);
                 if (ok) {
                     OH_IPCParcel_WriteInt32(data, version);
                     OH_IPCParcel_WriteInt64(data, key);
@@ -342,7 +342,7 @@ void ShimDispatchLoop(int fd) {
             case vi::kShutdownRequest:
             case vi::kQuerySurfacesRequest: {
                 int32_t version = 0;
-                ok = ShimReadPod(fd, version);
+                ok = PhoneSockReadPod(fd, version);
                 if (ok) OH_IPCParcel_WriteInt32(data, version);
                 break;
             }
@@ -362,19 +362,19 @@ void ShimDispatchLoop(int fd) {
             const uint8_t* bytes = OH_IPCParcel_ReadBuffer(
                 reply, static_cast<int32_t>(sizeof(vi::SurfaceQueryReply)));
             uint32_t rlen = bytes ? static_cast<uint32_t>(sizeof(vi::SurfaceQueryReply)) : 0;
-            ShimWritePod(fd, rlen);
-            if (rlen) ShimWriteAll(fd, bytes, rlen);
+            PhoneSockWritePod(fd, rlen);
+            if (rlen) PhoneSockWriteAll(fd, bytes, rlen);
         } else {
             int32_t result = -1;
             OH_IPCParcel_ReadInt32(reply, &result);
             uint32_t rlen = sizeof(result);
-            ShimWritePod(fd, rlen);
-            ShimWritePod(fd, result);
+            PhoneSockWritePod(fd, rlen);
+            PhoneSockWritePod(fd, result);
         }
         OH_IPCParcel_Destroy(data);
         OH_IPCParcel_Destroy(reply);
     }
-    OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][SHIM] dispatch loop exit fd=%{public}d", fd);
+    OH_LOG_INFO(LOG_APP, "[PhoneVirgl] dispatch loop exit fd=%{public}d", fd);
 }
 } // namespace
 extern "C" __attribute__((visibility("default"))) OHIPCRemoteStub* NativeChildProcess_OnConnect()
@@ -390,14 +390,14 @@ extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainPr
 {
     ClearGuestGraphicsEnv();
     setenv("EGL_PLATFORM", "surfaceless", 1);
-    // fork-shim 模式：启动 socket dispatch 线程，替代 Binder 驱动回调
+    // 手机适配层：启动 socket dispatch 线程，替代 Binder 驱动回调
     {
-        const char* shimFdEnv = getenv("WINEHUA_NCP_SHIM_CFG_FD");
+        const char* shimFdEnv = getenv("WINEHUA_PHONE_CFG_FD");
         if (shimFdEnv && shimFdEnv[0]) {
             int shimFd = atoi(shimFdEnv);
-            OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][SHIM] fork mode, starting dispatch on fd=%{public}d",
+            OH_LOG_INFO(LOG_APP, "[PhoneVirgl] phone mode, starting dispatch on fd=%{public}d",
                         shimFd);
-            std::thread(ShimDispatchLoop, shimFd).detach();
+            std::thread(PhoneVirglDispatchLoop, shimFd).detach();
         }
     }
     std::unique_lock<std::mutex> lock(g_ipcChildMutex);

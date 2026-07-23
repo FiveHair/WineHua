@@ -11,7 +11,7 @@
 #include "wine_process.h"
 #include "wine_launch.h"
 #include "wine_mmap_test.h"
-#include "ncp_shim/ncp_shim.h"
+#include "phone_adapter/phone_adapter.h"
 
 #include <unistd.h>
 #include <signal.h>
@@ -411,7 +411,7 @@ static napi_value SetPhoneMode(napi_env env, napi_callback_info info) {
     if (argc >= 1) {
         bool on;
         napi_get_value_bool(env, args[0], &on);
-        OH_NCPShim_SetPhoneMode(on);
+        PhoneAdapter_SetPhoneMode(on);
         OH_LOG_INFO(LOG_APP, "[MW-NAPI] setPhoneMode = %{public}s", on ? "true" : "false");
     }
     return nullptr;

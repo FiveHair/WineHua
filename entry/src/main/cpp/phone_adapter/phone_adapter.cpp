@@ -1,21 +1,21 @@
 /*
- * ncp_shim.cpp — fork 版 native_child_process 实现
+ * phone_adapter.cpp — 手机适配层：fork 版 native_child_process 实现
  *
- * 鸿蒙手机平台限制 OH_Ability_*NativeChildProcess*（仅 2in1 可用），
+ * 鸿蒙手机上 OH_Ability_*NativeChildProcess* 不可用（仅 2in1 支持），
  * 本文件提供相同 ABI 的 fork 替代实现：
  *   - OH_Ability_StartNativeChildProcess: fork + dlopen + dlsym(entry) + entry(args)
  *   - OH_Ability_CreateNativeChildProcess: fork + dlopen + NativeChildProcess_MainProc，
  *     并建立 socketpair 作为"配置通道"替代系统 Binder 通道（virgl 控制面用）
  *
- * 与官方 NCP 的语义差异处理：
+ * 与系统 NCP 的语义差异处理：
  *   1. fork 子进程继承 Ark 主进程低 4GB 映射 → child 里 UnmapLowAnonRegions()
  *   2. NCP 的 fd 所有权转移 → fork 后 parent 显式 close，防泄漏/EOF 语义错乱
  *   3. NCP 子进程由 appspawn 收尸 → 安装 SIGCHLD reaper 防僵尸
  *   4. NCP 同步返回 so 加载结果 → 握手 pipe 模拟同步错误语义
- *   5. Create 的 Binder 通道 → socketpair，child 侧 fd 经 WINEHUA_NCP_SHIM_CFG_FD 传入；
- *      回调返回 DUMMY proxy，由 graphics_broker 的包装函数识别后走 socket
+ *   5. Create 的 Binder 通道 → socketpair，child 侧 fd 经 WINEHUA_PHONE_CFG_FD 传入；
+ *      回调返回 dummy proxy，由 graphics_broker 的包装函数识别后走 socket
  */
-#include "ncp_shim.h"                           // fork-shim 扩展声明
+#include "phone_adapter.h"                     // 手机适配层扩展声明
 #include <AbilityKit/native_child_process.h>   // 系统 NCP 类型定义
 #include <IPCKit/ipc_kit.h>                    // OHIPCRemoteProxy
 
@@ -40,7 +40,7 @@
 #include <vector>
 
 #undef LOG_TAG
-#define LOG_TAG "NCP_Shim"
+#define LOG_TAG "PhoneAdapt"
 #include <hilog/log.h>
 
 // ====== 手机设备标志 ======
@@ -50,7 +50,7 @@
 // 必须在首次 NCP 调用前设置（首次调用在 Index.doInit 异步回调中）。
 static bool g_isPhone = false;
 
-extern "C" void OH_NCPShim_SetPhoneMode(bool phone) {
+extern "C" void PhoneAdapter_SetPhoneMode(bool phone) {
     g_isPhone = phone;
 }
 
@@ -161,13 +161,13 @@ void* DlopenWithFallback(const std::string& so) {
 
     void* h = DlopenWithFallback(so);
     if (!h) {
-        fprintf(stderr, "[ncp_shim] dlopen %s failed: %s\n", so.c_str(), dlerror());
+        fprintf(stderr, "[PhoneAdapt] dlopen %s failed: %s\n", so.c_str(), dlerror());
         _exit(125);
     }
     using EntryFn = void (*)(NativeChildProcess_Args);
     auto fn = (EntryFn)dlsym(h, func.c_str());
     if (!fn) {
-        fprintf(stderr, "[ncp_shim] dlsym %s failed\n", func.c_str());
+        fprintf(stderr, "[PhoneAdapt] dlsym %s failed\n", func.c_str());
         _exit(126);
     }
 
@@ -186,17 +186,17 @@ void* DlopenWithFallback(const std::string& so) {
 
     char buf[32];
     snprintf(buf, sizeof(buf), "%d", cfgFd);
-    setenv("WINEHUA_NCP_SHIM_CFG_FD", buf, 1);
+    setenv("WINEHUA_PHONE_CFG_FD", buf, 1);
 
     void* h = DlopenWithFallback(so);
     if (!h) {
-        fprintf(stderr, "[ncp_shim] dlopen %s failed: %s\n", so.c_str(), dlerror());
+        fprintf(stderr, "[PhoneAdapt] dlopen %s failed: %s\n", so.c_str(), dlerror());
         _exit(125);
     }
     using MainProcFn = void (*)();
     auto fn = (MainProcFn)dlsym(h, "NativeChildProcess_MainProc");
     if (!fn) {
-        fprintf(stderr, "[ncp_shim] dlsym NativeChildProcess_MainProc failed\n");
+        fprintf(stderr, "[PhoneAdapt] dlsym NativeChildProcess_MainProc failed\n");
         _exit(126);
     }
 
@@ -221,7 +221,7 @@ static Fn GetRealNcp(const char* name) {
 
 extern "C" {
 
-static Ability_NativeChildProcess_ErrCode Fork_StartNativeChildProcess(
+static Ability_NativeChildProcess_ErrCode Phone_StartNativeChildProcess(
     const char* entry, NativeChildProcess_Args args,
     NativeChildProcess_Options /* options 忽略：fork 天然同域 = NORMAL */, int32_t* pid)
 {
@@ -260,7 +260,7 @@ static Ability_NativeChildProcess_ErrCode Fork_StartNativeChildProcess(
     return NCP_NO_ERROR;
 }
 
-static int Fork_CreateNativeChildProcess(
+static int Phone_CreateNativeChildProcess(
     const char* libName, OH_Ability_OnNativeChildProcessStarted onProcessStarted)
 {
     if (!libName || !onProcessStarted) return NCP_ERR_INVALID_PARAM;
@@ -297,7 +297,7 @@ static int Fork_CreateNativeChildProcess(
     // graphics_broker 的包装函数识别后走配置 socket
     std::thread([onProcessStarted, err] {
         onProcessStarted(err, err == NCP_NO_ERROR
-            ? (OHIPCRemoteProxy*)OH_NCP_SHIM_DUMMY_PROXY : nullptr);
+            ? (OHIPCRemoteProxy*)PHONE_ADAPTER_DUMMY_PROXY : nullptr);
     }).detach();
     return NCP_NO_ERROR;
 }
@@ -316,7 +316,7 @@ Ability_NativeChildProcess_ErrCode OH_Ability_StartNativeChildProcess(
         if (realFn) return realFn(entry, args, options, pid);
         return NCP_ERR_INTERNAL;
     }
-    return Fork_StartNativeChildProcess(entry, args, options, pid);
+    return Phone_StartNativeChildProcess(entry, args, options, pid);
 }
 
 int OH_Ability_CreateNativeChildProcess(
@@ -328,15 +328,15 @@ int OH_Ability_CreateNativeChildProcess(
         if (realFn) return realFn(libName, onProcessStarted);
         return NCP_ERR_INTERNAL;
     }
-    return Fork_CreateNativeChildProcess(libName, onProcessStarted);
+    return Phone_CreateNativeChildProcess(libName, onProcessStarted);
 }
 
-// ---- shim 扩展 API ----
-bool OH_NCPShim_IsDummyProxy(const void* p) {
-    return p == (const void*)OH_NCP_SHIM_DUMMY_PROXY;
+// ---- 手机适配层扩展 API ----
+bool PhoneAdapter_IsDummyProxy(const void* p) {
+    return p == (const void*)PHONE_ADAPTER_DUMMY_PROXY;
 }
-int OH_NCPShim_GetConfigSocket() { return g_cfgSockParent; }
-void OH_NCPShim_CloseConfigSocket() {
+int PhoneAdapter_GetConfigSocket() { return g_cfgSockParent; }
+void PhoneAdapter_CloseConfigSocket() {
     if (g_cfgSockParent >= 0) { close(g_cfgSockParent); g_cfgSockParent = -1; }
 }
 
