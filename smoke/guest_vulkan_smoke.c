@@ -28,6 +28,21 @@ struct probe_state {
     int bc6;
     int bc7;
     int descriptor_indexing;
+    int api13;
+    int core_robust_buffer_access;
+    int robust_buffer_access2;
+    int robust_image_access2;
+    int null_descriptor;
+    int buffer_device_address;
+    int dual_src_blend;
+    int multi_viewport;
+    int rgba8_snorm_color_attachment;
+    int d24s8_sampled;
+    int d24s8_depth_stencil_attachment;
+    int transport_features_ready;
+    int transport_device_create_attempted;
+    int transport_device_create_ok;
+    VkResult transport_device_create_result;
     int scalar_block_layout;
     int robustness2;
     int transform_feedback;
@@ -125,6 +140,10 @@ static void write_result(const struct probe_state *state, const char *status,
             "\"graphicsQueueFamily\":%u,\"pushConstantBytes\":%u,"
             "\"geometryShader\":%s,\"tessellationShader\":%s,"
             "\"multiDrawIndirect\":%s,\"descriptorIndexing\":%s,"
+            "\"api13\":%s,\"coreRobustBufferAccess\":%s,"
+            "\"robustBufferAccess2\":%s,\"robustImageAccess2\":%s,"
+            "\"nullDescriptor\":%s,\"bufferDeviceAddress\":%s,"
+            "\"dualSrcBlend\":%s,\"multiViewport\":%s,"
             "\"scalarBlockLayout\":%s,\"robustness2\":%s,"
             "\"transformFeedback\":%s,\"shaderInt8\":%s,"
             "\"shaderInt16\":%s,\"shaderInt64\":%s,"
@@ -138,6 +157,17 @@ static void write_result(const struct probe_state *state, const char *status,
             "\"bc1\":%s,\"bc2\":%s,\"bc3\":%s,\"bc4\":%s,"
             "\"bc5\":%s,\"bc6\":%s,\"bc7\":%s},\n"
             "  \"checks\": {\"bufferCopy\":%s,\"imageClear\":%s},\n"
+            "  \"dxvk262\": {\"transport\":{\"api13\":%s,"
+            "\"coreRobustBufferAccess\":%s,\"robustBufferAccess2\":%s,"
+            "\"robustImageAccess2\":%s,\"nullDescriptor\":%s,"
+            "\"synchronization2\":%s,\"dynamicRendering\":%s,"
+            "\"maintenance4\":%s,\"deviceCreateAttempted\":%s,"
+            "\"deviceCreateResult\":%d,\"passed\":%s},"
+            "\"formats\":{\"bc1\":%s,\"bc2\":%s,\"bc3\":%s,"
+            "\"bc4\":%s,\"bc5\":%s,\"bc6\":%s,\"bc7\":%s,"
+            "\"rgba8SnormColorAttachment\":%s,\"d24s8Sampled\":%s,"
+            "\"d24s8DepthStencilAttachment\":%s},"
+            "\"eligibility\":{\"transport\":\"%s\",\"bringup\":\"%s\"}},\n"
             "  \"metrics\": {\"cpuReadBytes\":4096,\"cpuUploadBytes\":4096,"
             "\"gpuCopyCount\":2,\"queueSubmitCount\":2,"
             "\"perFrameDeviceWaitIdle\":0,\"fallbackDetected\":%s,"
@@ -153,6 +183,14 @@ static void write_result(const struct probe_state *state, const char *status,
             state->features.tessellationShader ? "true" : "false",
             state->features.multiDrawIndirect ? "true" : "false",
             state->descriptor_indexing ? "true" : "false",
+            state->api13 ? "true" : "false",
+            state->core_robust_buffer_access ? "true" : "false",
+            state->robust_buffer_access2 ? "true" : "false",
+            state->robust_image_access2 ? "true" : "false",
+            state->null_descriptor ? "true" : "false",
+            state->buffer_device_address ? "true" : "false",
+            state->dual_src_blend ? "true" : "false",
+            state->multi_viewport ? "true" : "false",
             state->scalar_block_layout ? "true" : "false",
             state->robustness2 ? "true" : "false",
             state->transform_feedback ? "true" : "false",
@@ -176,6 +214,26 @@ static void write_result(const struct probe_state *state, const char *status,
             state->bc7 ? "true" : "false",
             state->buffer_copy_ok ? "true" : "false",
             state->image_clear_ok ? "true" : "false",
+            state->api13 ? "true" : "false",
+            state->core_robust_buffer_access ? "true" : "false",
+            state->robust_buffer_access2 ? "true" : "false",
+            state->robust_image_access2 ? "true" : "false",
+            state->null_descriptor ? "true" : "false",
+            state->synchronization2 ? "true" : "false",
+            state->dynamic_rendering ? "true" : "false",
+            state->maintenance4 ? "true" : "false",
+            state->transport_device_create_attempted ? "true" : "false",
+            (int)state->transport_device_create_result,
+            state->transport_device_create_ok ? "true" : "false",
+            state->bc1 ? "true" : "false", state->bc2 ? "true" : "false",
+            state->bc3 ? "true" : "false", state->bc4 ? "true" : "false",
+            state->bc5 ? "true" : "false", state->bc6 ? "true" : "false",
+            state->bc7 ? "true" : "false",
+            state->rgba8_snorm_color_attachment ? "true" : "false",
+            state->d24s8_sampled ? "true" : "false",
+            state->d24s8_depth_stencil_attachment ? "true" : "false",
+            state->transport_device_create_ok ? "PASS" : "FAIL",
+            state->transport_device_create_ok ? "D3D11_FEATURE_PROBE_PENDING" : "BLOCKED",
             state->fallback_detected ? "true" : "false",
             (unsigned long long)(now_ms() - state->started_ms));
     fflush(file);
@@ -252,6 +310,7 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     VkExtensionProperties *extensions = NULL;
     VkPhysicalDeviceFeatures2 features2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     VkPhysicalDeviceVulkan12Features vulkan12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    VkPhysicalDeviceVulkan13Features vulkan13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
     VkPhysicalDeviceRobustness2FeaturesEXT robustness2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT };
     VkPhysicalDeviceTransformFeedbackFeaturesEXT transform_feedback = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT };
     VkPhysicalDeviceSynchronization2Features synchronization2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES };
@@ -292,6 +351,7 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     if (supported) { *tail = &(feature); tail = &(feature).pNext; } \
 } while (0)
     APPEND_FEATURE(vulkan12, api12);
+    APPEND_FEATURE(vulkan13, api13);
     APPEND_FEATURE(robustness2, has_robustness2);
     APPEND_FEATURE(transform_feedback, has_transform_feedback);
     APPEND_FEATURE(synchronization2, has_synchronization2);
@@ -303,17 +363,25 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
 #undef APPEND_FEATURE
     vkGetPhysicalDeviceFeatures2(physical, &features2);
 
+    state->api13 = api13;
+    state->core_robust_buffer_access = state->features.robustBufferAccess;
     state->descriptor_indexing = api12 && vulkan12.descriptorIndexing;
     state->scalar_block_layout = api12 && vulkan12.scalarBlockLayout;
     state->shader_int8 = api12 && vulkan12.shaderInt8;
     state->timeline_semaphore = api12 && vulkan12.timelineSemaphore;
+    state->buffer_device_address = api12 && vulkan12.bufferDeviceAddress;
     state->robustness2 = has_robustness2 && robustness2.robustBufferAccess2;
+    state->robust_buffer_access2 = state->robustness2;
+    state->robust_image_access2 = has_robustness2 && robustness2.robustImageAccess2;
+    state->null_descriptor = has_robustness2 && robustness2.nullDescriptor;
     state->transform_feedback = has_transform_feedback && transform_feedback.transformFeedback;
     state->synchronization2 = has_synchronization2 && synchronization2.synchronization2;
     state->dynamic_rendering = has_dynamic_rendering && dynamic_rendering.dynamicRendering;
     state->maintenance4 = has_maintenance4 && maintenance4.maintenance4;
     state->maintenance5 = has_maintenance5 && maintenance5.maintenance5;
     state->maintenance6 = has_maintenance6 && maintenance6.maintenance6;
+    state->dual_src_blend = state->features.dualSrcBlend;
+    state->multi_viewport = state->features.multiViewport;
     state->present_wait = has_extension(extensions, extension_count, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
     state->swapchain_maintenance = has_extension(extensions, extension_count,
                                                  VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
@@ -335,8 +403,57 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
                                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     state->bc7 = format_supports(physical, VK_FORMAT_BC7_UNORM_BLOCK,
                                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    state->rgba8_snorm_color_attachment = format_supports(
+        physical, VK_FORMAT_R8G8B8A8_SNORM,
+        VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT);
+    state->d24s8_sampled = format_supports(physical, VK_FORMAT_D24_UNORM_S8_UINT,
+                                            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    state->d24s8_depth_stencil_attachment = format_supports(
+        physical, VK_FORMAT_D24_UNORM_S8_UINT,
+        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    state->transport_features_ready = state->api13 && state->core_robust_buffer_access &&
+        state->robust_buffer_access2 && state->robust_image_access2 &&
+        state->null_descriptor && state->synchronization2 && state->dynamic_rendering &&
+        state->maintenance4;
     free(extensions);
     return 1;
+}
+
+static VkResult create_dxvk26_transport_device(VkPhysicalDevice physical,
+                                                const struct probe_state *state)
+{
+    const char *extensions[] = { VK_EXT_ROBUSTNESS_2_EXTENSION_NAME };
+    float priority = 1.0f;
+    VkPhysicalDeviceVulkan13Features vulkan13 = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+    VkPhysicalDeviceRobustness2FeaturesEXT robustness2 = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT };
+    VkDeviceQueueCreateInfo queue_info = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+    VkDeviceCreateInfo device_info = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
+    VkDevice device = VK_NULL_HANDLE;
+    VkResult result;
+
+    if (!state->transport_features_ready)
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+    vulkan13.synchronization2 = VK_TRUE;
+    vulkan13.dynamicRendering = VK_TRUE;
+    vulkan13.maintenance4 = VK_TRUE;
+    robustness2.robustBufferAccess2 = VK_TRUE;
+    robustness2.nullDescriptor = VK_TRUE;
+    robustness2.robustImageAccess2 = VK_TRUE;
+    vulkan13.pNext = &robustness2;
+    queue_info.queueFamilyIndex = state->queue_family;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = &priority;
+    device_info.pNext = &vulkan13;
+    device_info.queueCreateInfoCount = 1;
+    device_info.pQueueCreateInfos = &queue_info;
+    device_info.enabledExtensionCount = 1;
+    device_info.ppEnabledExtensionNames = extensions;
+    result = vkCreateDevice(physical, &device_info, NULL, &device);
+    if (result == VK_SUCCESS)
+        vkDestroyDevice(device, NULL);
+    return result;
 }
 
 int main(int argc, char **argv)
@@ -361,6 +478,7 @@ int main(int argc, char **argv)
     void *mapped = NULL;
     VkDeviceMemory mapped_memory = VK_NULL_HANDLE;
     int exit_code = 1;
+    int dxvk26_requirements;
 
     memset(&state, 0, sizeof(state));
     state.run_id = argument_value(argc, argv, "--run-id", "manual");
@@ -369,6 +487,8 @@ int main(int argc, char **argv)
     state.started_ms = now_ms();
     state.queue_family = UINT32_MAX;
     state.loader_api = VK_API_VERSION_1_0;
+    state.transport_device_create_result = VK_NOT_READY;
+    dxvk26_requirements = !strcmp(argument_value(argc, argv, "--dxvk26-requirements", "0"), "1");
     if (!getenv("VN_DEBUG") || !strstr(getenv("VN_DEBUG"), "vtest") ||
         !getenv("VTEST_SOCKET_NAME") || !getenv("VK_DRIVER_FILES") ||
         !getenv("BOX64_EMULATED_LIBS") ||
@@ -389,7 +509,7 @@ int main(int argc, char **argv)
     application.applicationVersion = 1;
     application.pEngineName = "WineHua";
     application.engineVersion = 1;
-    application.apiVersion = VK_API_VERSION_1_1;
+    application.apiVersion = dxvk26_requirements ? VK_API_VERSION_1_3 : VK_API_VERSION_1_1;
     instance_info.pApplicationInfo = &application;
     result = vkCreateInstance(&instance_info, NULL, &instance);
     if (result != VK_SUCCESS) { failure = "vkCreateInstance failed"; goto cleanup; }
@@ -429,6 +549,29 @@ int main(int argc, char **argv)
         free(queues);
     }
     if (state.queue_family == UINT32_MAX) { failure = "no graphics queue family"; goto cleanup; }
+    if (dxvk26_requirements) {
+        if (!state.api13) {
+            write_result(&state, "UNSUPPORTED", "dxvk26-requirements",
+                         "Guest adapter exposes Vulkan below 1.3");
+            vkDestroyInstance(instance, NULL);
+            return 3;
+        }
+        state.transport_device_create_attempted = state.transport_features_ready;
+        state.transport_device_create_result =
+            create_dxvk26_transport_device(physical, &state);
+        state.transport_device_create_ok =
+            state.transport_device_create_result == VK_SUCCESS;
+        if (!state.transport_device_create_ok) {
+            write_result(&state, "UNSUPPORTED", "dxvk26-requirements",
+                         "DXVK 2.6 transport device requirements are unavailable");
+            vkDestroyInstance(instance, NULL);
+            return 3;
+        }
+        write_result(&state, "PASS", "dxvk26-requirements",
+                     "DXVK 2.6 transport requirements passed; D3D11 baseline is evaluated by the unmodified runtime");
+        exit_code = 0;
+        goto cleanup;
+    }
 
     {
         float priority = 1.0f;

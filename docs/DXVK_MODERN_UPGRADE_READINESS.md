@@ -49,10 +49,10 @@ the corresponding Venus adapter.
 | `VK_EXT_extended_dynamic_state` | no | yes | Current Legacy DXVK already enables it on 920. |
 | `VK_EXT_vertex_attribute_divisor` | no | yes | Current Legacy DXVK already enables it on 920. |
 | `VK_EXT_shader_demote_to_helper_invocation` | no | yes | Current Legacy DXVK already enables it on 920. |
-| Descriptor indexing | Host yes, Venus no | Host yes, Venus no | Unusable until Venus exposes it. |
+| Descriptor indexing | Host yes, Venus no | Venus reports yes | Present in the current 920 transport capture; requalify all subfeatures before any 2.7+ decision. |
 | ETC2 / ASTC | Host yes, Venus no | Host yes, Venus no | Not a direct replacement for DXGI BC data. |
 | BC1-BC7 | no | no | WineHua BC decode/emulation remains necessary. |
-| Buffer device address | not qualified | Venus reports no | Blocks current DXVK 2.7+ profile requirements. |
+| Buffer device address | not qualified | Venus reports yes | Present in the current 920 transport capture; not by itself sufficient for DXVK 2.7+. |
 
 Primary evidence:
 
@@ -66,6 +66,38 @@ The 920 DXVK runtime log proves that the installed Legacy runtime enables
 `VK_EXT_shader_demote_to_helper_invocation`, `VK_EXT_transform_feedback`, and
 `VK_EXT_vertex_attribute_divisor`. The 910 log shows these as unavailable. This
 is capability-driven behavior, not a device-name performance special case.
+
+### DXVK 2.6.2 transport qualification, 2026-07-31
+
+The versioned `dxvk26-requirements` smoke suite now executes the actual three
+Vulkan paths relevant to a Modern Wine runtime:
+
+```text
+Guest Linux loader -> Venus ICD
+Windows x86 -> winevulkan -> x86_64 loader -> Venus ICD
+Windows x64 -> winevulkan -> x86_64 loader -> Venus ICD
+```
+
+All three passed on Maleoon 920. The Guest loader is `1.3.290`, the Venus
+adapter is `1.3.269`, and all paths successfully created a device requesting
+Vulkan 1.3 synchronization2, dynamic rendering, maintenance4, and all three
+`VK_EXT_robustness2` features: robust buffer access, robust image access, and
+null descriptors. This qualifies the transport only. It is deliberately not a
+claim that an unmodified DXVK 2.6.2 D3D11 device can be created.
+
+The captured adapter still reports these upstream D3D11 baseline gaps:
+
+```text
+textureCompressionBC      = 0, BC1 through BC7 = 0
+dualSrcBlend              = 0
+multiViewport             = 0
+transformFeedback         = 1, geometryStreams = 0
+```
+
+The suite summary is retained under the run id
+`dxvk26req-20260731-0900`. Its next gate is an unmodified DXVK 2.6.2
+`D3D11CreateDevice` attempt, whose log is the authority for the exact
+rejection set.
 
 ## 3. What Vulkan 1.3 changes today
 

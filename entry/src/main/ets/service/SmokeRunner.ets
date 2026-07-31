@@ -221,11 +221,11 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     'x64/winehua_audio_smoke.exe', 'x64/winehua_graphics_smoke.exe',
     'x64/winehua_vulkan_smoke.exe', 'x64/winehua_d3d11_smoke.exe',
     'x64/winehua_d3d8_smoke.exe', 'x64/winehua_d3d_switch_cube.exe',
-    'x64/winehua_win32_driver.exe',
+    'x64/winehua_win32_driver.exe', 'x64/winehua_dxvk26_requirements.exe',
     'x86/winehua_audio_smoke.exe', 'x86/winehua_graphics_smoke.exe',
     'x86/winehua_vulkan_smoke.exe', 'x86/winehua_d3d11_smoke.exe',
     'x86/winehua_d3d8_smoke.exe', 'x86/winehua_d3d_switch_cube.exe',
-    'x86/winehua_win32_driver.exe',
+    'x86/winehua_win32_driver.exe', 'x86/winehua_dxvk26_requirements.exe',
     'assets/venus_storage_write.spv', 'assets/venus_storage_read.spv',
     'assets/venus_image_fetch.spv', 'assets/venus_combined_sample.spv',
     'assets/venus_separated_sample.spv',
@@ -350,6 +350,7 @@ export class SmokeRunner {
     const includeWineVulkanPresent = this.request.suite === 'wine-vulkan-present' ||
       this.request.suite === 'all';
     const includeDxvk = this.request.suite === 'dxvk' || this.request.suite === 'all';
+    const includeDxvk26Requirements = this.request.suite === 'dxvk26-requirements';
     const includeDxvkLong = this.request.suite === 'dxvk-long';
     const includeDxvkReplay = this.request.suite === 'dxvk-replay';
       const includeDxvkLayoutGeneral = this.request.suite === 'dxvk-layout-general';
@@ -386,6 +387,10 @@ export class SmokeRunner {
     if (includeVenus) {
       tests.push({ id: 'venus-offscreen-x64', architecture: 'guest-x64',
         executable: 'winehua_guest_vulkan_smoke', seconds: 0, timeoutMs: 60000 });
+    }
+    if (includeDxvk26Requirements) {
+      tests.push({ id: 'guest-dxvk26-requirements-x64', architecture: 'guest-x64',
+        executable: 'winehua_guest_vulkan_smoke', seconds: 0, timeoutMs: 90000 });
     }
     if (includeVenusSampled) {
       tests.push({ id: 'venus-sampled-normal-x64', architecture: 'guest-x64',
@@ -628,6 +633,14 @@ export class SmokeRunner {
         executable: 'winehua_vulkan_smoke.exe', seconds: 5, timeoutMs: 180000 });
       tests.push({ id: 'wine-vulkan-present-x86', architecture: 'x86',
         executable: 'winehua_vulkan_smoke.exe', seconds: 5, timeoutMs: 180000 });
+    }
+    if (includeDxvk26Requirements) {
+      /* The probe does not load DXVK.  It qualifies the exact Windows Vulkan
+       * transport seen by DXVK 2.6.2 before a Modern DLL is introduced. */
+      tests.push({ id: 'dxvk26-requirements-x86', architecture: 'x86',
+        executable: 'winehua_dxvk26_requirements.exe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'dxvk26-requirements-x64', architecture: 'x64',
+        executable: 'winehua_dxvk26_requirements.exe', seconds: 0, timeoutMs: 90000 });
     }
     if (includeDxvk) {
       /* On the current Harmony Venus renderer, creating an x64 DXVK device
@@ -1080,6 +1093,8 @@ export class SmokeRunner {
         executablePath: executablePath,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
           '--result', resultPath,
+          ...(spec.id === 'guest-dxvk26-requirements-x64' ?
+            ['--dxvk26-requirements', '1'] : []),
           ...(spec.id.indexOf('general') >= 0 ? ['--layout', 'general'] : []),
           ...(spec.id.indexOf('sampled-only') >= 0 ? ['--sampled-only'] : []),
           ...(spec.id.indexOf('idle') >= 0 ? ['--force-idle'] : []),
@@ -1192,6 +1207,7 @@ export class SmokeRunner {
 
     const windowsResult = `C:\\smoke\\results\\${this.request.runId}\\${spec.id}.json`;
     const isWineVulkan = spec.executable === 'winehua_vulkan_smoke.exe';
+    const isDxvk26Requirements = spec.executable === 'winehua_dxvk26_requirements.exe';
     const isWineVulkanPresent = isWineVulkan && spec.id.indexOf('present') >= 0;
     const isD3d8 = spec.executable === 'winehua_d3d8_smoke.exe';
     const isD3d9 = spec.executable === 'winehua_d3d_switch_cube.exe' &&
@@ -1199,7 +1215,7 @@ export class SmokeRunner {
     const isDxvk = !isD3d9 && (spec.executable === 'winehua_d3d11_smoke.exe' ||
       spec.executable === 'winehua_d3d_switch_cube.exe');
     let process: ProcessInfo;
-    if (isWineVulkan || isDxvk) {
+    if (isWineVulkan || isDxvk || isDxvk26Requirements) {
       const guestVulkanLibrary = `${GUEST_VULKAN_ROOT}/lib`;
       const guestVulkanIcd = `${GUEST_VULKAN_ROOT}/share/vulkan/icd.d/venus_icd.x86_64.json`;
       const box64LibraryPath = `${guestVulkanLibrary}:${WINE_ROOT}/bin/guest_gfx/lib:` +

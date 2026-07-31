@@ -253,6 +253,17 @@ assemble_pad() {
     i686-w64-mingw32-gcc -O2 -s -mwindows -o \
         "$smoke_dir/x86/winehua_d3d8_smoke.exe" "$d3d8_source" \
         -luser32 -lgdi32
+    # This deliberately links Wine's own PE Vulkan import library.  The
+    # requirements probe must exercise the same vulkan-1 -> winevulkan ->
+    # x86_64 Loader -> Venus transport as a Windows DXVK process, without
+    # adding a second Windows Vulkan SDK dependency to the image.
+    local dxvk26_requirements_source="$WINEHUA/smoke/winehua_dxvk26_requirements.c"
+    x86_64-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -I"$DXVK_SRC/include" -o \
+        "$smoke_dir/x64/winehua_dxvk26_requirements.exe" "$dxvk26_requirements_source" \
+        "$BUILD_DIR/wine-ohos/dlls/vulkan-1/x86_64-windows/libvulkan-1.a"
+    i686-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -I"$DXVK_SRC/include" -o \
+        "$smoke_dir/x86/winehua_dxvk26_requirements.exe" "$dxvk26_requirements_source" \
+        "$BUILD_DIR/wine-i386-pe/dlls/vulkan-1/i386-windows/libvulkan-1.a"
     local win32_driver_source="$WINEHUA/smoke/winehua_win32_driver.c"
     x86_64-w64-mingw32-gcc -O2 -s -municode -mwindows -o \
         "$smoke_dir/x64/winehua_win32_driver.exe" "$win32_driver_source" \
@@ -293,8 +304,8 @@ assemble_pad() {
         cp "$smoke64" "$smoke_dir/x64/$smoke_program.exe"
         cp "$smoke32" "$smoke_dir/x86/$smoke_program.exe"
     done
-    local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha d3d864_sha cube64_sha driver64_sha
-    local audio32_sha graphics32_sha vulkan32_sha d3d1132_sha d3d832_sha cube32_sha driver32_sha
+    local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha d3d864_sha cube64_sha driver64_sha requirements64_sha
+    local audio32_sha graphics32_sha vulkan32_sha d3d1132_sha d3d832_sha cube32_sha driver32_sha requirements32_sha
     local storage_write_sha storage_read_sha image_fetch_sha combined_sample_sha separated_sample_sha
     audio64_sha="$(sha256sum "$smoke_dir/x64/winehua_audio_smoke.exe" | awk '{print $1}')"
     graphics64_sha="$(sha256sum "$smoke_dir/x64/winehua_graphics_smoke.exe" | awk '{print $1}')"
@@ -303,6 +314,7 @@ assemble_pad() {
     d3d864_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d8_smoke.exe" | awk '{print $1}')"
     cube64_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d_switch_cube.exe" | awk '{print $1}')"
     driver64_sha="$(sha256sum "$smoke_dir/x64/winehua_win32_driver.exe" | awk '{print $1}')"
+    requirements64_sha="$(sha256sum "$smoke_dir/x64/winehua_dxvk26_requirements.exe" | awk '{print $1}')"
     audio32_sha="$(sha256sum "$smoke_dir/x86/winehua_audio_smoke.exe" | awk '{print $1}')"
     graphics32_sha="$(sha256sum "$smoke_dir/x86/winehua_graphics_smoke.exe" | awk '{print $1}')"
     vulkan32_sha="$(sha256sum "$smoke_dir/x86/winehua_vulkan_smoke.exe" | awk '{print $1}')"
@@ -310,6 +322,7 @@ assemble_pad() {
     d3d832_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d8_smoke.exe" | awk '{print $1}')"
     cube32_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d_switch_cube.exe" | awk '{print $1}')"
     driver32_sha="$(sha256sum "$smoke_dir/x86/winehua_win32_driver.exe" | awk '{print $1}')"
+    requirements32_sha="$(sha256sum "$smoke_dir/x86/winehua_dxvk26_requirements.exe" | awk '{print $1}')"
     storage_write_sha="$(sha256sum "$smoke_dir/assets/venus_storage_write.spv" | awk '{print $1}')"
     storage_read_sha="$(sha256sum "$smoke_dir/assets/venus_storage_read.spv" | awk '{print $1}')"
     image_fetch_sha="$(sha256sum "$smoke_dir/assets/venus_image_fetch.spv" | awk '{print $1}')"
@@ -344,8 +357,8 @@ EOF
     cat > "$smoke_dir/manifest.json" <<EOF
 {
   "schemaVersion": 1,
-  "suiteVersion": "phase2-vulkan-dxvk-legacy-v6-d3d8-d3d9",
-  "enabledSuites": ["core", "audio", "opengl", "wine-vulkan", "d3d8", "d3d9", "dxvk"],
+  "suiteVersion": "phase2-vulkan-dxvk-legacy-v7-dxvk26-requirements",
+  "enabledSuites": ["core", "audio", "opengl", "wine-vulkan", "d3d8", "d3d9", "dxvk", "dxvk26-requirements"],
   "managedRoot": "C:\\\\smoke",
   "files": {
     "x64/winehua_audio_smoke.exe": "$audio64_sha",
@@ -355,6 +368,7 @@ EOF
     "x64/winehua_d3d8_smoke.exe": "$d3d864_sha",
     "x64/winehua_d3d_switch_cube.exe": "$cube64_sha",
     "x64/winehua_win32_driver.exe": "$driver64_sha",
+    "x64/winehua_dxvk26_requirements.exe": "$requirements64_sha",
     "x86/winehua_audio_smoke.exe": "$audio32_sha",
     "x86/winehua_graphics_smoke.exe": "$graphics32_sha",
     "x86/winehua_vulkan_smoke.exe": "$vulkan32_sha",
@@ -362,6 +376,7 @@ EOF
     "x86/winehua_d3d8_smoke.exe": "$d3d832_sha",
     "x86/winehua_d3d_switch_cube.exe": "$cube32_sha",
     "x86/winehua_win32_driver.exe": "$driver32_sha",
+    "x86/winehua_dxvk26_requirements.exe": "$requirements32_sha",
     "assets/venus_storage_write.spv": "$storage_write_sha",
     "assets/venus_storage_read.spv": "$storage_read_sha",
     "assets/venus_image_fetch.spv": "$image_fetch_sha",
