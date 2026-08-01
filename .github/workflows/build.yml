@@ -171,9 +171,9 @@ jobs:
           echo "== nproc =="
           nproc
 
-      # 先单独构建运行时组件再打 HAP: 运行时构建失败与打包失败分开上报.
-      # 顶层 Makefile 在非 CI 构建中同样以该产物作为 assemble 前置依赖.
-      - name: Build guest graphics runtime (x64 + x86)
+      # 先单独构建两个 DXVK runtime 再打 HAP。这样 Modern 的交叉编译失败
+      # 不会被误报为通用 HAP 打包失败；assemble 仍以它们为硬依赖。
+      - name: Build DXVK Legacy runtime (x64 + x86)
         run: |
           set -euxo pipefail
           make NATIVE_ARCH=arm64-v8a dxvk
@@ -189,6 +189,23 @@ jobs:
                build/dxvk/legacy/x86/bin/d3d11.dll \
                build/dxvk/legacy/x86/bin/dxgi.dll
           sha256sum build/dxvk/legacy/{x64,x86}/bin/{d3d11,dxgi}.dll
+
+      - name: Build DXVK Modern runtime (x64 + x86)
+        run: |
+          set -euxo pipefail
+          make NATIVE_ARCH=arm64-v8a dxvk-modern
+          for dll in \
+            build/dxvk/modern-2.6/x64/bin/d3d11.dll \
+            build/dxvk/modern-2.6/x64/bin/dxgi.dll \
+            build/dxvk/modern-2.6/x86/bin/d3d11.dll \
+            build/dxvk/modern-2.6/x86/bin/dxgi.dll; do
+            test -s "$dll"
+          done
+          file build/dxvk/modern-2.6/x64/bin/d3d11.dll \
+               build/dxvk/modern-2.6/x64/bin/dxgi.dll \
+               build/dxvk/modern-2.6/x86/bin/d3d11.dll \
+               build/dxvk/modern-2.6/x86/bin/dxgi.dll
+          sha256sum build/dxvk/modern-2.6/{x64,x86}/bin/{d3d11,dxgi}.dll
 
       - name: Build HAP
         env:
@@ -230,9 +247,20 @@ jobs:
           import zipfile
 
           hap_path = os.environ["HAP_PATH"]
-          expected_commit = subprocess.check_output(
-              ["git", "-C", "thirdparty/dxvk", "rev-parse", "HEAD"], text=True
-          ).strip()
+          expected_runtimes = {
+              "legacy": {
+                  "version": "1.10.3",
+                  "commit": subprocess.check_output(
+                      ["git", "-C", "thirdparty/dxvk", "rev-parse", "HEAD"], text=True
+                  ).strip(),
+              },
+              "modern-2.6": {
+                  "version": "2.6.2",
+                  "commit": subprocess.check_output(
+                      ["git", "-C", "thirdparty/dxvk-modern", "rev-parse", "HEAD"], text=True
+                  ).strip(),
+              },
+          }
 
           with zipfile.ZipFile(hap_path) as hap:
               payload = hap.read("resources/rawfile/wine-data.zip")
@@ -245,30 +273,39 @@ jobs:
               runtime_manifest["payloadSha256"], payload_sha
           )
 
-          required = {
-              "dxvk/legacy/x64/d3d11.dll": 0x8664,
-              "dxvk/legacy/x64/dxgi.dll": 0x8664,
-              "dxvk/legacy/x86/d3d11.dll": 0x014C,
-              "dxvk/legacy/x86/dxgi.dll": 0x014C,
-          }
           with zipfile.ZipFile(io.BytesIO(payload)) as wine_data:
               dxvk_manifest = json.loads(wine_data.read("dxvk/manifest.json"))
-              assert dxvk_manifest["profile"] == "legacy"
-              assert dxvk_manifest["version"] == "1.10.3"
-              assert dxvk_manifest["commit"] == expected_commit, (
-                  dxvk_manifest["commit"], expected_commit
-              )
-              for name, expected_machine in required.items():
-                  image = wine_data.read(name)
-                  assert len(image) > 4096, (name, len(image))
-                  assert image[:2] == b"MZ", name
-                  pe_offset = struct.unpack_from("<I", image, 0x3C)[0]
-                  assert image[pe_offset:pe_offset + 4] == b"PE\0\0", name
-                  machine = struct.unpack_from("<H", image, pe_offset + 4)[0]
-                  assert machine == expected_machine, (
-                      name, hex(machine), hex(expected_machine)
+              assert dxvk_manifest["schemaVersion"] == 2
+              assert dxvk_manifest["backend"] == "dxvk"
+              assert dxvk_manifest["defaultProfile"] == "legacy"
+              runtimes = dxvk_manifest["runtimes"]
+              assert set(runtimes) == set(expected_runtimes), runtimes.keys()
+
+              for profile, expected in expected_runtimes.items():
+                  runtime = runtimes[profile]
+                  assert runtime["version"] == expected["version"], runtime
+                  assert runtime["commit"] == expected["commit"], (
+                      profile, runtime["commit"], expected["commit"]
                   )
-                  print(f"[dxvk] {name}: machine={machine:#06x} size={len(image)}")
+                  assert runtime["state"], (profile, runtime)
+                  assert isinstance(runtime["requiredCapabilities"], dict), runtime
+                  for arch, expected_machine in (("x64", 0x8664), ("x86", 0x014C)):
+                      for dll in ("d3d11.dll", "dxgi.dll"):
+                          name = f"dxvk/{profile}/{arch}/{dll}"
+                          image = wine_data.read(name)
+                          assert len(image) > 4096, (name, len(image))
+                          assert image[:2] == b"MZ", name
+                          pe_offset = struct.unpack_from("<I", image, 0x3C)[0]
+                          assert image[pe_offset:pe_offset + 4] == b"PE\0\0", name
+                          machine = struct.unpack_from("<H", image, pe_offset + 4)[0]
+                          assert machine == expected_machine, (
+                              name, hex(machine), hex(expected_machine)
+                          )
+                          assert runtime[arch][dll] == hashlib.sha256(image).hexdigest(), name
+                          print(
+                              f"[dxvk/{profile}] {name}: "
+                              f"machine={machine:#06x} size={len(image)}"
+                          )
 
               # 仅 PE DLL 在 ARM64 HarmonyOS 上不可运行, 需同 payload 内的
               # Vulkan 依赖链文件齐全才能工作, 一并校验.
@@ -285,7 +322,8 @@ jobs:
                   assert image, name
                   print(f"[vulkan] {name}: size={len(image)}")
 
-          print(f"[dxvk] commit={expected_commit}")
+          for profile, expected in expected_runtimes.items():
+              print(f"[dxvk/{profile}] commit={expected['commit']}")
           print(f"[dxvk] wine-data.zip sha256={payload_sha}")
           PY
 
