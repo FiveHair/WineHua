@@ -28,7 +28,8 @@ export default class EntryAbility extends UIAbility {
     const persistedD3d = AppStorage.get<string>('winehua.d3d.preference') || 'dxvk_legacy';
     const requestedD3d = explicitD3d ? value('winehua.d3d_backend', 'wined3d') :
       (mode === '' ? persistedD3d : 'wined3d');
-    const d3dBackend = requestedD3d === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
+    const d3dBackend = requestedD3d === 'dxvk_legacy' ||
+      requestedD3d === 'dxvk_modern_2_6' ? requestedD3d : 'wined3d';
     const gamePath = value('winehua.game_path', '');
     const requestedGameArgCount = Number(value('winehua.game_argc', '0'));
     const gameArgCount = Math.max(0, Math.min(64, Math.floor(requestedGameArgCount)));
@@ -135,7 +136,14 @@ export default class EntryAbility extends UIAbility {
         'shadow-precise-dirty-ring-inline-upload-coverage-sort' : 'baseline');
     const perfProfile = ['direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback',
       'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise',
-      'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring',
+      'shadow-precise-no-semaphore-feedback',
+      'shadow-precise-no-semaphore-feedback-single-ring',
+      'shadow-precise-no-semaphore-feedback-single-ring-sync-submit',
+      'shadow-precise-no-semaphore-feedback-single-ring-readback-idle',
+      'shadow-precise-no-semaphore-feedback-single-ring-trace',
+      'shadow-full-no-semaphore-feedback-single-ring-trace',
+      'shadow-precise-single-ring',
+      'shadow-precise-sync-submit', 'shadow-precise-strong-ring',
       'shadow-precise-legacy-host-sync',
       'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-gpu-frame-profile', 'shadow-precise-dirty-ring-frame-timeline', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload',
       'shadow-precise-dirty-ring-no-upload-fast',

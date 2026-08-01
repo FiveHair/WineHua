@@ -128,7 +128,8 @@ struct Index {
     this.smokeRequest = parseSmokeRequest(this.smokeRequestText);
     this.automationMode = this.smokeRequest.mode === 'smoke';
     this.gameTestMode = this.smokeRequest.mode === 'game';
-    this.d3dBackend = this.d3dBackendText === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
+    this.d3dBackend = this.d3dBackendText === 'dxvk_legacy' ||
+      this.d3dBackendText === 'dxvk_modern_2_6' ? this.d3dBackendText : 'wined3d';
     this.prefixMode = this.smokeRequest.prefixMode;
     this.prefixRoot = this.prefixMode === 'clean' ? WINE_SMOKE_PREFIX : `${FILES_BASE}/.wine`;
     this.driveC = `${this.prefixRoot}/drive_c`;
@@ -381,7 +382,7 @@ struct Index {
   }
 
   private d3dLaunchEnvironment(): Record<string, string> {
-    if (this.d3dBackend !== 'dxvk_legacy') return {};
+    if (this.d3dBackend.indexOf('dxvk_') !== 0) return {};
     ensureDirectory(`${this.driveC}/smoke/results/desktop-dxvk`);
     const environment: Record<string, string> = {
       'DXVK_LOG_LEVEL': 'warn',
@@ -394,6 +395,20 @@ struct Index {
       'BOX64_DYNAREC_WEAKBARRIER': '0',
       'WINEHUA_PERF_PROFILE': this.perfProfileText
     };
+    /* Modern 2.6 baseline runs must not inherit Legacy DXVK diagnostics or
+     * compatibility switches. Keep only transport correctness and caller
+     * supplied overrides while capturing the stock startup result. */
+    if (this.d3dBackend === 'dxvk_modern_2_6') {
+      environment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
+      environment['DXVK_WINEHUA_TRACE_SAMPLED'] = '0';
+      environment['DXVK_WINEHUA_TRACE_FLOW'] = '0';
+      environment['DXVK_WINEHUA_TRACE_API'] = '0';
+      const overrideCount = Math.min(this.d3dEnvKeys.length, this.d3dEnvValues.length);
+      for (let index = 0; index < overrideCount; ++index) {
+        environment[this.d3dEnvKeys[index]] = this.d3dEnvValues[index];
+      }
+      return environment;
+    }
     if (this.perfProfileText === 'shadow-precise-strong-ring-trace')
       environment['VN_WINEHUA_PRESENT_TRACE'] = '1';
     if (this.perfProfileText === 'direct-fence-wait')
@@ -419,6 +434,9 @@ struct Index {
       environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'to-host-explicit';
       environment['VKR_WINEHUA_SHADOW_TRACE'] = '0';
     } else if (this.perfProfileText === 'shadow-precise' ||
+      this.perfProfileText === 'shadow-precise-no-semaphore-feedback-single-ring' ||
+      this.perfProfileText === 'shadow-precise-no-semaphore-feedback-single-ring-trace' ||
+      this.perfProfileText === 'shadow-full-no-semaphore-feedback-single-ring-trace' ||
       this.perfProfileText === 'shadow-precise-single-ring' ||
       this.perfProfileText === 'shadow-precise-sync-submit' ||
       this.perfProfileText === 'shadow-precise-strong-ring' ||
@@ -449,11 +467,19 @@ struct Index {
       environment['DXVK_WINEHUA_PRECISE_SHADOW'] = '1';
       environment['DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED'] = '1';
       environment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
-      environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'precise';
+      environment['VKR_WINEHUA_SHADOW_FROM_HOST'] =
+        this.perfProfileText === 'shadow-full-no-semaphore-feedback-single-ring-trace' ? 'full' : 'precise';
       environment['VKR_WINEHUA_SHADOW_TRACE'] =
-        this.perfProfileText === 'shadow-precise-strong-ring-trace' ? '1' : '0';
+        (this.perfProfileText === 'shadow-precise-strong-ring-trace' ||
+         this.perfProfileText === 'shadow-precise-no-semaphore-feedback-single-ring-trace' ||
+         this.perfProfileText === 'shadow-full-no-semaphore-feedback-single-ring-trace') ? '1' : '0';
       if (this.perfProfileText === 'shadow-precise-single-ring')
         environment['VN_PERF'] = 'no_fence_feedback,no_query_feedback,no_multi_ring';
+      if (this.perfProfileText === 'shadow-precise-no-semaphore-feedback-single-ring' ||
+        this.perfProfileText === 'shadow-precise-no-semaphore-feedback-single-ring-trace' ||
+        this.perfProfileText === 'shadow-full-no-semaphore-feedback-single-ring-trace')
+        environment['VN_PERF'] =
+          'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
       if (this.perfProfileText === 'shadow-precise-sync-submit')
         environment['VN_PERF'] =
           'no_fence_feedback,no_query_feedback,no_async_queue_submit';
@@ -502,15 +528,17 @@ struct Index {
   }
 
   private d3dPresentBackend(): string {
-    return this.d3dBackend === 'dxvk_legacy' ? 'venus_broker_present' : 'virgl_compositor';
+    return this.d3dBackend.indexOf('dxvk_') === 0 ? 'venus_broker_present' : 'virgl_compositor';
   }
 
   private selectD3dBackend = (backend: string): void => {
-    const selected = backend === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
+    const selected = backend === 'dxvk_legacy' || backend === 'dxvk_modern_2_6' ?
+      backend : 'wined3d';
     this.d3dBackend = selected;
     this.d3dBackendText = selected;
     this.d3dPreferenceText = selected;
-    this.statusText = selected === 'dxvk_legacy' ? 'DXVK Legacy' : 'WineD3D';
+    this.statusText = selected === 'dxvk_legacy' ? 'DXVK Legacy' :
+      (selected === 'dxvk_modern_2_6' ? 'DXVK Modern 2.6' : 'WineD3D');
     hilog.info(DOMAIN, 'GameTest', 'D3D backend selected=%{public}s', selected);
   }
 

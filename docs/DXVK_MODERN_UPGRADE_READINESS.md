@@ -1,6 +1,6 @@
 # WineHua DXVK Modern Upgrade Readiness
 
-> Updated: 2026-07-30
+> Updated: 2026-08-01
 
 > Purpose: record capability evidence and upgrade gates for a future DXVK 2.x
 > or VKD3D investigation. This is a planning and qualification memo, not
@@ -8,7 +8,8 @@
 
 ## 1. Current product decision
 
-The Phase 2 product runtime remains the WineHua DXVK 1.10.3 fork.
+The Phase 2 product default remains the WineHua DXVK 1.10.3 fork. DXVK 2.6.2
+is packaged as a separately selected, capability-gated Modern profile.
 
 ```text
 DXVK Legacy 1.10.3
@@ -159,7 +160,37 @@ maintenance5, and buffer device address. Current 920 Venus exposes neither
 descriptor indexing nor buffer device address. Re-evaluate only after a new
 Guest capability capture proves all required features, limits, and extensions.
 
-## 5. Required WineHua compatibility inventory
+## 5. DXVK 2.6.2 qualification checkpoint, 2026-08-01
+
+The `feature/dxvk-modern-2.6` fork now contains the WineHua compatibility
+implementation required to run DXVK 2.6.2 over the current Venus transport.
+It is not an unmodified upstream DLL drop. The implementation covers the
+capability policy, BC decode/backing views, qualified fallback paths, mapped
+memory/shadow synchronization, descriptor handling, and shader compatibility
+controls needed by the established Legacy path.
+
+Maleoon 920 qualification passed the following gates:
+
+```text
+DXVK 2.6 requirements: Guest Linux, Wine x86, Wine x64
+Modern D3D11 baseline: x86 and x64
+D3D switch cube: x86 and x64
+Prefix gates: clean once, reuse three times
+Stability gate: fixed 60-second Modern run
+```
+
+Maleoon 910 remains explicitly `UNSUPPORTED` for Modern: the Guest Venus API
+is Vulkan 1.2.275, so it cannot meet the Vulkan 1.3 + robustness2 contract.
+It continues to use Legacy 1.10.3, whose x86/x64/Cube regression suite passed.
+The GPU diagnostics smoke records the actual guest device API, feature set,
+requested profile, loaded DXVK DLL paths, and D3D11 creation result in both a
+GUI report and `C:\\smoke\\results\\diagnostics`.
+
+Modern stays an opt-in development profile until the remaining real-workload
+and long-duration gates below pass. It must never be selected by pretending a
+Vulkan 1.2 device has Vulkan 1.3 features.
+
+## 6. Required WineHua compatibility inventory
 
 A Modern branch is a forward-port, not a DLL swap and not a blind cherry-pick
 series. Before it can create a D3D11 device on current Maleoon/Venus, inventory
@@ -180,34 +211,21 @@ Diagnostics may be redesigned for the Modern code base. Correctness fixes,
 semantic emulation, runtime manifest integration, and smoke coverage must not
 be omitted merely because their original commits do not apply cleanly.
 
-## 6. Deferred Modern DXVK plan
+## 7. Remaining Modern release gates
 
-When Legacy is mature, create a separate WineHua fork branch from a pinned
-upstream tag. Do not rebase or rewrite `dxvk-legacy-1.10.3`.
-
-1. Start with a DXVK 2.0 startup probe to validate the Vulkan 1.3,
-   `vkQueueSubmit2`, and dynamic-rendering transport contract on 920.
-2. Use DXVK 2.6.2 as the first realistic Modern performance candidate if the
-   startup probe succeeds. It predates the 2.7 descriptor-indexing baseline.
-3. Forward-port the compatibility inventory in section 5 and build x64 and x86
-   DLLs into `files/wine/dxvk/modern/<arch>/`.
-4. Add a manifest capability gate. It must check Guest Venus capability, not
-   only Host Vulkan or a GPU model string.
-5. Require x64/x86 Vulkan and D3D11 smoke, descriptor/subresource/BC/depth
-   matrices, visible Cube monotonicity, and no WineD3D fallback.
-6. Run fixed-setting Legacy versus Modern A/B on Heaven, ComputeMark, Tomb
+1. Run fixed-setting Legacy versus Modern A/B on Heaven, ComputeMark, Tomb
    Raider, and other real workloads. Record DLL identity, frame percentiles,
    Host CPU time, completion wait, shadow bytes, present cost, output image,
    and crash status.
-7. Require clean prefix, three reuse-prefix passes, overwrite-install refresh,
-   and a separate 60-minute stability gate before making Modern selectable for
-   normal game launch.
+2. Complete a separate 60-minute stability gate and overwrite-install refresh.
+3. Re-run qualification whenever the capability hash, Host driver, Venus, or
+   Mesa changes.
 
 The default remains Legacy until a Modern candidate passes all gates. A new
 capability hash, Host driver update, Venus update, or Mesa update invalidates
 the qualification and requires rerunning the matrix.
 
-## 7. VKD3D boundary
+## 8. VKD3D boundary
 
 VKD3D is a separate future project, not a consequence of upgrading DXVK.
 DXVK Modern qualification proves a D3D9/10/11 translation path only. A VKD3D
@@ -216,15 +234,13 @@ model audit, descriptor-indexing/buffer-device-address review, D3D12 smoke,
 and independent real-game stability evidence. Current Venus gaps make it
 inappropriate to promise VKD3D support or performance from DXVK 2.x work.
 
-## 8. Decision record
-
-Until this document is explicitly revised after a new qualification run:
+## 9. Decision record
 
 ```text
 Product default:       WineHua DXVK Legacy 1.10.3
-Immediate objective:   compatibility fixes and stability
-Modern DXVK:           deferred, separate controlled profile
-Initial Modern target: DXVK 2.0 probe, then DXVK 2.6.2 candidate
+Modern DXVK 2.6.2:     capability-gated, opt-in development profile on 920
+910 and Vulkan 1.2:    Legacy 1.10.3 only; Modern reports UNSUPPORTED
+Immediate objective:   real-workload qualification and long-run stability
 DXVK 2.7+/3.x:         deferred pending Venus descriptor/BDA capability work
 VKD3D:                  deferred to an independent D3D12 phase
 ```

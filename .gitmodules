@@ -47,3 +47,7 @@
 	path = thirdparty/dxvk
 	url = https://github.com/winehua/dxvk.git
 	branch = dxvk-legacy-1.10.3
+[submodule "thirdparty/dxvk-modern"]
+	path = thirdparty/dxvk-modern
+	url = https://github.com/winehua/dxvk.git
+	branch = dxvk-modern-2.6

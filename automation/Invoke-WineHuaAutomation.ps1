@@ -1,10 +1,10 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('core', 'audio', 'opengl', 'd3d8', 'd3d9', 'host-vulkan', 'host-heaven', 'host-heaven-material-depth', 'host-heaven-inputs', 'venus', 'venus-sampled', 'venus-sampled-idle', 'venus-depth-cube', 'venus-depth-cube-array-2d-golden', 'venus-depth-cube-graphics', 'venus-heaven-material', 'venus-heaven-material-depth', 'venus-heaven-captured', 'venus-heaven-inputs', 'venus-heaven-captured-ab', 'venus-heaven-discard-ab', 'venus-heaven-material-layout', 'venus-heaven-draw0', 'venus-heaven-draw170', 'venus-heaven-f647', 'capabilities', 'wine-vulkan', 'wine-vulkan-present', 'dxvk', 'dxvk-long', 'dxvk-replay', 'dxvk-layout-general', 'dxvk-combined', 'dxvk-dynamic', 'all', 'long')]
+    [ValidateSet('core', 'audio', 'opengl', 'd3d8', 'd3d9', 'host-vulkan', 'host-heaven', 'host-heaven-material-depth', 'host-heaven-inputs', 'venus', 'venus-sampled', 'venus-sampled-idle', 'venus-depth-cube', 'venus-depth-cube-array-2d-golden', 'venus-depth-cube-graphics', 'venus-heaven-material', 'venus-heaven-material-depth', 'venus-heaven-captured', 'venus-heaven-inputs', 'venus-heaven-captured-ab', 'venus-heaven-discard-ab', 'venus-heaven-material-layout', 'venus-heaven-draw0', 'venus-heaven-draw170', 'venus-heaven-f647', 'capabilities', 'wine-vulkan', 'wine-vulkan-present', 'dxvk', 'gpu-diagnostics', 'dxvk26-requirements', 'dxvk-modern-baseline', 'dxvk-long', 'dxvk-modern-long', 'dxvk-replay', 'dxvk-layout-general', 'dxvk-combined', 'dxvk-dynamic', 'all', 'long')]
     [string]$Suite = 'core',
     [ValidateSet('reuse', 'clean')]
     [string]$Prefix = 'reuse',
-    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-legacy-host-sync', 'shadow-precise-strong-ring-trace', 'shadow-precise-strong-ring-perf', 'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload', 'shadow-precise-dirty-ring-no-upload-fast', 'shadow-precise-dirty-ring-inline-upload', 'shadow-precise-dirty-ring-inline-upload-coverage-sort', 'shadow-precise-dirty-ring-coverage-poll', 'shadow-precise-dirty-ring-inline-upload-alias-cover', 'shadow-precise-dirty-ring-inline-upload-serialized', 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem', 'shadow-precise-cpu-upload')]
+    [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-no-semaphore-feedback', 'shadow-precise-no-semaphore-feedback-single-ring', 'shadow-precise-no-semaphore-feedback-single-ring-sync-submit', 'shadow-precise-no-semaphore-feedback-single-ring-readback-idle', 'shadow-precise-no-semaphore-feedback-single-ring-trace', 'shadow-full-no-semaphore-feedback-single-ring-trace', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-legacy-host-sync', 'shadow-precise-strong-ring-trace', 'shadow-precise-strong-ring-perf', 'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload', 'shadow-precise-dirty-ring-no-upload-fast', 'shadow-precise-dirty-ring-inline-upload', 'shadow-precise-dirty-ring-inline-upload-coverage-sort', 'shadow-precise-dirty-ring-coverage-poll', 'shadow-precise-dirty-ring-inline-upload-alias-cover', 'shadow-precise-dirty-ring-inline-upload-serialized', 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem', 'shadow-precise-cpu-upload')]
     [string]$PerfProfile = 'shadow-precise-dirty-ring-inline-upload',
     [int]$Runs = 1,
     [ValidateRange(60, 3600)]
@@ -271,14 +271,11 @@ function Get-D3D11Coverage {
             offscreenRenderTarget = [bool]$m.offscreenRenderTarget
             msaa4xSupported = [bool]$m.msaa4xSupported
             msaaResolveFunctional = [bool]$m.msaaResolveFunctional
-            stencilQueryEnabled = [bool]$m.stencilQueryEnabled
-            stencilPixelFunctional = [bool]$m.stencilPixelFunctional
-            stencilQueryFunctional = [bool]$m.stencilFunctional
             computeShaderDispatch = [bool]$m.computeShaderDispatch
             computeUavSubmitted = [bool]$m.computeUavSubmitted
             computeUavFunctional = [bool]$m.computeUavFunctional
             computeSampledImageFunctional = [bool]$m.computeSampledImageFunctional
-            longWallClock = ($RunSuite -ne 'dxvk-long' -or
+            longWallClock = ($RunSuite -notin @('dxvk-long', 'dxvk-modern-long') -or
                 [int64]$m.durationMs -ge ([int64]$LongSeconds * 1000 - 2000))
             present60Frames = ([int]$m.presentFrames -ge 60)
             presentResultSuccess = ([int]$m.presentResult -eq 0)
@@ -550,7 +547,7 @@ function Invoke-OneRun {
         throw "Want start failed: $($startOutput -join ' ')"
     }
 
-    $runTimeoutMinutes = if ($RunSuite -eq 'dxvk-long') {
+    $runTimeoutMinutes = if ($RunSuite -in @('dxvk-long', 'dxvk-modern-long')) {
         [Math]::Max($TimeoutMinutes, [Math]::Ceiling($LongSeconds / 60.0) + 5)
     } else { $TimeoutMinutes }
     $deadline = (Get-Date).AddMinutes($runTimeoutMinutes)
@@ -573,13 +570,17 @@ function Invoke-OneRun {
                 }
             }
         }
-        if ($RunSuite -in @('d3d9', 'dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
+        if ($RunSuite -in @('d3d9', 'dxvk', 'dxvk-modern-baseline', 'dxvk-long', 'dxvk-modern-long', 'dxvk-dynamic', 'all')) {
             $dxvkTests = if ($RunSuite -eq 'd3d9') {
                 @('d3d9-cube-x86', 'd3d9-cube-x64')
             } elseif ($RunSuite -eq 'dxvk-dynamic') {
                 @('dxvk-dynamic-cb-x86', 'dxvk-dynamic-cb-x64')
+            } elseif ($RunSuite -eq 'dxvk-modern-baseline') {
+                @('dxvk-modern-baseline-x86', 'dxvk-modern-baseline-x64', 'dxvk-modern-cube-x64')
             } elseif ($RunSuite -eq 'dxvk-long') {
                 @('dxvk-long-x64')
+            } elseif ($RunSuite -eq 'dxvk-modern-long') {
+                @('dxvk-modern-long-x64')
             } elseif ($RunSuite -eq 'all') {
                 @('d3d9-cube-x86', 'd3d9-cube-x64', 'dxvk-legacy-x64', 'dxvk-legacy-x86')
             } else {
@@ -627,13 +628,17 @@ function Invoke-OneRun {
             if (-not $captured.ContainsKey($testId)) { $captured[$testId] = $false }
         }
     }
-    if ($RunSuite -in @('d3d9', 'dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
+    if ($RunSuite -in @('d3d9', 'dxvk', 'dxvk-modern-baseline', 'dxvk-long', 'dxvk-modern-long', 'dxvk-dynamic', 'all')) {
         $dxvkTests = if ($RunSuite -eq 'd3d9') {
             @('d3d9-cube-x86', 'd3d9-cube-x64')
         } elseif ($RunSuite -eq 'dxvk-dynamic') {
             @('dxvk-dynamic-cb-x86', 'dxvk-dynamic-cb-x64')
+        } elseif ($RunSuite -eq 'dxvk-modern-baseline') {
+            @('dxvk-modern-baseline-x86', 'dxvk-modern-baseline-x64', 'dxvk-modern-cube-x64')
         } elseif ($RunSuite -eq 'dxvk-long') {
             @('dxvk-long-x64')
+        } elseif ($RunSuite -eq 'dxvk-modern-long') {
+            @('dxvk-modern-long-x64')
         } elseif ($RunSuite -eq 'all') {
             @('d3d9-cube-x86', 'd3d9-cube-x64', 'dxvk-legacy-x64', 'dxvk-legacy-x86')
         } else {
@@ -671,7 +676,7 @@ function Invoke-OneRun {
     }
 
     $visualPass = -not ($captured.Values -contains $false)
-    $coverage = if ($RunSuite -in @('dxvk', 'dxvk-long', 'dxvk-dynamic', 'all')) {
+    $coverage = if ($RunSuite -in @('dxvk', 'dxvk-modern-baseline', 'dxvk-long', 'dxvk-modern-long', 'dxvk-dynamic', 'all')) {
         Get-D3D11Coverage -Summary $summary -RunSuite $RunSuite
     } else { $null }
     $coveragePass = $null -eq $coverage -or $coverage.status -eq 'PASS'

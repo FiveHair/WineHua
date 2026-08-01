@@ -57,6 +57,13 @@ struct probe_state {
     BOOL transport_features_ready;
     BOOL transport_device_create_ok;
     VkResult transport_device_create_result;
+
+    BOOL timeline_round_trip_ok;
+    VkResult timeline_semaphore_create_result;
+    VkResult timeline_submit_result;
+    VkResult timeline_wait_result;
+    VkResult timeline_counter_result;
+    uint64_t timeline_observed_value;
 };
 
 static ULONGLONG now_ms(void)
@@ -117,6 +124,32 @@ static const char *bool_text(BOOL value)
     return value ? "true" : "false";
 }
 
+static void write_progress(const struct probe_state *state, const char *stage)
+{
+    char progress[512];
+    char temporary[1024];
+    const char *vn_perf = getenv("VN_PERF");
+    const BOOL no_semaphore_feedback =
+        vn_perf && strstr(vn_perf, "no_semaphore_feedback");
+    FILE *file;
+
+    if (!state->result_path || !state->result_path[0]) return;
+    snprintf(progress, sizeof(progress), "%s.progress", state->result_path);
+    snprintf(temporary, sizeof(temporary), "%s.tmp.%lu", progress,
+             (unsigned long)GetCurrentProcessId());
+    if (!ensure_parent(progress)) return;
+    file = fopen(temporary, "wb");
+    if (!file) return;
+    fprintf(file, "{\"pid\":%lu,\"stage\":\"%s\",\"timestampMs\":%llu,"
+            "\"vnPerfNoSemaphoreFeedback\":%s}\n",
+            (unsigned long)GetCurrentProcessId(), stage ? stage : "unknown",
+            (unsigned long long)now_ms(), bool_text(no_semaphore_feedback));
+    fflush(file);
+    fclose(file);
+    MoveFileExA(temporary, progress,
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+}
+
 static const char *policy_text(BOOL native_supported, const char *missing_policy)
 {
     return native_supported ? "native" : missing_policy;
@@ -169,6 +202,10 @@ static void write_result(const struct probe_state *state, const char *status,
             "\"dynamicRendering\":%s,\"maintenance4\":%s,"
             "\"deviceCreateAttempted\":%s,\"deviceCreateResult\":%d,"
             "\"passed\":%s},\n"
+            "    \"timelineRoundTrip\": {\"feature\":%s,"
+            "\"semaphoreCreateResult\":%d,\"queueSubmitResult\":%d,"
+            "\"waitResult\":%d,\"counterResult\":%d,"
+            "\"observedValue\":%llu,\"passed\":%s},\n"
             "    \"vulkan12\": {\"timelineSemaphore\":%s,"
             "\"bufferDeviceAddress\":%s,\"descriptorIndexing\":%s},\n"
             "    \"d3d11Features\": {\"geometryShader\":%s,"
@@ -214,6 +251,10 @@ static void write_result(const struct probe_state *state, const char *status,
             bool_text(state->dynamic_rendering), bool_text(state->maintenance4),
             bool_text(state->transport_features_ready), (int)state->transport_device_create_result,
             bool_text(state->transport_device_create_ok), bool_text(state->timeline_semaphore),
+            (int)state->timeline_semaphore_create_result, (int)state->timeline_submit_result,
+            (int)state->timeline_wait_result, (int)state->timeline_counter_result,
+            (unsigned long long)state->timeline_observed_value,
+            bool_text(state->timeline_round_trip_ok), bool_text(state->timeline_semaphore),
             bool_text(state->buffer_device_address), bool_text(state->descriptor_indexing),
             bool_text(state->core.geometryShader), bool_text(state->core.tessellationShader),
             bool_text(state->core.multiDrawIndirect),
@@ -229,8 +270,9 @@ static void write_result(const struct probe_state *state, const char *status,
             policy_text(state->dual_src_blend, "fallback-required"),
             policy_text(state->multi_viewport, "withhold-required"),
             policy_text(state->geometry_streams, "withhold-required"),
-            state->transport_device_create_ok ? "PASS" : "FAIL",
-            state->transport_device_create_ok ? "D3D11_FEATURE_PROBE_PENDING" : "BLOCKED",
+            state->transport_device_create_ok && state->timeline_round_trip_ok ? "PASS" : "FAIL",
+            state->transport_device_create_ok && state->timeline_round_trip_ok
+                ? "D3D11_FEATURE_PROBE_PENDING" : "BLOCKED",
             bool_text(state->fallback_detected),
             (unsigned long long)(now_ms() - state->started_ms));
     fflush(file);
@@ -336,35 +378,53 @@ static BOOL query_requirements(VkPhysicalDevice physical, struct probe_state *st
     state->transport_features_ready = state->api13 && state->core.robustBufferAccess &&
         state->robust_buffer_access2 && state->robust_image_access2 &&
         state->null_descriptor && state->synchronization2 && state->dynamic_rendering &&
-        state->maintenance4;
+        state->maintenance4 && state->timeline_semaphore;
     free(extensions);
     return TRUE;
 }
 
 static VkResult create_transport_device(VkPhysicalDevice physical,
-                                        const struct probe_state *state)
+                                        struct probe_state *state)
 {
     const char *extensions[] = { VK_EXT_ROBUSTNESS_2_EXTENSION_NAME };
     float priority = 1.0f;
+    VkPhysicalDeviceVulkan12Features vk12 = { 0 };
     VkPhysicalDeviceVulkan13Features vk13 = { 0 };
     VkPhysicalDeviceRobustness2FeaturesEXT robustness2 = { 0 };
     VkDeviceQueueCreateInfo queue = { 0 };
     VkDeviceCreateInfo create = { 0 };
     VkDevice device = VK_NULL_HANDLE;
+    VkQueue device_queue = VK_NULL_HANDLE;
+    VkSemaphoreTypeCreateInfo semaphore_type = { 0 };
+    VkSemaphoreCreateInfo semaphore_create = { 0 };
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo pool_create = { 0 };
+    VkCommandPool command_pool = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo command_alloc = { 0 };
+    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+    VkCommandBufferBeginInfo command_begin = { 0 };
+    VkCommandBufferSubmitInfo command_info = { 0 };
+    VkSemaphoreSubmitInfo signal = { 0 };
+    VkSubmitInfo2 submit = { 0 };
+    VkSemaphoreWaitInfo wait = { 0 };
+    uint64_t signal_value = 1;
     VkResult result;
 
     if (!state->transport_features_ready) return VK_ERROR_FEATURE_NOT_PRESENT;
+    vk12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     vk13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     robustness2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
     queue.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     create.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    vk12.timelineSemaphore = VK_TRUE;
     vk13.synchronization2 = VK_TRUE;
     vk13.dynamicRendering = VK_TRUE;
     vk13.maintenance4 = VK_TRUE;
     robustness2.robustBufferAccess2 = VK_TRUE;
     robustness2.nullDescriptor = VK_TRUE;
     robustness2.robustImageAccess2 = VK_TRUE;
-    vk13.pNext = &robustness2;
+    vk13.pNext = &vk12;
+    vk12.pNext = &robustness2;
     queue.queueFamilyIndex = state->queue_family;
     queue.queueCount = 1;
     queue.pQueuePriorities = &priority;
@@ -373,8 +433,100 @@ static VkResult create_transport_device(VkPhysicalDevice physical,
     create.pQueueCreateInfos = &queue;
     create.enabledExtensionCount = 1;
     create.ppEnabledExtensionNames = extensions;
+    write_progress(state, "before-device-create");
     result = vkCreateDevice(physical, &create, NULL, &device);
-    if (result == VK_SUCCESS) vkDestroyDevice(device, NULL);
+    state->transport_device_create_result = result;
+    if (result != VK_SUCCESS)
+        return result;
+    write_progress(state, "device-created");
+
+    vkGetDeviceQueue(device, state->queue_family, 0, &device_queue);
+    semaphore_type.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    semaphore_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    semaphore_create.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    semaphore_create.pNext = &semaphore_type;
+    write_progress(state, "before-semaphore-create");
+    state->timeline_semaphore_create_result =
+        vkCreateSemaphore(device, &semaphore_create, NULL, &semaphore);
+    if (state->timeline_semaphore_create_result != VK_SUCCESS) {
+        result = state->timeline_semaphore_create_result;
+        goto cleanup;
+    }
+    write_progress(state, "semaphore-created");
+
+    /* Keep one real command in the submission.  DXVK never relies on an empty
+     * queue submit, and some Venus implementations do not retire an empty
+     * Submit2 timeline signal through the same feedback path. */
+    pool_create.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_create.queueFamilyIndex = state->queue_family;
+    result = vkCreateCommandPool(device, &pool_create, NULL, &command_pool);
+    if (result != VK_SUCCESS)
+        goto cleanup;
+    command_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_alloc.commandPool = command_pool;
+    command_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_alloc.commandBufferCount = 1;
+    result = vkAllocateCommandBuffers(device, &command_alloc, &command_buffer);
+    if (result != VK_SUCCESS)
+        goto cleanup;
+    command_begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    result = vkBeginCommandBuffer(command_buffer, &command_begin);
+    if (result != VK_SUCCESS)
+        goto cleanup;
+    result = vkEndCommandBuffer(command_buffer);
+    if (result != VK_SUCCESS)
+        goto cleanup;
+
+    /* DXVK 2.6 submits through Vulkan 1.3 synchronization2.  Qualify the
+     * exact QueueSubmit2 timeline path instead of the legacy submit pNext
+     * encoding, which DXVK does not use. */
+    signal.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signal.semaphore = semaphore;
+    signal.value = signal_value;
+    signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    command_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    command_info.commandBuffer = command_buffer;
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submit.commandBufferInfoCount = 1;
+    submit.pCommandBufferInfos = &command_info;
+    submit.signalSemaphoreInfoCount = 1;
+    submit.pSignalSemaphoreInfos = &signal;
+    write_progress(state, "before-queue-submit");
+    state->timeline_submit_result = vkQueueSubmit2(device_queue, 1, &submit, VK_NULL_HANDLE);
+    if (state->timeline_submit_result != VK_SUCCESS) {
+        result = state->timeline_submit_result;
+        goto cleanup;
+    }
+    write_progress(state, "queue-submitted");
+
+    wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    wait.semaphoreCount = 1;
+    wait.pSemaphores = &semaphore;
+    wait.pValues = &signal_value;
+    write_progress(state, "before-semaphore-wait");
+    state->timeline_wait_result = vkWaitSemaphores(device, &wait, 5000000000ULL);
+    if (state->timeline_wait_result != VK_SUCCESS) {
+        result = state->timeline_wait_result;
+        goto cleanup;
+    }
+    write_progress(state, "semaphore-wait-complete");
+
+    write_progress(state, "before-counter-query");
+    state->timeline_counter_result =
+        vkGetSemaphoreCounterValue(device, semaphore, &state->timeline_observed_value);
+    state->timeline_round_trip_ok =
+        state->timeline_counter_result == VK_SUCCESS &&
+        state->timeline_observed_value >= signal_value;
+    result = state->timeline_round_trip_ok ? VK_SUCCESS : VK_NOT_READY;
+
+cleanup:
+    if (command_pool != VK_NULL_HANDLE)
+        vkDestroyCommandPool(device, command_pool, NULL);
+    if (semaphore != VK_NULL_HANDLE)
+        vkDestroySemaphore(device, semaphore, NULL);
+    if (device != VK_NULL_HANDLE)
+        vkDestroyDevice(device, NULL);
+    write_progress(state, "device-destroyed");
     return result;
 }
 
@@ -399,6 +551,10 @@ int main(int argc, char **argv)
     state.queue_family = UINT32_MAX;
     state.loader_api = VK_API_VERSION_1_0;
     state.transport_device_create_result = VK_NOT_READY;
+    state.timeline_semaphore_create_result = VK_NOT_READY;
+    state.timeline_submit_result = VK_NOT_READY;
+    state.timeline_wait_result = VK_NOT_READY;
+    state.timeline_counter_result = VK_NOT_READY;
     {
         PFN_vkEnumerateInstanceVersion enumerate_version =
             (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(VK_NULL_HANDLE,
@@ -454,12 +610,17 @@ int main(int argc, char **argv)
         free(queues);
     }
     if (state.queue_family == UINT32_MAX) { failure = "no graphics queue family"; goto cleanup; }
-    state.transport_device_create_result = create_transport_device(physical, &state);
+    result = create_transport_device(physical, &state);
     state.transport_device_create_ok = state.transport_device_create_result == VK_SUCCESS;
     if (!state.transport_device_create_ok) {
         write_result(&state, "UNSUPPORTED", "DXVK 2.6 transport device requirements are unavailable");
         vkDestroyInstance(instance, NULL);
         return 3;
+    }
+    if (!state.timeline_round_trip_ok) {
+        write_result(&state, "FAIL", "DXVK 2.6 timeline queue-submit/wait round trip failed");
+        vkDestroyInstance(instance, NULL);
+        return 2;
     }
     write_result(&state, "PASS", "DXVK 2.6 transport requirements passed; D3D11 baseline is evaluated by the unmodified runtime");
     exit_code = 0;

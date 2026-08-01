@@ -325,7 +325,21 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
     if (selectedProfile == "shadow-precise-dirty-ring-inline-upload-descriptor-serialized") {
         env.push_back("VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=1");
     }
-    env.push_back("VN_WINEHUA_STRONG_RING_BARRIER=1");
+    const std::string strongRing =
+        FindLaunchEnvironmentValue(params, "VN_WINEHUA_STRONG_RING_BARRIER");
+    env.push_back("VN_WINEHUA_STRONG_RING_BARRIER=" +
+                  (strongRing.empty() ? "1" : strongRing));
+    if (params.d3dBackend == "dxvk_modern_2_6") {
+        const char* traceKeys[] = {
+            "DXVK_WINEHUA_TRACE_SAMPLED",
+            "DXVK_WINEHUA_TRACE_FLOW",
+            "DXVK_WINEHUA_TRACE_API",
+        };
+        for (const char* key : traceKeys) {
+            const std::string value = FindLaunchEnvironmentValue(params, key);
+            env.push_back(std::string(key) + "=" + (value.empty() ? "0" : value));
+        }
+    }
     if (guestPerf) {
         env.push_back("VN_WINEHUA_PERF_SUMMARY=1");
         env.push_back("VN_WINEHUA_PERF_LOG=/storage/Users/currentUser/Download/app.hackeris.winehua/winehua_guest_ring_perf.log");
@@ -409,9 +423,11 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
     }
 
     // -- wineserver via NCP --
-    // wineserver 走 WineserverMain 入口, 不解析 __env__, 不需要环境变量
+    // NCP 不继承主进程环境；WineserverMain 会解析 __env__，所以必须把
+    // 选中的 prefix 显式传入，避免 clean smoke 的 wineserver 落回 .wine。
     {
-        std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin + "|wineserver|-f|-p";
+        std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin +
+            "|wineserver|-f|-p|__env=WINEPREFIX=" + p->prefixDir;
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
         NativeChildProcess_Args wsArgs = {};
         wsArgs.entryParams = const_cast<char*>(wsEntryParams.c_str());
@@ -437,6 +453,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-starting"), napi_tsfn_blocking);
 
     gBrokerHomeDir = p->homeDir;
+    gBrokerPrefixDir = p->prefixDir;
     StartBrokerServer();
     setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
 

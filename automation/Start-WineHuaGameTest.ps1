@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('dxvk_legacy', 'wined3d')]
+    [ValidateSet('dxvk_legacy', 'dxvk_modern_2_6', 'wined3d')]
     [string]$D3DBackend = 'dxvk_legacy',
 [ValidateSet('baseline', 'direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback', 'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise', 'shadow-precise-single-ring', 'shadow-precise-sync-submit', 'shadow-precise-strong-ring', 'shadow-precise-legacy-host-sync', 'shadow-precise-strong-ring-trace', 'shadow-precise-strong-ring-perf', 'shadow-precise-strong-ring-async-present', 'shadow-precise-strong-ring-fence-poll', 'shadow-precise-strong-ring-mailbox', 'shadow-precise-direct-fence', 'shadow-precise-retain-shmem', 'shadow-precise-cpu-upload', 'shadow-precise-dirty-ring', 'shadow-precise-dirty-ring-perf', 'shadow-precise-dirty-ring-gpu-frame-profile', 'shadow-precise-dirty-ring-frame-timeline', 'shadow-precise-dirty-ring-no-merge', 'shadow-precise-dirty-ring-no-upload', 'shadow-precise-dirty-ring-no-upload-fast', 'shadow-precise-dirty-ring-inline-upload', 'shadow-precise-dirty-ring-inline-upload-coverage-sort', 'shadow-precise-dirty-ring-coverage-sort-sampled', 'shadow-precise-dirty-ring-coverage-poll', 'shadow-precise-dirty-ring-inline-upload-alias-cover', 'shadow-precise-dirty-ring-inline-upload-serialized','shadow-precise-dirty-ring-inline-upload-descriptor-serialized', 'shadow-precise-dirty-ring-frame-assoc-trace', 'shadow-precise-dirty-ring-present-image-trace')]
     [string]$PerfProfile = 'shadow-precise-dirty-ring-inline-upload',
@@ -78,23 +78,9 @@ if ($GamePreset -eq 'heaven-dx11') {
             '-video_height', [string]$HeavenHeight
         )
     }
-    # The direct executable opens Heaven's Win32 launcher first. Use the same
-    # managed driver as other game automation so the benchmark scene, rather
-    # than the black pre-run client area, is the workload under test.
-    if (-not $ClickTitlePrefix) {
-        $ClickTitlePrefix = 'Unigine Heaven Benchmark 4.0 Basic (Direct3D11)'
-    }
-    if (-not $ClickButtonText) {
-        $ClickButtonText = 'Benchmark'
-    }
-    # Heaven draws its launcher controls itself, so there is no Win32 BUTTON
-    # for BM_CLICK. Keep a deterministic client-coordinate fallback.
-    if ($ClickClientXPermille -lt 0) {
-        $ClickClientXPermille = 80
-    }
-    if ($ClickClientYPermille -lt 0) {
-        $ClickClientYPermille = 65
-    }
+    # bin/heaven.exe with the engine arguments starts the render workload
+    # directly. Do not inject a launcher click: the scene window has no such
+    # control, and a coordinate click can corrupt an otherwise valid run.
 }
 
 # Carry the DXVK half of the frame-association trace explicitly in the game
