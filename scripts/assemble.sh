@@ -246,14 +246,21 @@ assemble_pad() {
     i686-w64-mingw32-gcc -O2 -s -mwindows -o \
         "$smoke_dir/x86/winehua_d3d_switch_cube.exe" "$cube_source" \
         -ld3d9 -ld3d11 -ldxgi -ld3dcompiler -luuid -lshell32 -luser32 -lgdi32 -lm
+    # The primary Wine build uses --enable-archs=i386,x86_64.  Its PE import
+    # libraries are both emitted under wine-ohos; wine-i386-pe is an obsolete
+    # standalone build directory and does not exist in a clean CI checkout.
+    local vulkan_import_x64="$BUILD_DIR/wine-ohos/dlls/vulkan-1/x86_64-windows/libvulkan-1.a"
+    local vulkan_import_x86="$BUILD_DIR/wine-ohos/dlls/vulkan-1/i386-windows/libvulkan-1.a"
+    [ -s "$vulkan_import_x64" ] || err "Wine x64 Vulkan import library missing: $vulkan_import_x64"
+    [ -s "$vulkan_import_x86" ] || err "Wine x86 Vulkan import library missing: $vulkan_import_x86"
     local diagnostics_source="$WINEHUA/smoke/winehua_gpu_diagnostics.c"
     x86_64-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -mwindows -I"$DXVK_SRC/include" -o \
         "$smoke_dir/x64/winehua_gpu_diagnostics.exe" "$diagnostics_source" \
-        "$BUILD_DIR/wine-ohos/dlls/vulkan-1/x86_64-windows/libvulkan-1.a" \
+        "$vulkan_import_x64" \
         -ld3d11 -ldxgi -lversion -luuid -lshell32 -luser32 -lgdi32
     i686-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -mwindows -I"$DXVK_SRC/include" -o \
         "$smoke_dir/x86/winehua_gpu_diagnostics.exe" "$diagnostics_source" \
-        "$BUILD_DIR/wine-i386-pe/dlls/vulkan-1/i386-windows/libvulkan-1.a" \
+        "$vulkan_import_x86" \
         -ld3d11 -ldxgi -lversion -luuid -lshell32 -luser32 -lgdi32
     local d3d8_source="$WINEHUA/smoke/winehua_d3d8_smoke.c"
     x86_64-w64-mingw32-gcc -O2 -s -mwindows -o \
@@ -269,10 +276,10 @@ assemble_pad() {
     local dxvk26_requirements_source="$WINEHUA/smoke/winehua_dxvk26_requirements.c"
     x86_64-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -I"$DXVK_SRC/include" -o \
         "$smoke_dir/x64/winehua_dxvk26_requirements.exe" "$dxvk26_requirements_source" \
-        "$BUILD_DIR/wine-ohos/dlls/vulkan-1/x86_64-windows/libvulkan-1.a"
+        "$vulkan_import_x64"
     i686-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -I"$DXVK_SRC/include" -o \
         "$smoke_dir/x86/winehua_dxvk26_requirements.exe" "$dxvk26_requirements_source" \
-        "$BUILD_DIR/wine-i386-pe/dlls/vulkan-1/i386-windows/libvulkan-1.a"
+        "$vulkan_import_x86"
     local win32_driver_source="$WINEHUA/smoke/winehua_win32_driver.c"
     x86_64-w64-mingw32-gcc -O2 -s -municode -mwindows -o \
         "$smoke_dir/x64/winehua_win32_driver.exe" "$win32_driver_source" \
