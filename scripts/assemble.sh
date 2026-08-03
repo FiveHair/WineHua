@@ -276,10 +276,10 @@ assemble_pad() {
     local dxvk26_requirements_source="$WINEHUA/smoke/winehua_dxvk26_requirements.c"
     x86_64-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -I"$DXVK_SRC/include" -o \
         "$smoke_dir/x64/winehua_dxvk26_requirements.exe" "$dxvk26_requirements_source" \
-        "$vulkan_import_x64" -luser32
+        "$vulkan_import_x64" -luser32 -lcomctl32 -lgdi32
     i686-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -I"$DXVK_SRC/include" -o \
         "$smoke_dir/x86/winehua_dxvk26_requirements.exe" "$dxvk26_requirements_source" \
-        "$vulkan_import_x86" -luser32
+        "$vulkan_import_x86" -luser32 -lcomctl32 -lgdi32
     local win32_driver_source="$WINEHUA/smoke/winehua_win32_driver.c"
     x86_64-w64-mingw32-gcc -O2 -s -municode -mwindows -o \
         "$smoke_dir/x64/winehua_win32_driver.exe" "$win32_driver_source" \

@@ -527,6 +527,40 @@ struct Index {
     return environment;
   }
 
+  /* The requirements executable is a Windows Vulkan probe, not a DXVK DLL
+   * loader. Launch it with the same Guest Vulkan/Venus runtime selected by
+   * SmokeRunner so a user-triggered run observes the real PE path. */
+  private capabilityProbeEnvironment(windowsExePath: string): Record<string, string> {
+    const environment = this.d3dLaunchEnvironment();
+    if (!windowsExePath.toLowerCase().endsWith('winehua_dxvk26_requirements.exe')) {
+      return environment;
+    }
+    const guestVulkanRoot = `${WINE_ROOT}/bin/guest_vulkan`;
+    const guestVulkanLibrary = `${guestVulkanRoot}/lib`;
+    const guestVulkanIcd = `${guestVulkanRoot}/share/vulkan/icd.d/venus_icd.x86_64.json`;
+    const box64LibraryPath = `${guestVulkanLibrary}:${WINE_ROOT}/bin/guest_gfx/lib:` +
+      `${WINE_ROOT}/bin:${WINE_ROOT}/bin/x86_64-unix:${WINE_ROOT}/lib/x86_64`;
+    environment['WINEHUA_VULKAN_RUNTIME'] = '1';
+    environment['WINEHUA_VULKAN_LOADER_ARCH'] = 'x86_64';
+    environment['WINEHUA_VENUS_ICD_ARCH'] = 'x86_64';
+    environment['USE_LIBBOX64'] = '1';
+    environment['BOX64_LD_LIBRARY_PATH'] = box64LibraryPath;
+    environment['BOX64_EMULATED_LIBS'] = 'libvulkan.so:libvulkan.so.1:' +
+      'libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:' +
+      'libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:' +
+      'libwayland-client.so:libwayland-client.so.0:libwayland-server.so:' +
+      'libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:' +
+      'libdrm.so:libdrm.so.2:libffi.so:libffi.so.8';
+    environment['VK_DRIVER_FILES'] = guestVulkanIcd;
+    environment['VK_ICD_FILENAMES'] = guestVulkanIcd;
+    environment['VN_DEBUG'] = 'vtest';
+    environment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
+    environment['VN_PERF'] =
+      'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
+    environment['WINEDEBUG'] = '+loaddll,+module';
+    return environment;
+  }
+
   private d3dPresentBackend(): string {
     return this.d3dBackend.indexOf('dxvk_') === 0 ? 'venus_broker_present' : 'virgl_compositor';
   }
@@ -642,7 +676,7 @@ struct Index {
     testNapi.runWineProgram({
       windowsExePath: exePath,
       argv: [],
-      environment: this.d3dLaunchEnvironment(),
+      environment: this.capabilityProbeEnvironment(exePath),
       workingDirectory: this.curDir,
       prefixMode: this.prefixMode,
       d3dBackend: this.d3dBackend,
@@ -679,7 +713,7 @@ struct Index {
       // @StorageLink arrays are observable proxies. Pass a plain array across
       // the N-API boundary so napi_is_array can enumerate every game argument.
       argv: this.gameArguments.slice(),
-      environment: this.d3dLaunchEnvironment(),
+      environment: this.capabilityProbeEnvironment(gamePath),
       workingDirectory: this.windowsParentDirectory(gamePath),
       prefixMode: 'reuse',
       d3dBackend: this.d3dBackend,

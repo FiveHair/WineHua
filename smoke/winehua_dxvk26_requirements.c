@@ -12,12 +12,14 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <commctrl.h>
 #include <vulkan/vulkan.h>
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "vkd3d_capability_audit.h"
 
@@ -37,6 +39,7 @@ struct probe_state {
     BOOL fallback_detected;
     char *capability_audit;
     BOOL interactive;
+    BOOL initial_vkd3d_tab;
 
     BOOL api13;
     BOOL robust_buffer_access2;
@@ -156,40 +159,288 @@ static BOOL vkd3d_policy_supported(const struct probe_state *state)
         state->max_descriptor_set_update_after_bind_storage_buffers >= 1000000u;
 }
 
-static void show_vkd3d_capability_report(const struct probe_state *state,
-                                          const char *status, const char *message)
+static BOOL dxvk_transport_supported(const struct probe_state *state)
 {
+    return state->transport_device_create_ok && state->timeline_round_trip_ok;
+}
+
+static void append_report_text(char *buffer, size_t buffer_size, const char *format, ...)
+{
+    size_t used = strlen(buffer);
+    va_list arguments;
+
+    if (used >= buffer_size - 1) return;
+    va_start(arguments, format);
+    vsnprintf(buffer + used, buffer_size - used, format, arguments);
+    va_end(arguments);
+}
+
+static void append_feature_result(char *buffer, size_t buffer_size, const char *name,
+                                  BOOL passed, const char *failure_reason)
+{
+    append_report_text(buffer, buffer_size, "[%s] %s%s%s\r\n",
+                       passed ? "OK" : "FAIL", name,
+                       passed ? "" : " - ", passed ? "" : failure_reason);
+}
+
+static void append_uab_limit(char *buffer, size_t buffer_size, const char *name, uint32_t value)
+{
+    BOOL passed = value >= 1000000u;
+    append_report_text(buffer, buffer_size, "[%s] %s: %u%s\r\n",
+                       passed ? "OK" : "FAIL", name, value,
+                       passed ? "" : " - below Gate A minimum 1000000");
+}
+
+struct capability_report_window {
+    HWND tabs;
+    HWND dxvk_text;
+    HWND vkd3d_text;
+    HWND close_button;
+    int selected_tab;
+};
+
+enum {
+    REPORT_TABS = 1001,
+    REPORT_CLOSE = 1002
+};
+
+static void set_control_font(HWND control)
+{
+    SendMessageA(control, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+}
+
+static void update_report_layout(struct capability_report_window *report, HWND window)
+{
+    RECT client;
+    int width;
+    int height;
+
+    GetClientRect(window, &client);
+    width = client.right - client.left;
+    height = client.bottom - client.top;
+    MoveWindow(report->tabs, 12, 12, width - 24, height - 66, TRUE);
+    MoveWindow(report->dxvk_text, 30, 54, width - 60, height - 132, TRUE);
+    MoveWindow(report->vkd3d_text, 30, 54, width - 60, height - 132, TRUE);
+    MoveWindow(report->close_button, width - 100, height - 42, 88, 28, TRUE);
+}
+
+static void select_report_tab(struct capability_report_window *report, int tab)
+{
+    report->selected_tab = tab == 1 ? 1 : 0;
+    TabCtrl_SetCurSel(report->tabs, report->selected_tab);
+    ShowWindow(report->dxvk_text, report->selected_tab == 0 ? SW_SHOW : SW_HIDE);
+    ShowWindow(report->vkd3d_text, report->selected_tab == 1 ? SW_SHOW : SW_HIDE);
+}
+
+static LRESULT CALLBACK capability_report_wndproc(HWND window, UINT message,
+                                                   WPARAM wparam, LPARAM lparam)
+{
+    struct capability_report_window *report =
+        (struct capability_report_window *)GetWindowLongPtrA(window, GWLP_USERDATA);
+
+    switch (message) {
+    case WM_CREATE:
+        report = (struct capability_report_window *)((CREATESTRUCTA *)lparam)->lpCreateParams;
+        SetWindowLongPtrA(window, GWLP_USERDATA, (LONG_PTR)report);
+        return 0;
+    case WM_SIZE:
+        if (report) update_report_layout(report, window);
+        return 0;
+    case WM_NOTIFY:
+        if (report && ((NMHDR *)lparam)->idFrom == REPORT_TABS &&
+            ((NMHDR *)lparam)->code == TCN_SELCHANGE) {
+            select_report_tab(report, TabCtrl_GetCurSel(report->tabs));
+        }
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wparam) == REPORT_CLOSE) DestroyWindow(window);
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(window);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    default:
+        return DefWindowProcA(window, message, wparam, lparam);
+    }
+}
+
+static BOOL register_capability_report_class(HINSTANCE instance)
+{
+    WNDCLASSA window_class;
+    static const char class_name[] = "WineHuaCapabilityReport";
+
+    if (GetClassInfoA(instance, class_name, &window_class)) return TRUE;
+    memset(&window_class, 0, sizeof(window_class));
+    window_class.lpfnWndProc = capability_report_wndproc;
+    window_class.hInstance = instance;
+    window_class.hCursor = LoadCursorA(NULL, IDC_ARROW);
+    window_class.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    window_class.lpszClassName = class_name;
+    return RegisterClassA(&window_class) != 0;
+}
+
+static void show_capability_report(const struct probe_state *state,
+                                   const char *status, const char *message)
+{
+    static const char class_name[] = "WineHuaCapabilityReport";
+    HINSTANCE instance = GetModuleHandleA(NULL);
+    struct capability_report_window report;
+    INITCOMMONCONTROLSEX common_controls;
+    TCITEMA item;
+    HWND window;
+    MSG message_loop;
     char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE + 16];
     char api_version[32];
-    char report[2048];
-    BOOL supported = vkd3d_policy_supported(state);
+    char dxvk_report[4096];
+    char vkd3d_report[4096];
+    BOOL dxvk_supported = dxvk_transport_supported(state);
+    BOOL vkd3d_supported = vkd3d_policy_supported(state);
 
     json_safe_copy(device_name, sizeof(device_name), state->properties.deviceName);
     version_text(state->properties.apiVersion, api_version, sizeof(api_version));
-    snprintf(report, sizeof(report),
-             "WineHua VKD3D Capability Probe\r\n\r\n"
-             "Scope: Windows PE -> winevulkan -> Venus\r\n"
-             "vkd3d-proton loaded: no\r\n\r\n"
-             "Probe: %s (%s)\r\nAdapter: %s\r\nVulkan API: %s\r\n"
-             "Descriptor indexing: %s\r\nBuffer device address: %s\r\n"
-             "Timeline / synchronization2 / dynamic rendering: %s / %s / %s\r\n\r\n"
-             "UpdateAfterBind per-set limits\r\n"
-             "  Sampled images: %u\r\n  Storage images: %u\r\n  Storage buffers: %u\r\n"
-             "Required by this Gate A policy: 1000000 each\r\n\r\n"
-             "Windows PE path result: %s\r\n"
-             "Full eligibility still requires independent Host, Guest, and Wine Vulkan probes.",
-             status, message ? message : "", device_name, api_version,
-             bool_text(state->descriptor_indexing), bool_text(state->buffer_device_address),
-             bool_text(state->timeline_semaphore), bool_text(state->synchronization2),
-             bool_text(state->dynamic_rendering),
-             state->max_descriptor_set_update_after_bind_sampled_images,
-             state->max_descriptor_set_update_after_bind_storage_images,
-             state->max_descriptor_set_update_after_bind_storage_buffers,
-             supported ? "SUPPORTED ON THIS PATH" : "UNSUPPORTED ON THIS PATH");
-    printf("%s\n", report);
+    dxvk_report[0] = 0;
+    append_report_text(dxvk_report, sizeof(dxvk_report),
+                       "DXVK 2.6.2 transport capability\r\n\r\n"
+                       "Scope: Windows PE -> winevulkan -> Venus\r\n"
+                       "Adapter: %s\r\nVulkan API: %s\r\n"
+                       "Probe status: %s%s%s\r\n\r\n"
+                       "Required transport features\r\n",
+                       device_name[0] ? device_name : "unavailable", api_version, status,
+                       message && message[0] ? " - " : "", message && message[0] ? message : "");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "Vulkan API 1.3", state->api13,
+                          "adapter exposes Vulkan below 1.3");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "core robustBufferAccess",
+                          state->core.robustBufferAccess, "core feature is disabled");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "robustBufferAccess2",
+                          state->robust_buffer_access2, "VK_EXT_robustness2 feature is unavailable");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "robustImageAccess2",
+                          state->robust_image_access2, "VK_EXT_robustness2 feature is unavailable");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "nullDescriptor",
+                          state->null_descriptor, "VK_EXT_robustness2 feature is unavailable");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "timelineSemaphore",
+                          state->timeline_semaphore, "Vulkan 1.2 timeline feature is unavailable");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "synchronization2",
+                          state->synchronization2, "Vulkan 1.3 feature is unavailable");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "dynamicRendering",
+                          state->dynamic_rendering, "Vulkan 1.3 feature is unavailable");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "maintenance4",
+                          state->maintenance4, "Vulkan 1.3 feature is unavailable");
+    append_report_text(dxvk_report, sizeof(dxvk_report), "\r\nRuntime checks\r\n");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "Vulkan device creation",
+                          state->transport_device_create_ok,
+                          "required DXVK transport features could not create a device");
+    append_feature_result(dxvk_report, sizeof(dxvk_report), "QueueSubmit2 timeline round trip",
+                          state->timeline_round_trip_ok,
+                          "timeline submit, wait, or counter verification failed");
+    append_report_text(dxvk_report, sizeof(dxvk_report),
+                       "\r\nDXVK support on this PE path: %s\r\n"
+                       "This probe does not load or replace DXVK DLLs.\r\n",
+                       dxvk_supported ? "SUPPORTED" : "UNSUPPORTED");
+
+    vkd3d_report[0] = 0;
+    append_report_text(vkd3d_report, sizeof(vkd3d_report),
+                       "VKD3D Gate A capability\r\n\r\n"
+                       "Scope: Windows PE -> winevulkan -> Venus\r\n"
+                       "vkd3d-proton loaded: no\r\n"
+                       "Adapter: %s\r\nVulkan API: %s\r\n\r\n"
+                       "Gate A feature requirements\r\n",
+                       device_name[0] ? device_name : "unavailable", api_version);
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "Vulkan API 1.3", state->api13,
+                          "adapter exposes Vulkan below 1.3");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "core robustBufferAccess",
+                          state->core.robustBufferAccess, "core feature is disabled");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "robustBufferAccess2",
+                          state->robust_buffer_access2, "VK_EXT_robustness2 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "robustImageAccess2",
+                          state->robust_image_access2, "VK_EXT_robustness2 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "nullDescriptor",
+                          state->null_descriptor, "VK_EXT_robustness2 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "descriptorIndexing",
+                          state->descriptor_indexing, "Vulkan 1.2 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "bufferDeviceAddress",
+                          state->buffer_device_address, "Vulkan 1.2 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "timelineSemaphore",
+                          state->timeline_semaphore, "Vulkan 1.2 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "synchronization2",
+                          state->synchronization2, "Vulkan 1.3 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "dynamicRendering",
+                          state->dynamic_rendering, "Vulkan 1.3 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "maintenance4",
+                          state->maintenance4, "Vulkan 1.3 feature is unavailable");
+    append_report_text(vkd3d_report, sizeof(vkd3d_report),
+                       "\r\nUpdateAfterBind per-set limits\r\n");
+    append_uab_limit(vkd3d_report, sizeof(vkd3d_report), "Sampled images",
+                     state->max_descriptor_set_update_after_bind_sampled_images);
+    append_uab_limit(vkd3d_report, sizeof(vkd3d_report), "Storage images",
+                     state->max_descriptor_set_update_after_bind_storage_images);
+    append_uab_limit(vkd3d_report, sizeof(vkd3d_report), "Storage buffers",
+                     state->max_descriptor_set_update_after_bind_storage_buffers);
+    append_report_text(vkd3d_report, sizeof(vkd3d_report),
+                       "Observed descriptors in all pools: %u\r\n\r\n"
+                       "VKD3D Gate A on this PE path: %s\r\n"
+                       "Full approval requires matching Host, Guest, and Wine Vulkan probes.\r\n",
+                       state->max_update_after_bind_descriptors_in_all_pools,
+                       vkd3d_supported ? "SUPPORTED" : "UNSUPPORTED");
+    printf("DXVK 2.6.2: %s\nVKD3D Gate A: %s\n",
+           dxvk_supported ? "SUPPORTED" : "UNSUPPORTED",
+           vkd3d_supported ? "SUPPORTED" : "UNSUPPORTED");
     fflush(stdout);
-    MessageBoxA(NULL, report, "WineHua VKD3D Capability Probe",
-                MB_OK | (supported ? MB_ICONINFORMATION : MB_ICONWARNING));
+
+    common_controls.dwSize = sizeof(common_controls);
+    common_controls.dwICC = ICC_TAB_CLASSES;
+    InitCommonControlsEx(&common_controls);
+    if (!register_capability_report_class(instance)) return;
+
+    memset(&report, 0, sizeof(report));
+    report.selected_tab = state->initial_vkd3d_tab ? 1 : 0;
+    window = CreateWindowExA(WS_EX_DLGMODALFRAME, class_name,
+                             "WineHua Graphics Capability Probe",
+                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME |
+                             WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
+                             CW_USEDEFAULT, CW_USEDEFAULT, 760, 590,
+                             NULL, NULL, instance, &report);
+    if (!window) return;
+    report.tabs = CreateWindowExA(0, WC_TABCONTROLA, "",
+                                  WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE,
+                                  0, 0, 0, 0, window, (HMENU)(INT_PTR)REPORT_TABS,
+                                  instance, NULL);
+    report.dxvk_text = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", dxvk_report,
+                                       WS_CHILD | ES_LEFT | ES_MULTILINE | ES_READONLY |
+                                       ES_AUTOVSCROLL | WS_VSCROLL,
+                                       0, 0, 0, 0, window, NULL, instance, NULL);
+    report.vkd3d_text = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", vkd3d_report,
+                                        WS_CHILD | ES_LEFT | ES_MULTILINE | ES_READONLY |
+                                        ES_AUTOVSCROLL | WS_VSCROLL,
+                                        0, 0, 0, 0, window, NULL, instance, NULL);
+    report.close_button = CreateWindowExA(0, "BUTTON", "Close",
+                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                          0, 0, 0, 0, window,
+                                          (HMENU)(INT_PTR)REPORT_CLOSE, instance, NULL);
+    if (!report.tabs || !report.dxvk_text || !report.vkd3d_text || !report.close_button) {
+        DestroyWindow(window);
+        return;
+    }
+    set_control_font(report.tabs);
+    set_control_font(report.dxvk_text);
+    set_control_font(report.vkd3d_text);
+    set_control_font(report.close_button);
+    memset(&item, 0, sizeof(item));
+    item.mask = TCIF_TEXT;
+    item.pszText = "DXVK 2.6.2";
+    TabCtrl_InsertItem(report.tabs, 0, &item);
+    item.pszText = "VKD3D Gate A";
+    TabCtrl_InsertItem(report.tabs, 1, &item);
+    update_report_layout(&report, window);
+    select_report_tab(&report, report.selected_tab);
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+    SetForegroundWindow(window);
+    while (GetMessageA(&message_loop, NULL, 0, 0) > 0) {
+        TranslateMessage(&message_loop);
+        DispatchMessageA(&message_loop);
+    }
 }
 
 static void write_progress(const struct probe_state *state, const char *stage)
@@ -367,7 +618,7 @@ static void publish_result(const struct probe_state *state, const char *status,
                            const char *message)
 {
     write_result(state, status, message);
-    if (state->interactive) show_vkd3d_capability_report(state, status, message);
+    if (state->interactive) show_capability_report(state, status, message);
 }
 
 static BOOL has_extension(const VkExtensionProperties *extensions, uint32_t count,
@@ -657,7 +908,8 @@ int main(int argc, char **argv)
 
     if (argument_present(argc, argv, "--help") || argument_present(argc, argv, "-h")) {
         printf("Usage: winehua_dxvk26_requirements.exe [--vkd3d-capability] [--result FILE]\n"
-               "Run without --automation to show the Windows PE Vulkan capability report.\n");
+               "Run without --automation to show DXVK and VKD3D capability tabs.\n"
+               "--vkd3d-capability opens the VKD3D tab first.\n");
         return 0;
     }
     memset(&state, 0, sizeof(state));
@@ -673,6 +925,7 @@ int main(int argc, char **argv)
     state.timeline_wait_result = VK_NOT_READY;
     state.timeline_counter_result = VK_NOT_READY;
     state.interactive = !argument_present(argc, argv, "--automation");
+    state.initial_vkd3d_tab = argument_present(argc, argv, "--vkd3d-capability");
     {
         PFN_vkEnumerateInstanceVersion enumerate_version =
             (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(VK_NULL_HANDLE,
