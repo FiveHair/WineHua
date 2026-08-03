@@ -152,7 +152,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
             if (zeroCopyFallbackPending_ &&
                 layer.shmCommitSerial > zeroCopyFallbackShmSerial_)
             {
-                server->SetSurfaceZeroCopy(zeroCopySurfaceKey_, false);
+                ClearZeroCopyCompositorKey();
                 zeroCopyFallbackPending_ = false;
                 zeroCopyHasFrame_ = false;
                 OH_LOG_WARN(LOG_APP,
@@ -317,9 +317,7 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
             if (server->GetZeroCopyLayerInfo(zeroCopySurfaceKey_, rendererToplevelId,
                                               zeroCopySourceW_, zeroCopySourceH_, layer))
                 zeroCopyFallbackShmSerial_ = layer.shmCommitSerial;
-            winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
-                zeroCopySurfaceKey_, false);
-            zeroCopyReadyPublished_ = false;
+            UnpublishZeroCopyReady(rendererToplevelId);
             zeroCopyFallbackPending_ = true;
             OH_LOG_WARN(LOG_APP,
                         "[VIRGL-ZC][MAIN] fallback pending tl=%{public}u key=%{public}llu "
@@ -386,17 +384,7 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
                     rendererToplevelId,
                     static_cast<unsigned long long>(zeroCopySurfaceKey_));
     }
-    if (!zeroCopyReadyPublished_)
-    {
-        server->SetSurfaceZeroCopy(zeroCopySurfaceKey_, true);
-        winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
-            zeroCopySurfaceKey_, true);
-        zeroCopyReadyPublished_ = true;
-        OH_LOG_INFO(LOG_APP,
-                    "[VIRGL-ZC][MAIN] GPU_ACTIVE tl=%{public}u key=%{public}llu",
-                    rendererToplevelId,
-                    static_cast<unsigned long long>(zeroCopySurfaceKey_));
-    }
+    PublishZeroCopyActive(rendererToplevelId);
     ++zeroCopyFrames_;
     if (TraceFrameOrder() && zeroCopyFrames_ <= 600)
         OH_LOG_INFO(LOG_APP,
@@ -425,6 +413,45 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     return width > 0 && height > 0;
 }
 
+// -- ZC 状态发布点收敛 (阶段 3) --
+// 三处状态 (compositor zeroCopySurfaceKeys_ / broker ready marker /
+// renderer 内部 zeroCopyReadyPublished_) 的全部更新收敛到这三个方法,
+// 每个幂等。时序是协议设计, 不可合并: 发布先 compositor key 后 ready
+// (先让合成跳过, 再通知 guest 走 ZC); fallback 分两步 — 先撤 ready
+// (guest 立即切 SHM), 等 shmCommitSerial 越过基线 (新 SHM 帧已到) 再撤
+// compositor key (恢复合成), 避免合成到 ZC 前的旧 SHM 帧。
+void EglRenderer::PublishZeroCopyActive(uint32_t rendererToplevelId)
+{
+    if (zeroCopyReadyPublished_) return;
+    WaylandServer::GetInstance()->SetSurfaceZeroCopy(zeroCopySurfaceKey_, true);
+    winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
+        zeroCopySurfaceKey_, true);
+    zeroCopyReadyPublished_ = true;
+    OH_LOG_INFO(LOG_APP,
+                "[VIRGL-ZC][MAIN] GPU_ACTIVE tl=%{public}u key=%{public}llu",
+                rendererToplevelId,
+                static_cast<unsigned long long>(zeroCopySurfaceKey_));
+}
+
+void EglRenderer::UnpublishZeroCopyReady(uint32_t rendererToplevelId)
+{
+    if (!zeroCopyReadyPublished_) return;
+    winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
+        zeroCopySurfaceKey_, false);
+    zeroCopyReadyPublished_ = false;
+    OH_LOG_WARN(LOG_APP,
+                "[VIRGL-ZC][MAIN] ready revoked tl=%{public}u key=%{public}llu",
+                rendererToplevelId,
+                static_cast<unsigned long long>(zeroCopySurfaceKey_));
+}
+
+void EglRenderer::ClearZeroCopyCompositorKey()
+{
+    // SetSurfaceZeroCopy 内部有 surfaceKey 检查, erase 不存在的 key 是
+    // no-op — 天然幂等
+    WaylandServer::GetInstance()->SetSurfaceZeroCopy(zeroCopySurfaceKey_, false);
+}
+
 void EglRenderer::ReleaseZeroCopyBinding()
 {
     // Teardown logs below distinguish SurfaceQueue ownership failures from rendering failures.
@@ -437,19 +464,10 @@ void EglRenderer::ReleaseZeroCopyBinding()
                 zeroCopyImage_);
     if (zeroCopySurfaceKey_)
     {
-        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release ready-off begin key=%{public}llu",
-                    static_cast<unsigned long long>(surfaceKey));
-        winehua::GraphicsBroker::GetInstance().SetZeroCopySurfaceReady(
-            zeroCopySurfaceKey_, false);
-        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release ready-off end key=%{public}llu",
-                    static_cast<unsigned long long>(surfaceKey));
-        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release compositor-off begin key=%{public}llu",
-                    static_cast<unsigned long long>(surfaceKey));
-        WaylandServer::GetInstance()->SetSurfaceZeroCopy(zeroCopySurfaceKey_, false);
-        OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release compositor-off end key=%{public}llu",
-                    static_cast<unsigned long long>(surfaceKey));
+        // 幂等: 未发布过 (attach 早退/从未 GPU_ACTIVE) 时两个方法都是 no-op
+        UnpublishZeroCopyReady(toplevelId_);
+        ClearZeroCopyCompositorKey();
     }
-    zeroCopyReadyPublished_ = false;
     zeroCopyFallbackPending_ = false;
     if (zeroCopyRegistered_) {
         OH_LOG_INFO(LOG_APP, "[VIRGL-ZC][MAIN] release detach begin key=%{public}llu",
@@ -905,8 +923,11 @@ void EglRenderer::RenderLoop() {
             // 本 context 从不开启 GL_BLEND: 重绘就是不透明覆盖, 无需混合,
             // 也不要加混合 —— 目标就是盖住 overlay, 不是与它融合。
             // PC 模式不需要: GL 内容画在各自窗口内, 层序由系统合成器保证。
-            // ZC 全屏不需要: 层覆盖整幅桌面, 重绘只会盖掉游戏画面
-            if (!zeroCopyFullscreen_ && ws->Policy().RootCompositing() && rendered) {
+            // 阶段 2: 全屏 ZC 也走上层覆盖 — GetZeroCopyOccluders 只返回
+            // z-order 高于本层的窗口区域, 无上层窗口时结果为空 (无遮挡,
+            // 行为不变); 双 GL 实例互叠 (另一窗口被连带标全屏) 时上层窗口
+            // 被贴回, 双实例 bug 由此修复 (见 COMPOSITOR_UNIFICATION §5 阶段 2)
+            if (ws->Policy().RootCompositing() && rendered) {
                 // 32 上限: 遮挡源 = 上层窗口 + popup 层, 真实场景个位数;
                 // 超出的部分不重绘 (该区域 GL 内容会透出), 比动态扩容简单且够用
                 static constexpr int kMaxOccluders = 32;

@@ -175,9 +175,12 @@ assemble_pad() {
 
     # -- 2. PE DLL + 数据文件 → rawfile (两种架构共用) --
     # x86_64-windows/ — 复制所有运行时 PE 文件
-    # 注意: .cpl 不打包, wineboot 初始化时 mscoree.dll 触发 appwiz.cpl
-    # → install_mono → DialogBoxW 模态框在 OHOS 无头环境永久阻塞
-    for ext in dll drv exe sys acm ax ocx tlb; do
+    # 注意: .cpl 打包 (含 appwiz.cpl), 但依赖 wine-mono msi 同包就位:
+    # wineboot 初始化时 mscoree.dll 触发 appwiz.cpl install_mono →
+    # install_addon 在 WINEDATADIR/mono/ 找到 msi → 静默安装不弹框;
+    # 若 msi 缺失 (BUILD_WINE_MONO=0) 则弹 DialogBoxW 模态框, OHOS
+    # 无头环境无人响应 → wineboot 永久阻塞. 故 cpl 与 mono msi 必须同包.
+    for ext in dll drv exe sys acm ax ocx tlb cpl; do
         for f in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.$ext; do
             [ -f "$f" ] && cp "$f" "$wine_data/bin/x86_64-windows/"
         done
@@ -200,7 +203,7 @@ assemble_pad() {
     # 注意: wineboot/rpcss/services/conhost 等服务程序只有 x86_64 版,
     # WoW64 下它们由 Wine 以 64 位进程拉起, 属上游 WoW64 的正常行为.
     mkdir -p "$wine_data/bin/i386-windows"
-    for ext in dll drv exe sys acm ax ocx tlb; do
+    for ext in dll drv exe sys acm ax ocx tlb cpl; do
         for f in "$BUILD_DIR/wine-ohos/dlls/"*/i386-windows/*.$ext; do
             [ -f "$f" ] && cp "$f" "$wine_data/bin/i386-windows/"
         done
@@ -474,35 +477,37 @@ HKLM,%FontSubStr%,"MS Shell Dlg 2",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Arial",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Arial Black",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Calibri",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Cambria",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Cambria",,"Noto Serif"\
 HKLM,%FontSubStr%,"Candara",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Comic Sans MS",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Constantia",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Constantia",,"Noto Serif"\
 HKLM,%FontSubStr%,"Corbel",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Impact",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Palatino Linotype",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Palatino Linotype",,"Noto Serif"\
 HKLM,%FontSubStr%,"Segoe UI",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Tahoma",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Trebuchet MS",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Verdana",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Georgia",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Times New Roman",,"HarmonyOS Sans SC"\
+;; Latin: 衬线 (serif)\
+HKLM,%FontSubStr%,"Georgia",,"Noto Serif"\
+HKLM,%FontSubStr%,"Times New Roman",,"Noto Serif"\
 ;; CJK: 简体中文\
 HKLM,%FontSubStr%,"Microsoft JhengHei",,"HarmonyOS Sans TC"\
 HKLM,%FontSubStr%,"Microsoft JhengHei UI",,"HarmonyOS Sans TC"\
 HKLM,%FontSubStr%,"Microsoft YaHei",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Microsoft YaHei UI",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"SimSun",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"NSimSun",,"HarmonyOS Sans SC"\
+;; CJK: 宋体/楷体 (serif)\
+HKLM,%FontSubStr%,"SimSun",,"Noto Serif CJK SC"\
+HKLM,%FontSubStr%,"NSimSun",,"Noto Serif CJK SC"\
 HKLM,%FontSubStr%,"SimHei",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"FangSong",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"KaiTi",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"FangSong",,"Noto Serif CJK SC"\
+HKLM,%FontSubStr%,"KaiTi",,"Noto Serif CJK SC"\
 HKLM,%FontSubStr%,"YouYuan",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"LiSu",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"DengXian",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"STSong",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"STKaiti",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"STFangsong",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"STSong",,"Noto Serif CJK SC"\
+HKLM,%FontSubStr%,"STKaiti",,"Noto Serif CJK SC"\
+HKLM,%FontSubStr%,"STFangsong",,"Noto Serif CJK SC"\
 HKLM,%FontSubStr%,"STHeiti",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"STXihei",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"STLiti",,"HarmonyOS Sans SC"\
@@ -510,14 +515,14 @@ HKLM,%FontSubStr%,"STXingkai",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"STXinwei",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"STHupo",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"STCaiyun",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"STZhongSong",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"STBaoli",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"STZhongSong",,"Noto Serif CJK SC"\
+HKLM,%FontSubStr%,"STBaoli",,"Noto Serif CJK SC"\
 HKLM,%FontSubStr%,"FZShuTi",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"FZYaoti",,"HarmonyOS Sans SC"\
 ;; CJK: 繁体中文\
 HKLM,%FontSubStr%,"MingLiU",,"HarmonyOS Sans TC"\
 HKLM,%FontSubStr%,"PMingLiU",,"HarmonyOS Sans TC"\
-HKLM,%FontSubStr%,"DFKai-SB",,"HarmonyOS Sans TC"\
+HKLM,%FontSubStr%,"DFKai-SB",,"Noto Serif CJK TC"\
 HKLM,%FontSubStr%,"Consolas",,"Noto Sans Mono"\
 HKLM,%FontSubStr%,"Courier",,"Noto Sans Mono"\
 HKLM,%FontSubStr%,"Courier New",,"Noto Sans Mono"\

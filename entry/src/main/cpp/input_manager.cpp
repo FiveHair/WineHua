@@ -1,8 +1,10 @@
 #include "input_manager.h"
 #include "seat.h"
 #include "plugin_manager.h"
+#include "pointer_extras.h"
 #include "wayland_server.h"
 #include <chrono>
+#include <thread>
 #include <atomic>
 #include <cmath>
 #include <unistd.h>
@@ -52,6 +54,10 @@ static uint32_t NowMs() {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     return static_cast<uint32_t>(ms);
 }
+
+// 静止 tap 的最小按压时长: ≥2 个 PAL2 轮询帧 (~55ms/帧 @18fps),
+// 保证 down 落在与 up 不同的 GetDeviceState 轮询窗口 (见 ACT_RELEASE)
+static constexpr uint32_t kMinPressDurationMs = 100;
 
 // ========================================================================
 //  生命周期
@@ -153,59 +159,24 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
 
 void InputManager::OnPointerWarp(wl_resource* surface, double sx, double sy) {
     auto* ws = WaylandServer::GetInstance();
-    // warp 补偿仅对 ZC 游戏 (PAL2 等 dinput 相对模式) 生效:
-    // ZC 游戏 warp_check ~10ms 回中 + dinput 读差值 → 必须补偿;
-    // SHM 游戏 (红警2 等) 读绝对坐标 — 激活会破坏绝对映射, 必须放过。
-    if (!ws->IsSurfaceFromZcGame(surface)) {
-        OH_LOG_INFO(LOG_APP, "[Input] WARP skip: surf=%{public}p not ZC game (SHM)",
-                    static_cast<void*>(surface));
-        return;
-    }
+    // SetCursorPos 的位置同步。wineserver 光标已在 wine 侧移动到位, host
+    // 不需要注入 motion: 绝对模式 (RTS 等) 下一次设备事件自然覆盖, 相对
+    // 模式 wine 拒绝 SetCursorPos (wayland_pointer.c:1024) 不会发本请求。
+    // 这里只把 move grab 的偏移基准同步到 warp 位置。
     double lx = sx, ly = sy;
     if (ws->IsDesktopMode()) {
-        // 锚点换到桌面坐标空间, 与 SendPointerEvent 桌面分支的输入空间一致
         if (!ws->SurfaceLocalToDesktop(surface, sx, sy, lx, ly)) {
-            OH_LOG_WARN(LOG_APP, "[Input] WARP anchor failed: surf=%{public}p not mapped",
+            OH_LOG_WARN(LOG_APP, "[Input] WARP sync failed: surf=%{public}p not mapped",
                         static_cast<void*>(surface));
             return;
         }
     }
-    {
-        std::lock_guard<std::mutex> lk(warpMutex_);
-        warpLogicalX_ = lx;
-        warpLogicalY_ = ly;
-        warpActive_ = true;
-        warpSurface_ = surface;
-    }
+    lastGlobalPtrX_.store(wl_fixed_from_double(lx));
+    lastGlobalPtrY_.store(wl_fixed_from_double(ly));
     static uint32_t sWarpN = 0;
     if (++sWarpN % 120 == 1)
-        OH_LOG_INFO(LOG_APP, "[Input] WARP anchor logical=(%{public}.1f,%{public}.1f) desktop=%{public}d n=%{public}u",
+        OH_LOG_INFO(LOG_APP, "[Input] WARP pos=(%{public}.1f,%{public}.1f) desktop=%{public}d n=%{public}u",
                     lx, ly, ws->IsDesktopMode() ? 1 : 0, sWarpN);
-}
-
-// warpMutex_ 已持有。
-// MOVE/PRESS 一致走 warp 补偿: 输出构造位置 (锚点+增量), wineserver 光标
-// 不再被设备绝对位置拽走 → dinput 差分 = 真实位移, 点击命中也正确。
-// PRESS 不重置 warp 状态 — 点击后 MOVE 继续补偿。
-void InputManager::ApplyWarpLogicLocked(wl_resource* surface, double userX,
-                                        double userY, bool isPress,
-                                        double& outX, double& outY) {
-    bool warpForThisSurface = warpActive_ && warpSurface_ &&
-                              (warpSurface_ == surface);
-    if (warpForThisSurface && hasLastUser_) {
-        // 增量模式: 用户输入只提供 delta, 锚点在 warp 位置
-        outX = warpLogicalX_ + (userX - lastUserX_);
-        outY = warpLogicalY_ + (userY - lastUserY_);
-    } else {
-        outX = userX;
-        outY = userY;
-        if (!isPress) warpActive_ = false;
-    }
-    warpLogicalX_ = outX;
-    warpLogicalY_ = outY;
-    lastUserX_ = userX;
-    lastUserY_ = userY;
-    hasLastUser_ = true;
 }
 
 // ========================================================================
@@ -358,19 +329,21 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
     wl_resource* targetSurf = nullptr;
     if (ws->Policy().CompositorRoutesInput() && tl != ws->GetDesktopRootToplevelId()) {
         CoordTransform(px, py, ws->GetDesktopRootToplevelId(), &wx, &wy);
-        // warp/增量模式 (dinput 游戏 SetCursorPos 回中, 见 input_manager.h 尾部):
-        // warpActive_ 时用户输入只提供 delta, 逻辑位置 = warp 锚点 + 增量累加。
-        // 补偿在桌面坐标空间做, 与 OnPointerWarp 的锚点空间一致
+        // 记录最近一次注入的桌面全局指针位置 (grab 建立时算固定偏移用)
+        lastGlobalPtrX_.store(wx);
+        lastGlobalPtrY_.store(wy);
+        // move grab 期间 (xdg_toplevel.move): compositor 用桌面全局坐标绝对定位
+        // 被拖窗口, motion 必须注入全局坐标。局部坐标往返 (enqueue 时
+        // local = logical - st->x, 消费时再 + st->x 还原) 在两个线程间基准
+        // 漂移: 消费时刻的 st->x 已变, rx 多出"窗口自身刚移动的量"并叠进
+        // 下一帧位移 → 快速拖动时窗口位移逐帧累积放大, 窗口瞬间飞出屏幕
+        if (action == ACT_MOVE && ws->IsMoveGrabActive() &&
+            ws->GetMoveGrabToplevelId() == tl) {
+            Enqueue(InputEvent::PTR_MOTION, 0, nullptr, wx, wy, 0, 0);
+            return;
+        }
         double logicalX = wl_fixed_to_double(wx);
         double logicalY = wl_fixed_to_double(wy);
-        {
-            // 用当前事件 toplevel 的真实 surface 做 warp 归属判定:
-            // 从游戏切到桌面时焦点可能还停在游戏 surface, warp 不能误生效
-            wl_resource* warpTestSurface = ws->GetSurfaceForToplevel(tl);
-            std::lock_guard<std::mutex> lk(warpMutex_);
-            ApplyWarpLogicLocked(warpTestSurface, logicalX, logicalY,
-                                 action == ACT_PRESS, logicalX, logicalY);
-        }
         WaylandServer::InputTarget target;
         if (ws->FindInputTargetAt(static_cast<int>(lround(logicalX)),
                                   static_cast<int>(lround(logicalY)), target)) {
@@ -394,18 +367,45 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
         }
     } else {
         CoordTransform(px, py, tl, &wx, &wy);
-        // PC 模式: warp 补偿在窗口局部坐标空间 (锚点 = wine 的 surface 局部坐标)
-        double logicalX = wl_fixed_to_double(wx);
-        double logicalY = wl_fixed_to_double(wy);
-        {
-            wl_resource* warpTestSurface = ws->GetSurfaceForToplevel(tl);
-            std::lock_guard<std::mutex> lk(warpMutex_);
-            ApplyWarpLogicLocked(warpTestSurface, logicalX, logicalY,
-                                 action == ACT_PRESS, logicalX, logicalY);
+        // PC 空间全局指针位置 = 窗口局部坐标 + 窗口位置 (grab 偏移基准)
+        lastGlobalPtrX_.store(wl_fixed_from_double(wl_fixed_to_double(wx) + ws->GetToplevelX(tl)));
+        lastGlobalPtrY_.store(wl_fixed_from_double(wl_fixed_to_double(wy) + ws->GetToplevelY(tl)));
+        // move grab 降级路径 (PC 模式 startMoving 失败时): wx 是窗口局部坐标,
+        // 补上窗口位置还原为绝对坐标, 供 compositor 绝对定位 (不在此做
+        // 局部→全局往返, 消费侧不再二次读 st->x, 避免双线程基准漂移)
+        if (action == ACT_MOVE && ws->IsMoveGrabActive() &&
+            ws->GetMoveGrabToplevelId() == tl) {
+            Enqueue(InputEvent::PTR_MOTION, 0, nullptr,
+                    wl_fixed_from_double(wl_fixed_to_double(wx) + ws->GetToplevelX(tl)),
+                    wl_fixed_from_double(wl_fixed_to_double(wy) + ws->GetToplevelY(tl)),
+                    0, 0);
+            return;
         }
-        wx = wl_fixed_from_double(logicalX);
-        wy = wl_fixed_from_double(logicalY);
+        // PC 模式: wx/wy 即窗口局部坐标, 无需额外变换
     }
+
+    // 相对指针增量 (zwp_relative_pointer_v1): wine 相对模式 (隐藏光标 + 约束,
+    // wayland_pointer.c needs_relative) 丢弃绝对 motion, 光标位置 = 基线 +
+    // 增量累积。host 不做模式判断 — 绝对 motion 照常注入 (相对模式下被 wine
+    // 丢弃), 同时把注入坐标 (surface 局部空间) 差分出增量, 有 relative 对象
+    // 就入队 REL_MOTION 转发。对象存在 ⇔ wine 判定当前为相对模式。
+    // 基准只在 MOVE 时更新: PRESS/RELEASE 不发增量也不该移动基准, 否则按下
+    // 瞬间的坐标跳变会污染后续增量 (wine 侧位置并未因 press 变化)。
+    if (action == ACT_MOVE) {
+        const double localX = wl_fixed_to_double(wx);
+        const double localY = wl_fixed_to_double(wy);
+        if (hasLastLocal_) {
+            const double dx = localX - lastLocalX_;
+            const double dy = localY - lastLocalY_;
+            if ((dx != 0 || dy != 0) && PointerExtras::GetInstance()->HasRelativePointer())
+                Enqueue(InputEvent::REL_MOTION, 0, nullptr,
+                        wl_fixed_from_double(dx), wl_fixed_from_double(dy), 0, 0);
+        }
+        lastLocalX_ = localX;
+        lastLocalY_ = localY;
+        hasLastLocal_ = true;
+    }
+
 
     // MOVE 是高频路径 (hover 移动 ~125Hz), 全量日志会刷爆 hilog → 抽样 120:1;
     // PRESS/RELEASE 低频且诊断价值高, 保持全量
@@ -426,8 +426,15 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
 
     switch (action) {
         case ACT_PRESS: {
-            // 每次都发 enter: Wine 在两次点击间需要新的 pointer focus
-            {
+            // 每次都发 enter: Wine 在两次点击间需要新的 pointer focus。
+            // 相对模式 (relative_pointer 对象存在) 且聚焦已建立时跳过:
+            // wine 的 enter 处理会把光标跳到 enter 坐标 (pointer_handle_enter
+            // → motion_internal, 相对模式只丢弃 motion 不丢弃 enter) — 点击
+            // 瞬间游戏内光标瞬移到设备绝对位置 (实测偏移量 = 光标距屏幕
+            // 中心的偏移)。相对模式聚焦持续有效, 无需重发 enter。
+            const bool relSkipEnter = PointerExtras::GetInstance()->HasRelativePointer() &&
+                                      pointerFocusedSurface_.load() != nullptr;
+            if (!relSkipEnter) {
                 wl_resource* surf = targetSurf ? targetSurf : ws->GetSurfaceForToplevel(tl);
                 if (surf) {
                     // desktop: surface 级比较 (菜单层与父窗口同 toplevelId);
@@ -449,6 +456,7 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
                     OH_LOG_INFO(LOG_APP, "[Input] BTN_PRESS btn=0x%{public}x bit=%{public}u pressedBits=0x%{public}x",
                                 button, bit, pressedButtons_);
                 }
+                lastPressMs_ = NowMs();  // 脉冲拉伸计时基准 (见 ACT_RELEASE)
                 Enqueue(InputEvent::PTR_BUTTON, 0, nullptr, 0, 0, button, WL_POINTER_BUTTON_STATE_PRESSED);
             }
 
@@ -489,8 +497,31 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             }
             OH_LOG_INFO(LOG_APP, "[Input] BTN_RELEASE btn=0x%{public}x→0x%{public}x pressedBits=0x%{public}x",
                         button, releaseBtn, pressedButtons_);
-            if (releaseBtn) {
-                Enqueue(InputEvent::PTR_BUTTON, 0, nullptr, 0, 0, releaseBtn, WL_POINTER_BUTTON_STATE_RELEASED);
+            // 脉冲拉伸: 按下-抬起间隔 <kMinPressDurationMs 的点击, 抬手延迟
+            // 补足再发。根因: ArkTS 触控手势状态机把静止 tap 合成为
+            // Press+Release 同刻脉冲 (DesktopWindow.ets onTouch 的"等 Up 再
+            // 补发"手势语义); down/up 挤在同一次 GetDeviceState 轮询 (~8ms)
+            // 内相互净零, PAL2 类按帧轮询 dinput 的游戏永远看不见这次点击
+            // (探针实证: smoke/dinput_click_probe.c; 真机 Windows / winlator
+            // 的真实时序输入无此问题)。物理鼠标自 ArkTS .onMouse 直通修复后
+            // 为真实时序, 本延迟主要对残余的触屏 tap 脉冲生效。
+            // 延迟用短生命周期线程, 不阻塞 ArkTS 输入线程; 极限快速连点
+            // (<100ms 间隔) 事件可能乱序, 对老游戏可接受。
+            const uint32_t quick = NowMs() - lastPressMs_.load();
+            if (releaseBtn && quick < kMinPressDurationMs) {
+                const uint32_t delayMs = kMinPressDurationMs - quick;
+                // 可观测性: 触屏 tap 之外的使用 (如物理鼠标) 不应触发本延迟;
+                // 触发 = 某条输入路径在产塌缩脉冲, 是 bug 信号而非正常事件
+                OH_LOG_INFO(LOG_APP, "[Input] STRETCH delay release btn=0x%{public}x quick=%{public}ums delay=%{public}ums",
+                            releaseBtn, quick, delayMs);
+                std::thread([this, delayMs, releaseBtn] {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                    Enqueue(InputEvent::PTR_BUTTON, 0, nullptr, 0, 0, releaseBtn,
+                            WL_POINTER_BUTTON_STATE_RELEASED);
+                }).detach();
+            } else if (releaseBtn) {
+                Enqueue(InputEvent::PTR_BUTTON, 0, nullptr, 0, 0, releaseBtn,
+                        WL_POINTER_BUTTON_STATE_RELEASED);
             }
             break;
         }
@@ -722,6 +753,7 @@ void InputManager::FlushQueue() {
                 if (ev.state == WL_POINTER_BUTTON_STATE_RELEASED)
                     WaylandServer::GetInstance()->EndMoveGrab();
                 InjectPointerButton(ev.btn_or_key, ev.state); break;
+            case InputEvent::REL_MOTION:  InjectRelativeMotion(ev.x, ev.y); break;
             case InputEvent::PTR_AXIS:    InjectPointerAxis(ev.axis, ev.axis_value); break;
             case InputEvent::KBD_ENTER:   InjectKeyboardEnter(ev.tl, ev.surface); break;
             case InputEvent::KBD_LEAVE:   InjectKeyboardLeave(); break;
@@ -773,6 +805,14 @@ void InputManager::InjectPointerEnter(uint32_t tl, wl_resource* surface, wl_fixe
         }
     }
     OH_LOG_INFO(LOG_APP, "[Input] InjectEnter OK sent=%{public}d", nSent);
+}
+
+void InputManager::InjectRelativeMotion(wl_fixed_t dx, wl_fixed_t dy) {
+    // 相对模式增量转发 (zwp_relative_pointer_v1)。wine 侧收到后累积进
+    // wineserver 光标位置 (wayland_pointer.c relative_pointer_v1_relative_motion)。
+    // 无 relative 对象 (绝对模式) 时 PointerExtras 内部空转。
+    PointerExtras::GetInstance()->SendRelativeMotion(
+        wl_fixed_to_double(dx), wl_fixed_to_double(dy));
 }
 
 void InputManager::InjectPointerMotion(wl_fixed_t sx, wl_fixed_t sy) {

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "display_policy.h"
+#include "geometry.h"
 
 class ToplevelManager;
 
@@ -41,6 +42,10 @@ struct ZeroCopyOccluderRect {
 //   redraw); GPU→CPU fallback 时 key 移出 zeroCopySurfaceKeys_, 该层
 //   自动回归普通 CPU 合成与置顶命中, 无需特判。
 // - desktop root 不参与可见性判定 (契约在 ToplevelManager::IsToplevelVisibleLocked)。
+// - 层序单一数据源 (阶段 1, 行为等价): 一帧桌面的内容来源统一为
+//   CompositorLayer 列表 (BuildLayerListLocked), 合成与输入遍历同一个
+//   按 zIndex 升序的列表; 各层的合成/命中特判逻辑原样保留 (等价形式),
+//   阶段 2 起 ZC 层入列参与层序。
 
 class DesktopCompositor {
 public:
@@ -60,6 +65,38 @@ public:
         bool isExternal = false;  // 外部菜单 (任务栏等), 输入坐标需用 Wine 基底
     };
 
+    // -- 层序单一数据源 (阶段 1: 行为等价重构) --
+    // 一帧桌面的所有内容来源统一为 Layer; 合成与输入遍历同一按 zIndex 升序
+    // 的 Layer 列表 (BuildLayerListLocked)。zIndex 分配: root=0 < toplevel
+    // (按 toplevelZOrder_ 顺序) < subsurface (原顺序) — 与旧双循环顺序等价。
+    // 阶段 1 仅收敛遍历源, 各层合成/命中的特判逻辑保留等价形式 (不动行为);
+    // ZC 层阶段 1 仍由合成/输入跳过, 阶段 2 起入列参与层序。
+    // 阶段 3: zcActive 为 ZC 层状态单一字段 (合成/输入/遮挡重绘只认它)。
+    // sub/st 指针指向调用方持有的容器, 必须在 ToplevelManager 锁内使用。
+    struct CompositorLayer {
+        enum class Type { Root, Toplevel, Subsurface };
+        Type type = Type::Root;
+        size_t zIndex = 0;
+        bool visible = false;    // 可见性判定结果 (Root 恒 true, 不参与命中)
+        // ZC 层状态单一字段: 该层走 GPU 内容 (合成/输入跳过, 内容由
+        // egl_renderer GPU 层自绘); false = fallback 到 CPU 内容 (合成/
+        // 命中照常)。由 zeroCopySurfaceKeys_ 派生 — 该集合是 compositor
+        // 侧唯一权威, broker 的 attached 簿记 / ready marker (guest 选路)
+        // 只是它的执行投影, 不参与合成判定。
+        bool zcActive = false;
+        uint32_t toplevelId = 0; // 归属窗口 (Root 为 0; Subsurface 为 parentToplevel)
+        int x = 0, y = 0, w = 0, h = 0;  // 坐标 (桌面合成: 桌面坐标; 窗口内: 窗口局部坐标)
+        bool fullscreen = false; // Toplevel: 全屏标记
+        const SubsurfaceLayer* sub = nullptr;  // Type==Subsurface 时引用原层
+
+        // 该层是否参与 CPU 合成/命中: ZC 层 (GPU 自绘, 合成/输入/覆盖判定
+        // 跳过) 或不可见层 (不显示不命中)。消费方判跳过一律用此谓词, 不要
+        // 直接摸 zcActive/visible — 规则变更只改这里 (等价性: desktop 模式
+        // toplevel 层 zcActive 恒 false; 全屏窗口的 subsurface visible 恒
+        // true — 父窗口已被 fs-pick 确认可见)。
+        bool ShouldSkipCpu() const { return !visible || zcActive; }
+    };
+
     // 构造: 注入 ToplevelManager + 桌面合成配置 (由 WaylandServer 持有,
     // policy 为引用 — SetDesktopMode 后随动)
     DesktopCompositor(ToplevelManager& tmgr,
@@ -71,6 +108,38 @@ public:
     // -- 帧输出 --
     // 取指定 toplevel 的最新帧 (桌面模式合成到 root framebuffer)
     bool TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, int& w, int& h);
+
+    // -- 层序单一数据源 --
+    // 构建按 zIndex 升序的 Layer 列表 (调用方须已持有 tmgr mutex)。
+    // 合成 (TakeToplevelFrame) 与输入 (InputResolver) 遍历同一列表;
+    // rootW/rootH 用于 Root 层几何 (输入侧仅作占位, 不参与命中)。
+    std::vector<CompositorLayer> BuildLayerListLocked(int rootW, int rootH);
+
+    // 窗口内 Layer 列表 (阶段 3, PC 模式): 单窗口合成数据源, 与
+    // BuildLayerListLocked 对称但用窗口局部坐标:
+    //   zIndex: Root(窗口帧) < Subsurface(窗口内局部坐标) < ZC 层(最顶)
+    // 窗口间层序不在此管理 (系统合成器)。PC 模式 subsurface 全部转 popup
+    // 伪 toplevel (UpdatePopupOnCommit), 窗口内 subsurface 当前恒空 —
+    // 层序结构为窗口内内容扩展预留; ZC 层 (zcActive) 在层序最顶, 合成跳过
+    // (GPU 自绘覆盖, 与 desktop 模式同语义)。调用方须已持有 tmgr mutex。
+    std::vector<CompositorLayer> BuildWindowLayerListLocked(uint32_t toplevelId,
+                                                            int winW, int winH);
+
+    // 全屏目标选取 (阶段 4, S3 收敛): 渲染 (TakeToplevelFrame) 与输入
+    // (FindInputTargetAt) 共用的唯一实现 — 可见全屏窗口中取 fsPriority
+    // 最大者, 返回其 toplevelId (0 = 无全屏窗口)。多窗口可同时 fullscreen
+    // (显示模式切换时 Wine 会把足够大的旧窗口连带标记, 请求到达顺序不定 —
+    // 2026-07 实测 notepad 被连带标记并压在游戏上), 规则原因/局限见
+    // ToplevelState::fsPriority 注释。调用方须已持有 tmgr mutex;
+    // 返回 id 对应的 state 由调用方锁内查询 (pick 时已确认非空)。
+    uint32_t PickFullscreenLayerLocked(const std::vector<CompositorLayer>& layers) const;
+
+    // 全屏内容 fit 几何 (渲染/输入共用): 内部做全屏内容尺寸选择
+    // (SelectFullscreenContentSize: ZC 游戏用 preFs 分辨率, SHM 用 buffer
+    // 尺寸) + ComputeFitRect — 该规则的唯一实现, 替换两侧各自组合。
+    // 调用方须已持有 tmgr mutex; 找不到 toplevel state 返回 false。
+    bool ComputeFullscreenFitLocked(uint32_t toplevelId, int rootW, int rootH,
+                                    FitRect& out) const;
 
     // -- Zero-copy layer 管理 --
     bool GetZeroCopyLayerInfo(uint64_t surfaceKey, uint32_t rendererToplevelId,
@@ -111,10 +180,6 @@ public:
 
     // Increment root frame serial (called from surface_commit when root commits)
     void IncrementDesktopRootFrameSerial() { ++desktopRootFrameSerial_; }
-
-    // -- 只读 accessors --
-    const std::vector<SubsurfaceLayer>& subsurfaceLayers() const { return subsurfaceLayers_; }
-    const std::unordered_set<uint64_t>& zeroCopySurfaceKeys() const { return zeroCopySurfaceKeys_; }
 
     // toplevel 是否有 zero-copy GL 层 (ZC 游戏判定: 全屏渲染/输入映射分流用,
     // 调用方须已持有 tmgr mutex)
