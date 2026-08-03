@@ -20,6 +20,7 @@
 - **[CROSS_FORK_CONTRACTS.md](CROSS_FORK_CONTRACTS.md)** — 跨仓库私有契约（OpenGL 链路：shm 页 / present 协议 / 环境变量 / ready 标记 / 回调 / IPC；Vulkan 链路：surface tag / vn_winehua_present / VK_PRESENT 协议 / 设备释放回调；各含两端代码索引与失效表现）
 - **[AUDIO_ARCHITECTURE.md](AUDIO_ARCHITECTURE.md)** — 音频架构
 - **[DXVK_MODERN_UPGRADE_READINESS.md](DXVK_MODERN_UPGRADE_READINESS.md)** — DXVK 2.x/VKD3D 升级能力矩阵、迁移清单与准入门禁
+- **[VKD3D_LIMITED_500K_PLAN.md](VKD3D_LIMITED_500K_PLAN.md)** — VKD3D 2.6 的隔离 500K 实验档、准入条件与真实测试门禁
 
 ### 构建
 - **[BUILD_GUIDE.md](BUILD_GUIDE.md)** — 构建步骤、产物说明

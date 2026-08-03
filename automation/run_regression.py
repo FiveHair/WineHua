@@ -534,11 +534,14 @@ def _vkd3d_layer_payload(path: Path, layer: str) -> dict:
                 all(name in descriptor_features for name in descriptor_fields)),
             "updateAfterBindLimits": all(name in audit.get("updateAfterBindLimits", {}) for name in (
                 "maxUpdateAfterBindDescriptorsInAllPools",
+                "maxPerStageDescriptorUpdateAfterBindSamplers",
+                "maxPerStageDescriptorUpdateAfterBindSampledImages",
+                "maxPerStageDescriptorUpdateAfterBindStorageImages",
+                "maxPerStageDescriptorUpdateAfterBindStorageBuffers",
                 "maxDescriptorSetUpdateAfterBindSamplers",
                 "maxDescriptorSetUpdateAfterBindSampledImages",
                 "maxDescriptorSetUpdateAfterBindStorageImages",
-                "maxDescriptorSetUpdateAfterBindStorageBuffers",
-                "maxDescriptorSetUpdateAfterBindInputAttachments")),
+                "maxDescriptorSetUpdateAfterBindStorageBuffers")),
             "deviceUuid": isinstance(audit.get("deviceUuid"), str) and len(audit["deviceUuid"]) == 32,
             "driverUuid": isinstance(audit.get("driverUuid"), str) and len(audit["driverUuid"]) == 32,
             "deviceExtensions": isinstance(audit.get("deviceExtensions"), list) and bool(audit["deviceExtensions"]),
@@ -552,6 +555,7 @@ def _vkd3d_layer_payload(path: Path, layer: str) -> dict:
             "formats": isinstance(formats, dict) and all(name in formats for name in (
                 "R8G8B8A8_UNORM", "D24_UNORM_S8_UINT", "BC1_RGBA_UNORM_BLOCK", "BC7_UNORM_BLOCK")),
         },
+        "descriptorIndexingFeatures": descriptor_features,
         "updateAfterBindLimits": audit.get("updateAfterBindLimits", {}),
         "evidenceHash": hashlib.sha256(
             json.dumps({"identity": identity, "evidence": evidence, "audit": audit},
@@ -569,8 +573,43 @@ def _api_at_least(value: object, major: int, minor: int) -> bool:
         return False
 
 
+VKD3D_BINDLESS_DESCRIPTOR_FEATURES = (
+    "shaderUniformTexelBufferArrayDynamicIndexing",
+    "shaderStorageTexelBufferArrayDynamicIndexing",
+    "shaderSampledImageArrayNonUniformIndexing",
+    "shaderStorageBufferArrayNonUniformIndexing",
+    "shaderStorageImageArrayNonUniformIndexing",
+    "shaderUniformTexelBufferArrayNonUniformIndexing",
+    "shaderStorageTexelBufferArrayNonUniformIndexing",
+    "descriptorBindingSampledImageUpdateAfterBind",
+    "descriptorBindingStorageImageUpdateAfterBind",
+    "descriptorBindingStorageBufferUpdateAfterBind",
+    "descriptorBindingUniformTexelBufferUpdateAfterBind",
+    "descriptorBindingStorageTexelBufferUpdateAfterBind",
+    "descriptorBindingUpdateUnusedWhilePending",
+    "descriptorBindingPartiallyBound",
+    "descriptorBindingVariableDescriptorCount",
+    "runtimeDescriptorArray",
+)
+
+VKD3D_VIEW_DESCRIPTOR_LIMIT_FIELDS = (
+    "maxPerStageDescriptorUpdateAfterBindSampledImages",
+    "maxPerStageDescriptorUpdateAfterBindStorageImages",
+    "maxPerStageDescriptorUpdateAfterBindStorageBuffers",
+    "maxDescriptorSetUpdateAfterBindSampledImages",
+    "maxDescriptorSetUpdateAfterBindStorageImages",
+    "maxDescriptorSetUpdateAfterBindStorageBuffers",
+)
+
+VKD3D_SAMPLER_DESCRIPTOR_LIMIT_FIELDS = (
+    "maxPerStageDescriptorUpdateAfterBindSamplers",
+    "maxDescriptorSetUpdateAfterBindSamplers",
+)
+
+
 def _vkd3d_profile_decision(layers: list[dict], name: str, api: tuple[int, int],
-                            required: tuple[str, ...]) -> dict:
+                            required: tuple[str, ...], view_descriptor_minimum: int,
+                            experimental: bool = False) -> dict:
     reasons: list[str] = []
     for layer in layers:
         prefix = layer["layer"]
@@ -584,26 +623,45 @@ def _vkd3d_profile_decision(layers: list[dict], name: str, api: tuple[int, int],
                 reasons.append(f"{prefix}: missing independent evidence for {field}")
             elif actual is not True:
                 reasons.append(f"{prefix}: {field}={actual}")
+        descriptor_features = layer.get("descriptorIndexingFeatures")
+        if not isinstance(descriptor_features, dict):
+            reasons.append(f"{prefix}: missing descriptor indexing feature evidence")
+        else:
+            for field in VKD3D_BINDLESS_DESCRIPTOR_FEATURES:
+                actual = descriptor_features.get(field)
+                if actual is not True:
+                    reasons.append(f"{prefix}: descriptor indexing {field}={actual}")
         for field, observed in layer["audit"].items():
             if not observed:
                 reasons.append(f"{prefix}: missing independent audit field {field}")
-        for field in ("maxDescriptorSetUpdateAfterBindSamplers",
-                      "maxDescriptorSetUpdateAfterBindSampledImages",
-                      "maxDescriptorSetUpdateAfterBindStorageImages",
-                      "maxDescriptorSetUpdateAfterBindStorageBuffers",
-                      "maxDescriptorSetUpdateAfterBindInputAttachments"):
+        for field in VKD3D_VIEW_DESCRIPTOR_LIMIT_FIELDS:
             try:
                 value = int(layer["updateAfterBindLimits"].get(field))
             except (TypeError, ValueError):
                 reasons.append(f"{prefix}: missing independent evidence for {field}")
                 continue
-            if value < 1_000_000:
-                reasons.append(f"{prefix}: {field}={value} below 1000000")
+            if value < view_descriptor_minimum:
+                reasons.append(
+                    f"{prefix}: {field}={value} below {view_descriptor_minimum}")
+        for field in VKD3D_SAMPLER_DESCRIPTOR_LIMIT_FIELDS:
+            try:
+                value = int(layer["updateAfterBindLimits"].get(field))
+            except (TypeError, ValueError):
+                reasons.append(f"{prefix}: missing independent evidence for {field}")
+                continue
+            if value < 2_048:
+                reasons.append(f"{prefix}: {field}={value} below 2048")
     return {
         "target": name,
-        "classification": "SUPPORTED" if not reasons else "UNSUPPORTED",
+        "classification": ("EXPERIMENTAL_CANDIDATE" if experimental else "SUPPORTED")
+            if not reasons else "UNSUPPORTED",
         "blockingReasons": reasons,
-        "readyForGateB": not reasons,
+        "viewDescriptorMinimum": view_descriptor_minimum,
+        "samplerDescriptorMinimum": 2_048,
+        "inputAttachmentsAreGating": False,
+        "defaultEnabled": False if experimental else None,
+        "readyForExperimentalFork": experimental and not reasons,
+        "readyForGateB": not experimental and not reasons,
     }
 
 
@@ -624,18 +682,28 @@ def write_vkd3d_capability_decision(root_directory: Path, run_records: list[dict
             layers, "legacy-vkd3d-proton-2.6", (1, 1),
             ("descriptorIndexing", "robustness2", "timelineSemaphore",
              "samplerMirrorClampToEdgeExtension", "createRenderpass2",
-             "separateDepthStencilLayouts", "bindMemory2", "copyCommands2")),
+             "separateDepthStencilLayouts", "bindMemory2", "copyCommands2"),
+            1_000_000),
         _vkd3d_profile_decision(
             layers, "legacy-vkd3d-proton-2.8", (1, 1),
             ("descriptorIndexing", "robustness2", "timelineSemaphore",
              "samplerMirrorClampToEdgeExtension", "separateDepthStencilLayouts", "bindMemory2",
              "copyCommands2", "dynamicRendering", "extendedDynamicState",
-             "extendedDynamicState2", "bufferDeviceAddress", "pushDescriptor")),
+             "extendedDynamicState2", "bufferDeviceAddress", "pushDescriptor"),
+            1_000_000),
         _vkd3d_profile_decision(
             layers, "modern-vkd3d-proton-2.9", (1, 3),
             ("descriptorIndexing", "robustness2", "samplerMirrorClampToEdge",
-             "shaderDrawParameters", "pushDescriptor")),
+             "shaderDrawParameters", "pushDescriptor"),
+            1_000_000),
+        _vkd3d_profile_decision(
+            layers, "experimental-vkd3d-proton-2.6-limited-500k", (1, 1),
+            ("descriptorIndexing", "robustness2", "timelineSemaphore",
+             "samplerMirrorClampToEdgeExtension", "createRenderpass2",
+             "separateDepthStencilLayouts", "bindMemory2", "copyCommands2"),
+            500_000, experimental=True),
     ]
+    upstream_profiles = [profile for profile in profiles if profile["defaultEnabled"] is None]
     capability_hash = hashlib.sha256(json.dumps([
         {"layer": layer["layer"], "probeStatus": layer["probeStatus"],
          "identity": layer["identity"], "evidence": layer["evidence"], "audit": layer["audit"]}
@@ -645,11 +713,11 @@ def write_vkd3d_capability_decision(root_directory: Path, run_records: list[dict
         "schemaVersion": 1,
         "gate": "A",
         "capabilityHash": capability_hash,
-        "decision": "ELIGIBLE_FOR_GATE_B" if all(profile["readyForGateB"] for profile in profiles)
+        "decision": "ELIGIBLE_FOR_GATE_B" if all(profile["readyForGateB"] for profile in upstream_profiles)
             else "DO_NOT_ADVANCE",
         "layers": layers,
         "profiles": profiles,
-        "policy": "Gate B requires every four-layer field to be independently observed and SUPPORTED; no host-to-guest inference or fabricated limits is permitted.",
+        "policy": "Gate B requires every four-layer field to be independently observed and upstream-compatible. The 500K profile is default-off experimental evidence only; it never enables Gate B or fabricates Vulkan limits.",
     }
     output = root_directory / "vulkan-capability"
     output.mkdir(parents=True, exist_ok=True)
