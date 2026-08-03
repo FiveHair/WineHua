@@ -10,6 +10,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "vkd3d_capability_audit.h"
+
 struct probe_state {
     const char *run_id;
     const char *test_id;
@@ -17,6 +19,10 @@ struct probe_state {
     uint32_t loader_api;
     VkPhysicalDeviceProperties properties;
     VkPhysicalDeviceFeatures features;
+    uint32_t max_update_after_bind_descriptors_in_all_pools;
+    uint32_t max_descriptor_set_update_after_bind_sampled_images;
+    uint32_t max_descriptor_set_update_after_bind_storage_images;
+    uint32_t max_descriptor_set_update_after_bind_storage_buffers;
     uint32_t queue_family;
     int buffer_copy_ok;
     int image_clear_ok;
@@ -59,6 +65,7 @@ struct probe_state {
     int custom_border_colors;
     int custom_border_color_without_format;
     int fallback_detected;
+    char *capability_audit;
     uint64_t started_ms;
 };
 
@@ -155,7 +162,11 @@ static void write_result(const struct probe_state *state, const char *status,
             "\"customBorderColors\":%s,"
             "\"customBorderColorWithoutFormat\":%s,"
             "\"bc1\":%s,\"bc2\":%s,\"bc3\":%s,\"bc4\":%s,"
-            "\"bc5\":%s,\"bc6\":%s,\"bc7\":%s},\n"
+            "\"bc5\":%s,\"bc6\":%s,\"bc7\":%s,"
+            "\"updateAfterBindLimits\":{\"maxUpdateAfterBindDescriptorsInAllPools\":%u,"
+            "\"maxDescriptorSetUpdateAfterBindSampledImages\":%u,"
+            "\"maxDescriptorSetUpdateAfterBindStorageImages\":%u,"
+            "\"maxDescriptorSetUpdateAfterBindStorageBuffers\":%u}},\n"
             "  \"checks\": {\"bufferCopy\":%s,\"imageClear\":%s},\n"
             "  \"dxvk262\": {\"transport\":{\"api13\":%s,"
             "\"coreRobustBufferAccess\":%s,\"robustBufferAccess2\":%s,"
@@ -168,6 +179,7 @@ static void write_result(const struct probe_state *state, const char *status,
             "\"rgba8SnormColorAttachment\":%s,\"d24s8Sampled\":%s,"
             "\"d24s8DepthStencilAttachment\":%s},"
             "\"eligibility\":{\"transport\":\"%s\",\"bringup\":\"%s\"}},\n"
+            "  \"capabilityAudit\":%s,\n"
             "  \"metrics\": {\"cpuReadBytes\":4096,\"cpuUploadBytes\":4096,"
             "\"gpuCopyCount\":2,\"queueSubmitCount\":2,"
             "\"perFrameDeviceWaitIdle\":0,\"fallbackDetected\":%s,"
@@ -212,6 +224,10 @@ static void write_result(const struct probe_state *state, const char *status,
             state->bc3 ? "true" : "false", state->bc4 ? "true" : "false",
             state->bc5 ? "true" : "false", state->bc6 ? "true" : "false",
             state->bc7 ? "true" : "false",
+            state->max_update_after_bind_descriptors_in_all_pools,
+            state->max_descriptor_set_update_after_bind_sampled_images,
+            state->max_descriptor_set_update_after_bind_storage_images,
+            state->max_descriptor_set_update_after_bind_storage_buffers,
             state->buffer_copy_ok ? "true" : "false",
             state->image_clear_ok ? "true" : "false",
             state->api13 ? "true" : "false",
@@ -234,6 +250,7 @@ static void write_result(const struct probe_state *state, const char *status,
             state->d24s8_depth_stencil_attachment ? "true" : "false",
             state->transport_device_create_ok ? "PASS" : "FAIL",
             state->transport_device_create_ok ? "D3D11_FEATURE_PROBE_PENDING" : "BLOCKED",
+            state->capability_audit ? state->capability_audit : "{}",
             state->fallback_detected ? "true" : "false",
             (unsigned long long)(now_ms() - state->started_ms));
     fflush(file);
@@ -320,6 +337,11 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     VkPhysicalDeviceMaintenance6FeaturesKHR maintenance6 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES_KHR };
     VkPhysicalDeviceCustomBorderColorFeaturesEXT custom_border_color = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT };
+    VkPhysicalDeviceProperties2 properties2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+    VkPhysicalDeviceVulkan12Properties properties12 = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES };
+    VkPhysicalDeviceIDProperties id_properties = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
     void **tail = &features2.pNext;
     int api12 = state->properties.apiVersion >= VK_API_VERSION_1_2;
     int api13 = state->properties.apiVersion >= VK_API_VERSION_1_3;
@@ -362,6 +384,9 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     APPEND_FEATURE(custom_border_color, has_custom_border_color);
 #undef APPEND_FEATURE
     vkGetPhysicalDeviceFeatures2(physical, &features2);
+    properties2.pNext = &properties12;
+    properties12.pNext = &id_properties;
+    vkGetPhysicalDeviceProperties2(physical, &properties2);
 
     state->api13 = api13;
     state->core_robust_buffer_access = state->features.robustBufferAccess;
@@ -370,6 +395,14 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     state->shader_int8 = api12 && vulkan12.shaderInt8;
     state->timeline_semaphore = api12 && vulkan12.timelineSemaphore;
     state->buffer_device_address = api12 && vulkan12.bufferDeviceAddress;
+    state->max_update_after_bind_descriptors_in_all_pools =
+        properties12.maxUpdateAfterBindDescriptorsInAllPools;
+    state->max_descriptor_set_update_after_bind_sampled_images =
+        properties12.maxDescriptorSetUpdateAfterBindSampledImages;
+    state->max_descriptor_set_update_after_bind_storage_images =
+        properties12.maxDescriptorSetUpdateAfterBindStorageImages;
+    state->max_descriptor_set_update_after_bind_storage_buffers =
+        properties12.maxDescriptorSetUpdateAfterBindStorageBuffers;
     state->robustness2 = has_robustness2 && robustness2.robustBufferAccess2;
     state->robust_buffer_access2 = state->robustness2;
     state->robust_image_access2 = has_robustness2 && robustness2.robustImageAccess2;
@@ -415,6 +448,13 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
         state->robust_buffer_access2 && state->robust_image_access2 &&
         state->null_descriptor && state->synchronization2 && state->dynamic_rendering &&
         state->maintenance4;
+    state->capability_audit = winehua_vkd3d_capability_audit(
+        physical, extensions, extension_count, &vulkan12, &vulkan13,
+        &properties12, &id_properties);
+    if (!state->capability_audit) {
+        free(extensions);
+        return 0;
+    }
     free(extensions);
     return 1;
 }
@@ -767,5 +807,6 @@ cleanup:
     if (device && source_memory) vkFreeMemory(device, source_memory, NULL);
     if (device) vkDestroyDevice(device, NULL);
     if (instance) vkDestroyInstance(instance, NULL);
+    free(state.capability_audit);
     return exit_code;
 }

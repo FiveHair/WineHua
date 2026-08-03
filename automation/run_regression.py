@@ -29,7 +29,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from validate_frame import validate_d3d11_cube, validate_rgba_quadrants
+try:
+    from validate_frame import validate_d3d11_cube, validate_rgba_quadrants
+    FRAME_VALIDATOR_IMPORT_ERROR = None
+except ModuleNotFoundError as error:
+    validate_d3d11_cube = None
+    validate_rgba_quadrants = None
+    FRAME_VALIDATOR_IMPORT_ERROR = error
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUNDLE = "app.hackeris.winehua"
@@ -51,7 +57,7 @@ SUITES = (
     "dxvk", "dxvk-long", "dxvk-dynamic",
     "gpu-diagnostics", "dxvk26-requirements",
     "dxvk-modern-baseline", "dxvk-modern-long",
-    "capabilities", "all", "long",
+    "capabilities", "vkd3d-capability", "all", "long",
 )
 
 REQUIRED_PAYLOAD = (
@@ -128,6 +134,34 @@ def run_hdc(hdc: str, device_id: str, *args: str) -> tuple[int, str]:
     return result.returncode, result.stdout
 
 
+def hdc_local_path(path: Path) -> str:
+    """Return a path usable by Windows HDC when the runner is in WSL."""
+    resolved = path.resolve()
+    value = str(resolved)
+    match = re.fullmatch(r"/mnt/([A-Za-z])(?:/(.*))?", value)
+    if match:
+        suffix = (match.group(2) or "").replace("/", chr(92))
+        return f"{match.group(1).upper()}:{chr(92)}{suffix}"
+    if value.startswith("/home/"):
+        return (chr(92) * 2 + "wsl.localhost" + chr(92) + "Ubuntu" +
+                value.replace("/", chr(92)))
+    return value
+
+
+def run_hdc_install(hdc: str, device_id: str, hap_path: Path) -> tuple[int, str]:
+    """Install through Windows PowerShell to preserve a WSL UNC path verbatim."""
+    def ps_quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    command = (
+        f"& {ps_quote(hdc_local_path(Path(hdc)))} -t {ps_quote(device_id)} "
+        f"install -r {ps_quote(hdc_local_path(hap_path))}")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, errors="replace")
+    return result.returncode, result.stdout
+
+
 def get_device_text(hdc: str, device_id: str, remote_path: str) -> str:
     """Return the first balanced { ... } span from a remote file, or ''."""
     code, text = run_hdc(hdc, device_id, "shell", "cat", remote_path)
@@ -147,12 +181,36 @@ def save_device_file(hdc: str, device_id: str, remote_path: str, local_path: Pat
         capture_output=True, text=True)
 
 
+def save_probe_results(hdc: str, device_id: str, run_directory: Path,
+                       remote_directory: str, summary: dict) -> None:
+    """Archive every probe result without treating HDC directory recv as evidence."""
+    output = run_directory / "device-results"
+    output.mkdir(parents=True, exist_ok=True)
+    for test in summary.get("tests", []):
+        test_id = str(test.get("testId", ""))
+        if not test_id:
+            continue
+        text = get_device_text(hdc, device_id, f"{remote_directory}/{test_id}.json")
+        target = output / f"{test_id}.json"
+        if text:
+            target.write_text(text + "\n", encoding="utf-8")
+            continue
+        # A crash often leaves no per-probe file. Preserve the exact
+        # device-supplied suite entry so absence cannot be mistaken for PASS.
+        archived = dict(test)
+        archived["artifactSource"] = "device-suite-summary"
+        archived["perProbeArtifact"] = "MISSING"
+        write_json(target, archived)
+
+
 def write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
 
 def capture_frame(hdc: str, device_id: str, run_directory: Path, run_id: str,
                   test_id: str, validator) -> bool:
+    if validator is None:
+        raise RuntimeError(f"Frame validator unavailable: {FRAME_VALIDATOR_IMPORT_ERROR}")
     remote_image = f"/data/local/tmp/winehua-{run_id}-{test_id}.jpeg"
     local_image = run_directory / f"{test_id}.jpeg"
     visual_json = run_directory / f"{test_id}-visual.json"
@@ -167,6 +225,8 @@ def capture_frame(hdc: str, device_id: str, run_directory: Path, run_id: str,
 def capture_d3d11_frame(hdc: str, device_id: str, run_directory: Path,
                         run_id: str, test_id: str) -> bool:
     """snapshot + validate the D3D11 cube with up to four attempts."""
+    if validate_d3d11_cube is None:
+        raise RuntimeError(f"D3D11 frame validator unavailable: {FRAME_VALIDATOR_IMPORT_ERROR}")
     last_json = None
     for attempt in range(4):
         if attempt > 0:
@@ -340,6 +400,244 @@ def write_capability_matrix(root_directory: Path, run_records: list[dict]) -> di
     return matrix
 
 
+def _vkd3d_layer_payload(path: Path, layer: str) -> dict:
+    if not path.is_file():
+        identity = {"deviceName": "", "vendorId": None, "deviceId": None,
+                    "driverVersion": None, "apiVersion": ""}
+        evidence = {"descriptorIndexing": None, "robustness2": None,
+                    "timelineSemaphore": None, "synchronization2": None,
+                    "dynamicRendering": None, "maintenance4": None,
+                    "bufferDeviceAddress": None}
+        return {
+            "layer": layer,
+            "probeStatus": "MISSING_EVIDENCE",
+            "identity": identity,
+            "evidence": evidence,
+            "audit": {"descriptorIndexingFeatures": False, "updateAfterBindLimits": False,
+                      "deviceUuid": False, "driverUuid": False, "deviceExtensions": False,
+                      "queues": False, "memory": False, "formats": False},
+            "updateAfterBindLimits": {},
+            "evidenceHash": hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
+            "source": str(path),
+        }
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    # Native Guest and PE probes expose capabilities at the top level. The
+    # Wine Vulkan smoke predates Gate A and writes them as metrics; retain the
+    # distinction instead of borrowing the PE values.
+    capabilities = payload.get("capabilities") or payload.get("metrics") or {}
+    dxvk262 = payload.get("dxvk262") or {}
+    transport = dxvk262.get("transport") or {}
+    vulkan12 = dxvk262.get("vulkan12") or {}
+    timeline_round_trip = dxvk262.get("timelineRoundTrip") or {}
+    # Wine's established smoke protocol owns the root object and carries its
+    # extension audit inside metrics.  The other probes write it at the root.
+    # Treat both as independent probe evidence, never as a cross-layer fallback.
+    audit = dict(payload.get("capabilityAudit") or capabilities.get("capabilityAudit") or {})
+    if "updateAfterBindLimits" not in audit:
+        audit["updateAfterBindLimits"] = (
+            capabilities.get("updateAfterBindLimits") or
+            dxvk262.get("updateAfterBindLimits") or {})
+
+    def explicit(direct: object, fallback: object = None) -> object:
+        return direct if direct is not None else fallback
+
+    pe_robustness2 = None
+    robustness_parts = [transport.get("robustBufferAccess2"),
+                        transport.get("robustImageAccess2"),
+                        transport.get("nullDescriptor")]
+    if all(part is not None for part in robustness_parts):
+        pe_robustness2 = all(bool(part) for part in robustness_parts)
+    identity = {
+        "deviceName": capabilities.get("deviceName", ""),
+        "vendorId": capabilities.get("vendorId"),
+        "deviceId": capabilities.get("deviceId"),
+        "driverVersion": capabilities.get("driverVersion"),
+        "apiVersion": capabilities.get("deviceApiVersion", ""),
+    }
+    evidence = {
+        "descriptorIndexing": explicit(capabilities.get("descriptorIndexing"),
+                                        vulkan12.get("descriptorIndexing")),
+        "robustness2": explicit(capabilities.get("robustness2"), pe_robustness2),
+        "timelineSemaphore": explicit(capabilities.get("timelineSemaphore"),
+                                       timeline_round_trip.get("feature")),
+        "synchronization2": explicit(capabilities.get("synchronization2"),
+                                      transport.get("synchronization2")),
+        "dynamicRendering": explicit(capabilities.get("dynamicRendering"),
+                                      transport.get("dynamicRendering")),
+        "maintenance4": explicit(capabilities.get("maintenance4"),
+                                 transport.get("maintenance4")),
+        "bufferDeviceAddress": explicit(capabilities.get("bufferDeviceAddress"),
+                                        vulkan12.get("bufferDeviceAddress")),
+    }
+    descriptor_fields = (
+        "descriptorIndexing",
+        "shaderInputAttachmentArrayDynamicIndexing",
+        "shaderUniformTexelBufferArrayDynamicIndexing",
+        "shaderStorageTexelBufferArrayDynamicIndexing",
+        "shaderUniformBufferArrayNonUniformIndexing",
+        "shaderSampledImageArrayNonUniformIndexing",
+        "shaderStorageBufferArrayNonUniformIndexing",
+        "shaderStorageImageArrayNonUniformIndexing",
+        "shaderInputAttachmentArrayNonUniformIndexing",
+        "shaderUniformTexelBufferArrayNonUniformIndexing",
+        "shaderStorageTexelBufferArrayNonUniformIndexing",
+        "descriptorBindingUniformBufferUpdateAfterBind",
+        "descriptorBindingSampledImageUpdateAfterBind",
+        "descriptorBindingStorageImageUpdateAfterBind",
+        "descriptorBindingStorageBufferUpdateAfterBind",
+        "descriptorBindingUniformTexelBufferUpdateAfterBind",
+        "descriptorBindingStorageTexelBufferUpdateAfterBind",
+        "descriptorBindingUpdateUnusedWhilePending",
+        "descriptorBindingPartiallyBound",
+        "descriptorBindingVariableDescriptorCount",
+        "runtimeDescriptorArray",
+    )
+    descriptor_features = audit.get("descriptorIndexingFeatures")
+    memory = audit.get("memory")
+    formats = audit.get("formats")
+    property_chain = audit.get("propertyChain")
+    feature_chain = audit.get("featureChain")
+    return {
+        "layer": layer,
+        "probeStatus": payload.get("status", "UNKNOWN"),
+        "identity": identity,
+        "evidence": evidence,
+        "audit": {
+            "descriptorIndexingFeatures": (
+                isinstance(descriptor_features, dict) and
+                all(name in descriptor_features for name in descriptor_fields)),
+            "updateAfterBindLimits": all(name in audit.get("updateAfterBindLimits", {}) for name in (
+                "maxUpdateAfterBindDescriptorsInAllPools",
+                "maxDescriptorSetUpdateAfterBindSampledImages",
+                "maxDescriptorSetUpdateAfterBindStorageImages",
+                "maxDescriptorSetUpdateAfterBindStorageBuffers")),
+            "deviceUuid": isinstance(audit.get("deviceUuid"), str) and len(audit["deviceUuid"]) == 32,
+            "driverUuid": isinstance(audit.get("driverUuid"), str) and len(audit["driverUuid"]) == 32,
+            "deviceExtensions": isinstance(audit.get("deviceExtensions"), list) and bool(audit["deviceExtensions"]),
+            "featureChain": isinstance(feature_chain, dict) and isinstance(feature_chain.get("vulkan12"), dict) and isinstance(feature_chain.get("vulkan13"), dict),
+            "propertyChain": isinstance(property_chain, dict) and isinstance(property_chain.get("vulkan12"), dict),
+            "queues": isinstance(audit.get("queues"), list) and bool(audit["queues"]),
+            "memory": isinstance(memory, dict) and bool(memory.get("types")) and bool(memory.get("heaps")),
+            "formats": isinstance(formats, dict) and all(name in formats for name in (
+                "R8G8B8A8_UNORM", "D24_UNORM_S8_UINT", "BC1_RGBA_UNORM_BLOCK", "BC7_UNORM_BLOCK")),
+        },
+        "updateAfterBindLimits": audit.get("updateAfterBindLimits", {}),
+        "evidenceHash": hashlib.sha256(
+            json.dumps({"identity": identity, "evidence": evidence, "audit": audit},
+                       sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "source": str(path),
+    }
+
+
+def _api_at_least(value: object, major: int, minor: int) -> bool:
+    try:
+        parts = str(value).split(".")
+        return (int(parts[0]), int(parts[1])) >= (major, minor)
+    except (IndexError, TypeError, ValueError):
+        return False
+
+
+def _vkd3d_profile_decision(layers: list[dict], name: str, api: tuple[int, int]) -> dict:
+    required = {
+        "descriptorIndexing": True,
+        "robustness2": True,
+        "timelineSemaphore": True,
+        "synchronization2": True,
+        "dynamicRendering": True,
+        "maintenance4": True,
+        "bufferDeviceAddress": True,
+    }
+    reasons: list[str] = []
+    for layer in layers:
+        prefix = layer["layer"]
+        if layer["probeStatus"] != "PASS":
+            reasons.append(f"{prefix}: probe status {layer['probeStatus']}")
+        if not _api_at_least(layer["identity"]["apiVersion"], *api):
+            reasons.append(f"{prefix}: Vulkan API below {api[0]}.{api[1]}")
+        for field, expected in required.items():
+            actual = layer["evidence"].get(field)
+            if actual is None:
+                reasons.append(f"{prefix}: missing independent evidence for {field}")
+            elif actual != expected:
+                reasons.append(f"{prefix}: {field}={actual}")
+        for field, observed in layer["audit"].items():
+            if not observed:
+                reasons.append(f"{prefix}: missing independent audit field {field}")
+        for field in ("maxDescriptorSetUpdateAfterBindSampledImages",
+                      "maxDescriptorSetUpdateAfterBindStorageImages",
+                      "maxDescriptorSetUpdateAfterBindStorageBuffers"):
+            try:
+                value = int(layer["updateAfterBindLimits"].get(field))
+            except (TypeError, ValueError):
+                continue
+            if value < 1_000_000:
+                reasons.append(f"{prefix}: {field}={value} below 1000000")
+    return {
+        "target": name,
+        "classification": "SUPPORTED" if not reasons else "UNSUPPORTED",
+        "blockingReasons": reasons,
+        "readyForGateB": not reasons,
+    }
+
+
+def write_vkd3d_capability_decision(root_directory: Path, run_records: list[dict]) -> dict:
+    host = next((r for r in run_records if r["suite"] == "host-vulkan"), None)
+    audit = next((r for r in run_records if r["suite"] == "vkd3d-capability"), None)
+    if not host or not audit:
+        raise RuntimeError("VKD3D Gate A requires host-vulkan and vkd3d-capability runs")
+    paths = {
+        "host": root_directory / host["runId"] / "device-results" / "host-vulkan.json",
+        "guest": root_directory / audit["runId"] / "device-results" / "guest-vkd3d-capability-x64.json",
+        "wine-vulkan-x64": root_directory / audit["runId"] / "device-results" / "wine-vkd3d-capability-x64.json",
+        "wine-pe-x64": root_directory / audit["runId"] / "device-results" / "vkd3d-capability-pe-x64.json",
+    }
+    layers = [_vkd3d_layer_payload(path, layer) for layer, path in paths.items()]
+    profiles = [
+        _vkd3d_profile_decision(layers, "legacy-vkd3d-proton-2.6", (1, 1)),
+        _vkd3d_profile_decision(layers, "modern-vkd3d-proton-2.9", (1, 3)),
+    ]
+    capability_hash = hashlib.sha256(json.dumps([
+        {"layer": layer["layer"], "probeStatus": layer["probeStatus"],
+         "identity": layer["identity"], "evidence": layer["evidence"], "audit": layer["audit"]}
+        for layer in layers
+    ], sort_keys=True).encode("utf-8")).hexdigest()
+    decision = {
+        "schemaVersion": 1,
+        "gate": "A",
+        "capabilityHash": capability_hash,
+        "decision": "ELIGIBLE_FOR_GATE_B" if all(profile["readyForGateB"] for profile in profiles)
+            else "DO_NOT_ADVANCE",
+        "layers": layers,
+        "profiles": profiles,
+        "policy": "Gate B requires every four-layer field to be independently observed and SUPPORTED; no host-to-guest inference or fabricated limits is permitted.",
+    }
+    output = root_directory / "vulkan-capability"
+    output.mkdir(parents=True, exist_ok=True)
+    write_json(output / "decision.json", decision)
+    for profile in profiles:
+        write_json(output / f"{profile['target']}.json", {
+            "schemaVersion": 1,
+            "gate": "A",
+            "capabilityHash": capability_hash,
+            "profile": profile,
+            "layers": layers,
+            "policy": decision["policy"],
+        })
+    lines = ["# VKD3D Gate A Capability Diff", "", "| Layer | API | Descriptor indexing | BDA | Result |", "| --- | --- | --- | --- | --- |"]
+    for layer in layers:
+        evidence = layer["evidence"]
+        lines.append("| {layer} | {api} | {descriptor} | {bda} | {status} |".format(
+            layer=layer["layer"], api=layer["identity"]["apiVersion"] or "missing",
+            descriptor=evidence["descriptorIndexing"], bda=evidence["bufferDeviceAddress"],
+            status=layer["probeStatus"]))
+    for profile in profiles:
+        lines.extend(["", f"## {profile['target']}: {profile['classification']}"])
+        lines.extend(f"- {reason}" for reason in profile["blockingReasons"])
+    (output / "capability-diff.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return decision
+
+
 def get_d3d11_coverage(summary: dict, run_suite: str, long_seconds: int) -> dict:
     entries = []
     for test in summary.get("tests", []):
@@ -484,7 +782,8 @@ def dxvk_tests_for_suite(run_suite: str) -> list[str]:
 
 def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
                    run_id: str, root_directory: Path, perf_profile: str,
-                   long_seconds: int, timeout_minutes: int) -> bool:
+                   long_seconds: int, timeout_minutes: int,
+                   capture_visuals: bool = True) -> bool:
     run_directory = root_directory / run_id
     run_directory.mkdir(parents=True, exist_ok=True)
     remote_stable = f"{DEVICE_SANDBOX}/files/automation/results/{run_id}/suite-summary.json"
@@ -525,7 +824,7 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
     captured: dict[str, bool] = {}
     summary_text = ""
     while time.monotonic() < deadline:
-        if run_suite in ("core", "opengl", "all", "long"):
+        if capture_visuals and run_suite in ("core", "opengl", "all", "long"):
             for test_id in ("opengl-x64", "opengl-x86"):
                 if test_id in captured:
                     continue
@@ -533,7 +832,7 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
                 if '"message"' in result_text and '"fixed-frame"' in result_text:
                     captured[test_id] = capture_frame(
                         hdc, device_id, run_directory, run_id, test_id, validate_rgba_quadrants)
-        if run_suite in ("d3d9", "dxvk", "dxvk-long", "dxvk-dynamic", "all",
+        if capture_visuals and run_suite in ("d3d9", "dxvk", "dxvk-long", "dxvk-dynamic", "all",
                          "dxvk-modern-baseline", "dxvk-modern-long"):
             for test_id in dxvk_tests_for_suite(run_suite):
                 if test_id in captured:
@@ -542,7 +841,7 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
                 if '"message"' in result_text and '"fixed-frame"' in result_text:
                     captured[test_id] = capture_d3d11_frame(
                         hdc, device_id, run_directory, run_id, test_id)
-        if run_suite == "host-vulkan" and "host-vulkan" not in captured:
+        if capture_visuals and run_suite == "host-vulkan" and "host-vulkan" not in captured:
             host_result_text = get_device_text(hdc, device_id, f"{remote_host_results}/host-vulkan.json")
             if '"message"' in host_result_text and '"fixed-frame"' in host_result_text:
                 captured["host-vulkan"] = capture_frame(
@@ -558,14 +857,14 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
     summary_path.write_text(summary_text + "\n", encoding="utf-8")
     summary = json.loads(summary_text)
 
-    if run_suite in ("core", "opengl", "all", "long"):
+    if capture_visuals and run_suite in ("core", "opengl", "all", "long"):
         for test_id in ("opengl-x64", "opengl-x86"):
             captured.setdefault(test_id, False)
-    if run_suite in ("d3d9", "dxvk", "dxvk-long", "dxvk-dynamic", "all",
+    if capture_visuals and run_suite in ("d3d9", "dxvk", "dxvk-long", "dxvk-dynamic", "all",
                      "dxvk-modern-baseline", "dxvk-modern-long"):
         for test_id in dxvk_tests_for_suite(run_suite):
             captured.setdefault(test_id, False)
-    if run_suite == "host-vulkan":
+    if capture_visuals and run_suite == "host-vulkan":
         captured.setdefault("host-vulkan", False)
 
     _, hilog_text = run_hdc(hdc, device_id, "shell", "hilog", "-z", "10000", "-t", "app")
@@ -579,8 +878,10 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
                      run_directory / "vtest-frontbuffer.log")
     if run_suite == "host-vulkan":
         save_device_file(hdc, device_id, remote_host_results, run_directory / "device-results")
+        save_probe_results(hdc, device_id, run_directory, remote_host_results, summary)
     else:
         save_device_file(hdc, device_id, remote_results, run_directory / "device-results")
+        save_probe_results(hdc, device_id, run_directory, remote_results, summary)
 
     custom_border_selections = []
     wine_stderr_path = run_directory / "wine-stderr.log"
@@ -595,7 +896,7 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
                 custom_border_selections.append(
                     {"path": match.group(1), "reason": match.group(2)})
 
-    visual_pass = not any(not value for value in captured.values())
+    visual_pass = True if not capture_visuals else not any(not value for value in captured.values())
     if run_suite in ("dxvk", "dxvk-long", "dxvk-dynamic", "all",
                      "dxvk-modern-baseline", "dxvk-modern-long"):
         coverage = get_d3d11_coverage(summary, run_suite, long_seconds)
@@ -609,7 +910,7 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
         "prefix": run_prefix,
         "perfProfile": perf_profile,
         "appStatus": summary.get("status"),
-        "visualStatus": "PASS" if visual_pass else "FAIL",
+        "visualStatus": "SKIPPED" if not capture_visuals else ("PASS" if visual_pass else "FAIL"),
         "coverageStatus": "NOT_APPLICABLE" if coverage is None else coverage["status"],
         "visuals": captured,
         "coverage": coverage,
@@ -658,7 +959,7 @@ def main() -> int:
     if not args.skip_build:
         invoke_build(session_directory / "build.log")
     artifact = get_artifact_metadata(session_directory)
-    code, install_output = run_hdc(hdc, device_id, "install", "-r", str(HAP_PATH))
+    code, install_output = run_hdc_install(hdc, device_id, HAP_PATH)
     (session_directory / "install.log").write_text(install_output, encoding="utf-8")
     if code != 0 or "install bundle successfully" not in install_output:
         raise RuntimeError("HAP overwrite install did not report install bundle successfully")
@@ -668,6 +969,8 @@ def main() -> int:
         matrix = [("core", "reuse")] * 3 + [("core", "clean")]
     elif args.suite == "capabilities":
         matrix = [("host-vulkan", "reuse"), ("venus", "reuse")]
+    elif args.suite == "vkd3d-capability":
+        matrix = [("host-vulkan", "reuse"), ("vkd3d-capability", "reuse")]
     else:
         matrix = [(args.suite, args.prefix)] * args.runs
 
@@ -679,7 +982,7 @@ def main() -> int:
             passed = invoke_one_run(
                 hdc, device_id, run_suite, run_prefix, run_id,
                 session_directory, args.perf_profile, args.long_seconds,
-                args.timeout_minutes)
+                args.timeout_minutes, capture_visuals=args.suite != "vkd3d-capability")
         except Exception as error:  # noqa: BLE001 - infrastructure errors are recorded, not fatal
             passed = False
             (session_directory / f"{run_id}-infrastructure-error.txt").write_text(
@@ -706,6 +1009,14 @@ def main() -> int:
             all_passed = False
             (session_directory / "capability-matrix-error.txt").write_text(
                 str(error) + "\n", encoding="utf-8")
+    vkd3d_decision = None
+    if args.suite == "vkd3d-capability":
+        try:
+            vkd3d_decision = write_vkd3d_capability_decision(session_directory, run_records)
+        except Exception as error:  # noqa: BLE001
+            all_passed = False
+            (session_directory / "vkd3d-capability-error.txt").write_text(
+                str(error) + "\n", encoding="utf-8")
 
     write_json(session_directory / "automation-summary.json", {
         "schemaVersion": 1,
@@ -719,7 +1030,9 @@ def main() -> int:
         "capabilityHashes": (
             {"host": capability_matrix["host"]["capabilityHash"],
              "venus": capability_matrix["venus"]["capabilityHash"]}
-            if capability_matrix else None),
+            if capability_matrix else
+            ({"gateA": vkd3d_decision["capabilityHash"]} if vkd3d_decision else None)),
+        "vkd3dDecision": vkd3d_decision["decision"] if vkd3d_decision else None,
     })
 
     print(f"Automation {'PASS' if all_passed else 'FAIL'}: {session_directory}")

@@ -5,6 +5,9 @@
  * Windows Vulkan -> winevulkan -> x86_64 Vulkan loader -> Venus -> Host Vulkan.
  * It does not load DXVK and therefore separates transport qualification from
  * DXVK compatibility-layer work.
+ *
+ * When launched outside automation, it also presents the measured Windows PE
+ * path as a VKD3D capability report. It never loads vkd3d-proton.
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -16,6 +19,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "vkd3d_capability_audit.h"
+
 struct probe_state {
     const char *run_id;
     const char *test_id;
@@ -24,8 +29,14 @@ struct probe_state {
     uint32_t loader_api;
     VkPhysicalDeviceProperties properties;
     VkPhysicalDeviceFeatures core;
+    uint32_t max_update_after_bind_descriptors_in_all_pools;
+    uint32_t max_descriptor_set_update_after_bind_sampled_images;
+    uint32_t max_descriptor_set_update_after_bind_storage_images;
+    uint32_t max_descriptor_set_update_after_bind_storage_buffers;
     uint32_t queue_family;
     BOOL fallback_detected;
+    char *capability_audit;
+    BOOL interactive;
 
     BOOL api13;
     BOOL robust_buffer_access2;
@@ -124,6 +135,63 @@ static const char *bool_text(BOOL value)
     return value ? "true" : "false";
 }
 
+static BOOL argument_present(int argc, char **argv, const char *name)
+{
+    int i;
+    for (i = 1; i < argc; ++i)
+        if (!lstrcmpiA(argv[i], name)) return TRUE;
+    return FALSE;
+}
+
+static BOOL vkd3d_policy_supported(const struct probe_state *state)
+{
+    return state->api13 && state->core.robustBufferAccess &&
+        state->robust_buffer_access2 && state->robust_image_access2 &&
+        state->null_descriptor && state->descriptor_indexing &&
+        state->timeline_semaphore && state->synchronization2 &&
+        state->dynamic_rendering && state->maintenance4 &&
+        state->buffer_device_address &&
+        state->max_descriptor_set_update_after_bind_sampled_images >= 1000000u &&
+        state->max_descriptor_set_update_after_bind_storage_images >= 1000000u &&
+        state->max_descriptor_set_update_after_bind_storage_buffers >= 1000000u;
+}
+
+static void show_vkd3d_capability_report(const struct probe_state *state,
+                                          const char *status, const char *message)
+{
+    char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE + 16];
+    char api_version[32];
+    char report[2048];
+    BOOL supported = vkd3d_policy_supported(state);
+
+    json_safe_copy(device_name, sizeof(device_name), state->properties.deviceName);
+    version_text(state->properties.apiVersion, api_version, sizeof(api_version));
+    snprintf(report, sizeof(report),
+             "WineHua VKD3D Capability Probe\r\n\r\n"
+             "Scope: Windows PE -> winevulkan -> Venus\r\n"
+             "vkd3d-proton loaded: no\r\n\r\n"
+             "Probe: %s (%s)\r\nAdapter: %s\r\nVulkan API: %s\r\n"
+             "Descriptor indexing: %s\r\nBuffer device address: %s\r\n"
+             "Timeline / synchronization2 / dynamic rendering: %s / %s / %s\r\n\r\n"
+             "UpdateAfterBind per-set limits\r\n"
+             "  Sampled images: %u\r\n  Storage images: %u\r\n  Storage buffers: %u\r\n"
+             "Required by this Gate A policy: 1000000 each\r\n\r\n"
+             "Windows PE path result: %s\r\n"
+             "Full eligibility still requires independent Host, Guest, and Wine Vulkan probes.",
+             status, message ? message : "", device_name, api_version,
+             bool_text(state->descriptor_indexing), bool_text(state->buffer_device_address),
+             bool_text(state->timeline_semaphore), bool_text(state->synchronization2),
+             bool_text(state->dynamic_rendering),
+             state->max_descriptor_set_update_after_bind_sampled_images,
+             state->max_descriptor_set_update_after_bind_storage_images,
+             state->max_descriptor_set_update_after_bind_storage_buffers,
+             supported ? "SUPPORTED ON THIS PATH" : "UNSUPPORTED ON THIS PATH");
+    printf("%s\n", report);
+    fflush(stdout);
+    MessageBoxA(NULL, report, "WineHua VKD3D Capability Probe",
+                MB_OK | (supported ? MB_ICONINFORMATION : MB_ICONWARNING));
+}
+
 static void write_progress(const struct probe_state *state, const char *stage)
 {
     char progress[512];
@@ -208,6 +276,10 @@ static void write_result(const struct probe_state *state, const char *status,
             "\"observedValue\":%llu,\"passed\":%s},\n"
             "    \"vulkan12\": {\"timelineSemaphore\":%s,"
             "\"bufferDeviceAddress\":%s,\"descriptorIndexing\":%s},\n"
+            "    \"updateAfterBindLimits\": {\"maxUpdateAfterBindDescriptorsInAllPools\":%u,"
+            "\"maxDescriptorSetUpdateAfterBindSampledImages\":%u,"
+            "\"maxDescriptorSetUpdateAfterBindStorageImages\":%u,"
+            "\"maxDescriptorSetUpdateAfterBindStorageBuffers\":%u},\n"
             "    \"d3d11Features\": {\"geometryShader\":%s,"
             "\"tessellationShader\":%s,\"multiDrawIndirect\":%s,"
             "\"dualSrcBlend\":\"%s\",\"multiViewport\":\"%s\","
@@ -222,6 +294,10 @@ static void write_result(const struct probe_state *state, const char *status,
             "    \"eligibility\": {\"transport\":\"%s\","
             "\"bringup\":\"%s\"}\n"
             "  },\n"
+            "  \"vkd3dCapability\": {\"scope\":\"windows-pe-vulkan-path\","
+            "\"vkd3dLoaded\":false,\"requiredUpdateAfterBindPerSet\":1000000,"
+            "\"supportedOnThisPath\":%s},\n"
+            "  \"capabilityAudit\":%s,\n"
             "  \"metrics\": {\"cpuReadBytes\":0,\"cpuUploadBytes\":0,"
             "\"gpuCopyCount\":0,\"queueSubmitCount\":0,"
             "\"fallbackDetected\":%s,\"durationMs\":%llu}\n"
@@ -256,6 +332,10 @@ static void write_result(const struct probe_state *state, const char *status,
             (unsigned long long)state->timeline_observed_value,
             bool_text(state->timeline_round_trip_ok), bool_text(state->timeline_semaphore),
             bool_text(state->buffer_device_address), bool_text(state->descriptor_indexing),
+            state->max_update_after_bind_descriptors_in_all_pools,
+            state->max_descriptor_set_update_after_bind_sampled_images,
+            state->max_descriptor_set_update_after_bind_storage_images,
+            state->max_descriptor_set_update_after_bind_storage_buffers,
             bool_text(state->core.geometryShader), bool_text(state->core.tessellationShader),
             bool_text(state->core.multiDrawIndirect),
             policy_text(state->dual_src_blend, "emulated"),
@@ -273,12 +353,21 @@ static void write_result(const struct probe_state *state, const char *status,
             state->transport_device_create_ok && state->timeline_round_trip_ok ? "PASS" : "FAIL",
             state->transport_device_create_ok && state->timeline_round_trip_ok
                 ? "D3D11_FEATURE_PROBE_PENDING" : "BLOCKED",
+            bool_text(vkd3d_policy_supported(state)),
+            state->capability_audit ? state->capability_audit : "{}",
             bool_text(state->fallback_detected),
             (unsigned long long)(now_ms() - state->started_ms));
     fflush(file);
     fclose(file);
     MoveFileExA(temporary, state->result_path,
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+}
+
+static void publish_result(const struct probe_state *state, const char *status,
+                           const char *message)
+{
+    write_result(state, status, message);
+    if (state->interactive) show_vkd3d_capability_report(state, status, message);
 }
 
 static BOOL has_extension(const VkExtensionProperties *extensions, uint32_t count,
@@ -307,6 +396,9 @@ static BOOL query_requirements(VkPhysicalDevice physical, struct probe_state *st
     VkPhysicalDeviceVulkan13Features vk13 = { 0 };
     VkPhysicalDeviceRobustness2FeaturesEXT robustness2 = { 0 };
     VkPhysicalDeviceTransformFeedbackFeaturesEXT transform_feedback = { 0 };
+    VkPhysicalDeviceProperties2 properties2 = { 0 };
+    VkPhysicalDeviceVulkan12Properties properties12 = { 0 };
+    VkPhysicalDeviceIDProperties id_properties = { 0 };
     void **tail = &features2.pNext;
     BOOL api12 = state->properties.apiVersion >= VK_API_VERSION_1_2;
     BOOL has_robustness2;
@@ -317,6 +409,9 @@ static BOOL query_requirements(VkPhysicalDevice physical, struct probe_state *st
     vk13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     robustness2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
     transform_feedback.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT;
+    properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    properties12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+    id_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
 
     if (vkEnumerateDeviceExtensionProperties(physical, NULL, &count, NULL) != VK_SUCCESS)
         return FALSE;
@@ -338,6 +433,9 @@ static BOOL query_requirements(VkPhysicalDevice physical, struct probe_state *st
     APPEND_FEATURE(transform_feedback, has_transform_feedback);
 #undef APPEND_FEATURE
     vkGetPhysicalDeviceFeatures2(physical, &features2);
+    properties2.pNext = &properties12;
+    properties12.pNext = &id_properties;
+    vkGetPhysicalDeviceProperties2(physical, &properties2);
 
     state->robust_buffer_access2 = has_robustness2 && robustness2.robustBufferAccess2;
     state->robust_image_access2 = has_robustness2 && robustness2.robustImageAccess2;
@@ -348,6 +446,14 @@ static BOOL query_requirements(VkPhysicalDevice physical, struct probe_state *st
     state->timeline_semaphore = api12 && vk12.timelineSemaphore;
     state->buffer_device_address = api12 && vk12.bufferDeviceAddress;
     state->descriptor_indexing = api12 && vk12.descriptorIndexing;
+    state->max_update_after_bind_descriptors_in_all_pools =
+        properties12.maxUpdateAfterBindDescriptorsInAllPools;
+    state->max_descriptor_set_update_after_bind_sampled_images =
+        properties12.maxDescriptorSetUpdateAfterBindSampledImages;
+    state->max_descriptor_set_update_after_bind_storage_images =
+        properties12.maxDescriptorSetUpdateAfterBindStorageImages;
+    state->max_descriptor_set_update_after_bind_storage_buffers =
+        properties12.maxDescriptorSetUpdateAfterBindStorageBuffers;
     state->transform_feedback = has_transform_feedback && transform_feedback.transformFeedback;
     state->geometry_streams = has_transform_feedback && transform_feedback.geometryStreams;
     state->dual_src_blend = state->core.dualSrcBlend;
@@ -379,6 +485,12 @@ static BOOL query_requirements(VkPhysicalDevice physical, struct probe_state *st
         state->robust_buffer_access2 && state->robust_image_access2 &&
         state->null_descriptor && state->synchronization2 && state->dynamic_rendering &&
         state->maintenance4 && state->timeline_semaphore;
+    state->capability_audit = winehua_vkd3d_capability_audit(
+        physical, extensions, count, &vk12, &vk13, &properties12, &id_properties);
+    if (!state->capability_audit) {
+        free(extensions);
+        return FALSE;
+    }
     free(extensions);
     return TRUE;
 }
@@ -543,6 +655,11 @@ int main(int argc, char **argv)
     const char *failure = "unknown failure";
     int exit_code = 1;
 
+    if (argument_present(argc, argv, "--help") || argument_present(argc, argv, "-h")) {
+        printf("Usage: winehua_dxvk26_requirements.exe [--vkd3d-capability] [--result FILE]\n"
+               "Run without --automation to show the Windows PE Vulkan capability report.\n");
+        return 0;
+    }
     memset(&state, 0, sizeof(state));
     state.run_id = argument_value(argc, argv, "--run-id", "manual");
     state.test_id = argument_value(argc, argv, "--test-id", "dxvk26-requirements");
@@ -555,6 +672,7 @@ int main(int argc, char **argv)
     state.timeline_submit_result = VK_NOT_READY;
     state.timeline_wait_result = VK_NOT_READY;
     state.timeline_counter_result = VK_NOT_READY;
+    state.interactive = !argument_present(argc, argv, "--automation");
     {
         PFN_vkEnumerateInstanceVersion enumerate_version =
             (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(VK_NULL_HANDLE,
@@ -571,7 +689,7 @@ int main(int argc, char **argv)
     instance_info.pApplicationInfo = &application;
     result = vkCreateInstance(&instance_info, NULL, &instance);
     if (result != VK_SUCCESS) {
-        write_result(&state, "UNSUPPORTED", "vkCreateInstance Vulkan 1.3 failed");
+        publish_result(&state, "UNSUPPORTED", "vkCreateInstance Vulkan 1.3 failed");
         return 3;
     }
     result = vkEnumeratePhysicalDevices(instance, &count, NULL);
@@ -592,8 +710,9 @@ int main(int argc, char **argv)
     if (state.fallback_detected) { failure = "software Vulkan fallback detected"; goto cleanup; }
     if (!query_requirements(physical, &state)) { failure = "capability query failed"; goto cleanup; }
     if (!state.api13) {
-        write_result(&state, "UNSUPPORTED", "Guest adapter exposes Vulkan below 1.3");
+        publish_result(&state, "UNSUPPORTED", "Guest adapter exposes Vulkan below 1.3");
         vkDestroyInstance(instance, NULL);
+        free(state.capability_audit);
         return 3;
     }
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, NULL);
@@ -613,20 +732,24 @@ int main(int argc, char **argv)
     result = create_transport_device(physical, &state);
     state.transport_device_create_ok = state.transport_device_create_result == VK_SUCCESS;
     if (!state.transport_device_create_ok) {
-        write_result(&state, "UNSUPPORTED", "DXVK 2.6 transport device requirements are unavailable");
+        publish_result(&state, "UNSUPPORTED", "DXVK 2.6 transport device requirements are unavailable");
         vkDestroyInstance(instance, NULL);
+        free(state.capability_audit);
         return 3;
     }
     if (!state.timeline_round_trip_ok) {
-        write_result(&state, "FAIL", "DXVK 2.6 timeline queue-submit/wait round trip failed");
+        publish_result(&state, "FAIL", "DXVK 2.6 timeline queue-submit/wait round trip failed");
         vkDestroyInstance(instance, NULL);
+        free(state.capability_audit);
         return 2;
     }
-    write_result(&state, "PASS", "DXVK 2.6 transport requirements passed; D3D11 baseline is evaluated by the unmodified runtime");
+    publish_result(&state, "PASS",
+                   "DXVK 2.6 transport requirements passed; no vkd3d runtime was loaded");
     exit_code = 0;
 
 cleanup:
-    if (exit_code) write_result(&state, "FAIL", failure);
+    if (exit_code) publish_result(&state, "FAIL", failure);
     if (instance) vkDestroyInstance(instance, NULL);
+    free(state.capability_audit);
     return exit_code;
 }

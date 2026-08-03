@@ -355,6 +355,9 @@ export class SmokeRunner {
     const includeGpuDiagnostics = this.request.suite === 'gpu-diagnostics';
     const includeDxvkModernBaseline = this.request.suite === 'dxvk-modern-baseline';
     const includeDxvk26Requirements = this.request.suite === 'dxvk26-requirements';
+    /* Gate A never loads vkd3d. These probes only observe the same Vulkan
+     * layers a future D3D12 runtime would use. */
+    const includeVkd3dCapability = this.request.suite === 'vkd3d-capability';
     const includeDxvkLong = this.request.suite === 'dxvk-long';
     const includeDxvkModernLong = this.request.suite === 'dxvk-modern-long';
     const includeDxvkReplay = this.request.suite === 'dxvk-replay';
@@ -647,6 +650,14 @@ export class SmokeRunner {
        * hide the Windows Vulkan transport result needed for DXVK bring-up. */
       tests.push({ id: 'guest-dxvk26-requirements-x64', architecture: 'guest-x64',
         executable: 'winehua_guest_vulkan_smoke', seconds: 0, timeoutMs: 90000 });
+    }
+    if (includeVkd3dCapability) {
+      tests.push({ id: 'vkd3d-capability-pe-x64', architecture: 'x64',
+        executable: 'winehua_dxvk26_requirements.exe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'guest-vkd3d-capability-x64', architecture: 'guest-x64',
+        executable: 'winehua_guest_vulkan_smoke', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'wine-vkd3d-capability-x64', architecture: 'x64',
+        executable: 'winehua_vulkan_smoke.exe', seconds: 0, timeoutMs: 90000 });
     }
     if (includeGpuDiagnostics) {
       /* This runs through the Legacy overlay deliberately. The program then
@@ -1124,7 +1135,8 @@ export class SmokeRunner {
         executablePath: executablePath,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
           '--result', resultPath,
-          ...(spec.id === 'guest-dxvk26-requirements-x64' ?
+          ...(spec.id === 'guest-dxvk26-requirements-x64' ||
+            spec.id === 'guest-vkd3d-capability-x64' ?
             ['--dxvk26-requirements', '1'] : []),
           ...(spec.id.indexOf('general') >= 0 ? ['--layout', 'general'] : []),
           ...(spec.id.indexOf('sampled-only') >= 0 ? ['--sampled-only'] : []),
@@ -1238,6 +1250,7 @@ export class SmokeRunner {
 
     const windowsResult = `C:\\smoke\\results\\${this.request.runId}\\${spec.id}.json`;
     const isWineVulkan = spec.executable === 'winehua_vulkan_smoke.exe';
+    const isVkd3dCapability = spec.id === 'wine-vkd3d-capability-x64';
     const isDxvk26Requirements = spec.executable === 'winehua_dxvk26_requirements.exe';
     const isGpuDiagnostics = spec.executable === 'winehua_gpu_diagnostics.exe';
     const isWineVulkanPresent = isWineVulkan && spec.id.indexOf('present') >= 0;
@@ -1462,6 +1475,7 @@ export class SmokeRunner {
         windowsExePath: `C:\\smoke\\${spec.architecture}\\${spec.executable}`,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
           '--result', windowsResult, isPresent ? '--present' : '--offscreen',
+          ...(isVkd3dCapability ? ['--capability-audit'] : []),
           ...(isPresent ? ['--seconds', `${spec.seconds}`] : [])],
         environment: smokeEnvironment,
         /* DXVK lives in the WineHua runtime overlay, so the smoke process

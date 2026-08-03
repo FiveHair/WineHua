@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <mutex>
@@ -22,6 +23,8 @@
 #include <utility>
 #include <unistd.h>
 #include <vector>
+
+#include "../../../../smoke/vkd3d_capability_audit.h"
 
 #undef LOG_TAG
 #define LOG_TAG "WL_VK_PROBE"
@@ -100,6 +103,7 @@ struct ProbeMetrics {
 struct ProbeCaps {
     uint32_t loaderApiVersion = VK_API_VERSION_1_0;
     VkPhysicalDeviceProperties properties{};
+    VkPhysicalDeviceVulkan12Properties vulkan12Properties{};
     VkPhysicalDeviceFeatures features{};
     VkSurfaceCapabilitiesKHR surface{};
     VkFormat format = VK_FORMAT_UNDEFINED;
@@ -119,6 +123,7 @@ struct ProbeCaps {
     bool astc4x4 = false;
     bool astc8x8 = false;
     bool descriptorIndexing = false;
+    bool bufferDeviceAddress = false;
     bool scalarBlockLayout = false;
     bool robustness2 = false;
     bool transformFeedback = false;
@@ -141,6 +146,7 @@ struct ProbeCaps {
     bool customBorderColorExtension = false;
     bool customBorderColors = false;
     bool customBorderColorWithoutFormat = false;
+    std::string capabilityAudit;
 };
 
 double Percentile(std::vector<double> values, double percentile)
@@ -194,6 +200,15 @@ std::string MakeResult(const std::string& runId, const char* status, const char*
         << "    \"tessellationShader\": " << (caps.features.tessellationShader ? "true" : "false") << ",\n"
         << "    \"multiDrawIndirect\": " << (caps.features.multiDrawIndirect ? "true" : "false") << ",\n"
         << "    \"descriptorIndexing\": " << (caps.descriptorIndexing ? "true" : "false") << ",\n"
+        << "    \"bufferDeviceAddress\": " << (caps.bufferDeviceAddress ? "true" : "false") << ",\n"
+        << "    \"updateAfterBindLimits\": {\"maxUpdateAfterBindDescriptorsInAllPools\":"
+        << caps.vulkan12Properties.maxUpdateAfterBindDescriptorsInAllPools
+        << ",\"maxDescriptorSetUpdateAfterBindSampledImages\":"
+        << caps.vulkan12Properties.maxDescriptorSetUpdateAfterBindSampledImages
+        << ",\"maxDescriptorSetUpdateAfterBindStorageImages\":"
+        << caps.vulkan12Properties.maxDescriptorSetUpdateAfterBindStorageImages
+        << ",\"maxDescriptorSetUpdateAfterBindStorageBuffers\":"
+        << caps.vulkan12Properties.maxDescriptorSetUpdateAfterBindStorageBuffers << "},\n"
         << "    \"scalarBlockLayout\": " << (caps.scalarBlockLayout ? "true" : "false") << ",\n"
         << "    \"robustness2\": " << (caps.robustness2 ? "true" : "false") << ",\n"
         << "    \"transformFeedback\": " << (caps.transformFeedback ? "true" : "false") << ",\n"
@@ -230,6 +245,8 @@ std::string MakeResult(const std::string& runId, const char* status, const char*
         << "    \"astc4x4\": " << (caps.astc4x4 ? "true" : "false") << ",\n"
         << "    \"astc8x8\": " << (caps.astc8x8 ? "true" : "false") << "\n"
         << "  },\n"
+        << "  \"capabilityAudit\": "
+        << (caps.capabilityAudit.empty() ? "{}" : caps.capabilityAudit) << ",\n"
         << "  \"metrics\": {"
         << "\"cpuReadBytes\":0,\"cpuUploadBytes\":0,"
         << "\"gpuCopyCount\":" << metrics.gpuCopyCount << ","
@@ -354,6 +371,7 @@ private:
 
         VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
         VkPhysicalDeviceVulkan12Features vulkan12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        VkPhysicalDeviceVulkan13Features vulkan13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         VkPhysicalDeviceRobustness2FeaturesEXT robustness2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
         VkPhysicalDeviceTransformFeedbackFeaturesEXT transformFeedback{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT};
         VkPhysicalDeviceSynchronization2Features synchronization2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
@@ -381,25 +399,36 @@ private:
         const bool hasCustomBorderColor = HasExtension(
             extensions, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
         append(vulkan12, api12);
+        append(vulkan13, api13);
         append(robustness2, hasRobustness2);
         append(transformFeedback, hasTransformFeedback);
-        append(synchronization2, hasSynchronization2);
-        append(dynamicRendering, hasDynamicRendering);
-        append(maintenance4, hasMaintenance4);
+        append(synchronization2, !api13 && hasSynchronization2);
+        append(dynamicRendering, !api13 && hasDynamicRendering);
+        append(maintenance4, !api13 && hasMaintenance4);
         append(maintenance5, hasMaintenance5);
         append(maintenance6, hasMaintenance6);
         append(customBorderColor, hasCustomBorderColor);
         vkGetPhysicalDeviceFeatures2(physical_, &features2);
+        VkPhysicalDeviceProperties2 properties2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        VkPhysicalDeviceIDProperties idProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        caps_.vulkan12Properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+        properties2.pNext = &caps_.vulkan12Properties;
+        caps_.vulkan12Properties.pNext = &idProperties;
+        vkGetPhysicalDeviceProperties2(physical_, &properties2);
 
         caps_.descriptorIndexing = api12 && vulkan12.descriptorIndexing;
+        caps_.bufferDeviceAddress = api12 && vulkan12.bufferDeviceAddress;
         caps_.scalarBlockLayout = api12 && vulkan12.scalarBlockLayout;
         caps_.shaderInt8 = api12 && vulkan12.shaderInt8;
         caps_.timelineSemaphore = api12 && vulkan12.timelineSemaphore;
         caps_.robustness2 = hasRobustness2 && robustness2.robustBufferAccess2;
         caps_.transformFeedback = hasTransformFeedback && transformFeedback.transformFeedback;
-        caps_.synchronization2 = hasSynchronization2 && synchronization2.synchronization2;
-        caps_.dynamicRendering = hasDynamicRendering && dynamicRendering.dynamicRendering;
-        caps_.maintenance4 = hasMaintenance4 && maintenance4.maintenance4;
+        caps_.synchronization2 = api13 ? vulkan13.synchronization2 :
+            (hasSynchronization2 && synchronization2.synchronization2);
+        caps_.dynamicRendering = api13 ? vulkan13.dynamicRendering :
+            (hasDynamicRendering && dynamicRendering.dynamicRendering);
+        caps_.maintenance4 = api13 ? vulkan13.maintenance4 :
+            (hasMaintenance4 && maintenance4.maintenance4);
         caps_.maintenance5 = hasMaintenance5 && maintenance5.maintenance5;
         caps_.maintenance6 = hasMaintenance6 && maintenance6.maintenance6;
         caps_.presentWait = HasExtension(extensions, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
@@ -409,6 +438,13 @@ private:
             customBorderColor.customBorderColors;
         caps_.customBorderColorWithoutFormat = hasCustomBorderColor &&
             customBorderColor.customBorderColorWithoutFormat;
+        if (char *audit = winehua_vkd3d_capability_audit(
+                physical_, extensions.data(), static_cast<uint32_t>(extensions.size()),
+                &vulkan12, &vulkan13, &caps_.vulkan12Properties, &idProperties)) {
+            caps_.capabilityAudit.assign(audit);
+            free(audit);
+        }
+        caps_.vulkan12Properties.pNext = nullptr;
     }
 
     bool InitInstance(const char*& failure, bool& unsupported)
