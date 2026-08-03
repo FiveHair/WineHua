@@ -84,6 +84,14 @@ static const char *argument_value(int argc, char **argv, const char *name, const
     return fallback;
 }
 
+static int argument_present(int argc, char **argv, const char *name)
+{
+    int i;
+    for (i = 1; i < argc; ++i)
+        if (!strcmp(argv[i], name)) return 1;
+    return 0;
+}
+
 static void json_safe_copy(char *output, size_t output_size, const char *input)
 {
     size_t written = 0;
@@ -326,6 +334,7 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     uint32_t extension_count = 0;
     VkExtensionProperties *extensions = NULL;
     VkPhysicalDeviceFeatures2 features2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    VkPhysicalDeviceVulkan11Features vulkan11 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
     VkPhysicalDeviceVulkan12Features vulkan12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     VkPhysicalDeviceVulkan13Features vulkan13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
     VkPhysicalDeviceRobustness2FeaturesEXT robustness2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT };
@@ -343,6 +352,7 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     VkPhysicalDeviceIDProperties id_properties = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
     void **tail = &features2.pNext;
+    int api11 = state->properties.apiVersion >= VK_API_VERSION_1_1;
     int api12 = state->properties.apiVersion >= VK_API_VERSION_1_2;
     int api13 = state->properties.apiVersion >= VK_API_VERSION_1_3;
     int has_robustness2, has_transform_feedback, has_synchronization2;
@@ -372,6 +382,7 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
 #define APPEND_FEATURE(feature, supported) do { \
     if (supported) { *tail = &(feature); tail = &(feature).pNext; } \
 } while (0)
+    APPEND_FEATURE(vulkan11, api11);
     APPEND_FEATURE(vulkan12, api12);
     APPEND_FEATURE(vulkan13, api13);
     APPEND_FEATURE(robustness2, has_robustness2);
@@ -449,7 +460,7 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
         state->null_descriptor && state->synchronization2 && state->dynamic_rendering &&
         state->maintenance4;
     state->capability_audit = winehua_vkd3d_capability_audit(
-        physical, extensions, extension_count, &vulkan12, &vulkan13,
+        physical, extensions, extension_count, &vulkan11, &vulkan12, &vulkan13,
         &properties12, &id_properties);
     if (!state->capability_audit) {
         free(extensions);
@@ -519,6 +530,7 @@ int main(int argc, char **argv)
     VkDeviceMemory mapped_memory = VK_NULL_HANDLE;
     int exit_code = 1;
     int dxvk26_requirements;
+    int vkd3d_capability;
 
     memset(&state, 0, sizeof(state));
     state.run_id = argument_value(argc, argv, "--run-id", "manual");
@@ -529,6 +541,7 @@ int main(int argc, char **argv)
     state.loader_api = VK_API_VERSION_1_0;
     state.transport_device_create_result = VK_NOT_READY;
     dxvk26_requirements = !strcmp(argument_value(argc, argv, "--dxvk26-requirements", "0"), "1");
+    vkd3d_capability = argument_present(argc, argv, "--vkd3d-capability");
     if (!getenv("VN_DEBUG") || !strstr(getenv("VN_DEBUG"), "vtest") ||
         !getenv("VTEST_SOCKET_NAME") || !getenv("VK_DRIVER_FILES") ||
         !getenv("BOX64_EMULATED_LIBS") ||
@@ -549,7 +562,8 @@ int main(int argc, char **argv)
     application.applicationVersion = 1;
     application.pEngineName = "WineHua";
     application.engineVersion = 1;
-    application.apiVersion = dxvk26_requirements ? VK_API_VERSION_1_3 : VK_API_VERSION_1_1;
+    application.apiVersion = dxvk26_requirements && !vkd3d_capability ?
+        VK_API_VERSION_1_3 : VK_API_VERSION_1_1;
     instance_info.pApplicationInfo = &application;
     result = vkCreateInstance(&instance_info, NULL, &instance);
     if (result != VK_SUCCESS) { failure = "vkCreateInstance failed"; goto cleanup; }
@@ -575,6 +589,12 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     if (state.fallback_detected) { failure = "software Vulkan fallback detected"; goto cleanup; }
+    if (vkd3d_capability) {
+        write_result(&state, "PASS", "vkd3d-capability",
+                     "VKD3D capability evidence collected; no VKD3D runtime was loaded");
+        exit_code = 0;
+        goto cleanup;
+    }
 
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, NULL);
     {

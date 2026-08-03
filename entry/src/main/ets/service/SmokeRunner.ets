@@ -1135,9 +1135,9 @@ export class SmokeRunner {
         executablePath: executablePath,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
           '--result', resultPath,
-          ...(spec.id === 'guest-dxvk26-requirements-x64' ||
-            spec.id === 'guest-vkd3d-capability-x64' ?
+          ...(spec.id === 'guest-dxvk26-requirements-x64' ?
             ['--dxvk26-requirements', '1'] : []),
+          ...(spec.id === 'guest-vkd3d-capability-x64' ? ['--vkd3d-capability'] : []),
           ...(spec.id.indexOf('general') >= 0 ? ['--layout', 'general'] : []),
           ...(spec.id.indexOf('sampled-only') >= 0 ? ['--sampled-only'] : []),
           ...(spec.id.indexOf('idle') >= 0 ? ['--force-idle'] : []),
@@ -1251,6 +1251,7 @@ export class SmokeRunner {
     const windowsResult = `C:\\smoke\\results\\${this.request.runId}\\${spec.id}.json`;
     const isWineVulkan = spec.executable === 'winehua_vulkan_smoke.exe';
     const isVkd3dCapability = spec.id === 'wine-vkd3d-capability-x64';
+    const isVkd3dCapabilityPe = spec.id === 'vkd3d-capability-pe-x64';
     const isDxvk26Requirements = spec.executable === 'winehua_dxvk26_requirements.exe';
     const isGpuDiagnostics = spec.executable === 'winehua_gpu_diagnostics.exe';
     const isWineVulkanPresent = isWineVulkan && spec.id.indexOf('present') >= 0;
@@ -1475,6 +1476,7 @@ export class SmokeRunner {
         windowsExePath: `C:\\smoke\\${spec.architecture}\\${spec.executable}`,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
           '--result', windowsResult, isPresent ? '--present' : '--offscreen',
+          ...(isVkd3dCapabilityPe ? ['--vkd3d-capability'] : []),
           ...(isVkd3dCapability ? ['--capability-audit'] : []),
           ...(isPresent ? ['--seconds', `${spec.seconds}`] : [])],
         environment: smokeEnvironment,

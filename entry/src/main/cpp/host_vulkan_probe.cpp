@@ -370,6 +370,7 @@ private:
         caps_.astc8x8 = formatSupported(VK_FORMAT_ASTC_8x8_UNORM_BLOCK);
 
         VkPhysicalDeviceFeatures2 features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        VkPhysicalDeviceVulkan11Features vulkan11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
         VkPhysicalDeviceVulkan12Features vulkan12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
         VkPhysicalDeviceVulkan13Features vulkan13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         VkPhysicalDeviceRobustness2FeaturesEXT robustness2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
@@ -398,6 +399,7 @@ private:
         const bool hasMaintenance6 = HasExtension(extensions, VK_KHR_MAINTENANCE_6_EXTENSION_NAME);
         const bool hasCustomBorderColor = HasExtension(
             extensions, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
+        append(vulkan11, caps_.properties.apiVersion >= VK_API_VERSION_1_1);
         append(vulkan12, api12);
         append(vulkan13, api13);
         append(robustness2, hasRobustness2);
@@ -440,7 +442,7 @@ private:
             customBorderColor.customBorderColorWithoutFormat;
         if (char *audit = winehua_vkd3d_capability_audit(
                 physical_, extensions.data(), static_cast<uint32_t>(extensions.size()),
-                &vulkan12, &vulkan13, &caps_.vulkan12Properties, &idProperties)) {
+                &vulkan11, &vulkan12, &vulkan13, &caps_.vulkan12Properties, &idProperties)) {
             caps_.capabilityAudit.assign(audit);
             free(audit);
         }

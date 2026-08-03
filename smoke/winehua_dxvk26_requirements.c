@@ -41,7 +41,36 @@ struct probe_state {
     BOOL interactive;
     BOOL initial_vkd3d_tab;
 
+    BOOL api11;
+    BOOL api12;
     BOOL api13;
+    VkPhysicalDeviceVulkan11Features vkd3d_features11;
+    VkPhysicalDeviceVulkan12Features vkd3d_features12;
+    VkPhysicalDeviceVulkan13Features vkd3d_features13;
+    VkPhysicalDeviceVulkan12Properties vkd3d_properties12;
+    BOOL extension_descriptor_indexing;
+    BOOL extension_timeline_semaphore;
+    BOOL extension_sampler_mirror_clamp_to_edge;
+    BOOL extension_create_renderpass2;
+    BOOL extension_separate_depth_stencil_layouts;
+    BOOL extension_bind_memory2;
+    BOOL extension_copy_commands2;
+    BOOL extension_dynamic_rendering;
+    BOOL extension_buffer_device_address;
+    BOOL extension_push_descriptor;
+    BOOL extension_extended_dynamic_state;
+    BOOL extension_extended_dynamic_state2;
+    BOOL extension_image_view_min_lod;
+    BOOL extension_mutable_descriptor_type;
+    BOOL sampler_mirror_clamp_to_edge;
+    BOOL shader_draw_parameters;
+    BOOL create_renderpass2;
+    BOOL separate_depth_stencil_layouts;
+    BOOL bind_memory2;
+    BOOL copy_commands2;
+    BOOL push_descriptor;
+    BOOL extended_dynamic_state;
+    BOOL extended_dynamic_state2;
     BOOL robust_buffer_access2;
     BOOL robust_image_access2;
     BOOL null_descriptor;
@@ -146,17 +175,72 @@ static BOOL argument_present(int argc, char **argv, const char *name)
     return FALSE;
 }
 
-static BOOL vkd3d_policy_supported(const struct probe_state *state)
+static BOOL descriptor_indexing_features_complete(const struct probe_state *state)
 {
-    return state->api13 && state->core.robustBufferAccess &&
-        state->robust_buffer_access2 && state->robust_image_access2 &&
-        state->null_descriptor && state->descriptor_indexing &&
-        state->timeline_semaphore && state->synchronization2 &&
-        state->dynamic_rendering && state->maintenance4 &&
-        state->buffer_device_address &&
-        state->max_descriptor_set_update_after_bind_sampled_images >= 1000000u &&
-        state->max_descriptor_set_update_after_bind_storage_images >= 1000000u &&
-        state->max_descriptor_set_update_after_bind_storage_buffers >= 1000000u;
+    const VkPhysicalDeviceVulkan12Features *features = &state->vkd3d_features12;
+
+    return state->extension_descriptor_indexing &&
+        features->shaderInputAttachmentArrayDynamicIndexing &&
+        features->shaderUniformTexelBufferArrayDynamicIndexing &&
+        features->shaderStorageTexelBufferArrayDynamicIndexing &&
+        features->shaderUniformBufferArrayNonUniformIndexing &&
+        features->shaderSampledImageArrayNonUniformIndexing &&
+        features->shaderStorageBufferArrayNonUniformIndexing &&
+        features->shaderStorageImageArrayNonUniformIndexing &&
+        features->shaderInputAttachmentArrayNonUniformIndexing &&
+        features->shaderUniformTexelBufferArrayNonUniformIndexing &&
+        features->shaderStorageTexelBufferArrayNonUniformIndexing &&
+        features->descriptorBindingUniformBufferUpdateAfterBind &&
+        features->descriptorBindingSampledImageUpdateAfterBind &&
+        features->descriptorBindingStorageImageUpdateAfterBind &&
+        features->descriptorBindingStorageBufferUpdateAfterBind &&
+        features->descriptorBindingUniformTexelBufferUpdateAfterBind &&
+        features->descriptorBindingStorageTexelBufferUpdateAfterBind &&
+        features->descriptorBindingUpdateUnusedWhilePending &&
+        features->descriptorBindingPartiallyBound &&
+        features->descriptorBindingVariableDescriptorCount &&
+        features->runtimeDescriptorArray;
+}
+
+static BOOL update_after_bind_limits_complete(const struct probe_state *state)
+{
+    const VkPhysicalDeviceVulkan12Properties *properties = &state->vkd3d_properties12;
+
+    return properties->maxDescriptorSetUpdateAfterBindSamplers >= 1000000u &&
+        properties->maxDescriptorSetUpdateAfterBindStorageBuffers >= 1000000u &&
+        properties->maxDescriptorSetUpdateAfterBindSampledImages >= 1000000u &&
+        properties->maxDescriptorSetUpdateAfterBindStorageImages >= 1000000u &&
+        properties->maxDescriptorSetUpdateAfterBindInputAttachments >= 1000000u;
+}
+
+static BOOL vkd3d26_supported(const struct probe_state *state)
+{
+    return state->api11 && descriptor_indexing_features_complete(state) &&
+        update_after_bind_limits_complete(state) && state->timeline_semaphore &&
+        state->extension_sampler_mirror_clamp_to_edge && state->robust_buffer_access2 &&
+        state->robust_image_access2 && state->null_descriptor &&
+        state->separate_depth_stencil_layouts && state->bind_memory2 &&
+        state->create_renderpass2 && state->copy_commands2;
+}
+
+static BOOL vkd3d28_supported(const struct probe_state *state)
+{
+    return state->api11 && descriptor_indexing_features_complete(state) &&
+        update_after_bind_limits_complete(state) && state->timeline_semaphore &&
+        state->extension_sampler_mirror_clamp_to_edge && state->robust_buffer_access2 &&
+        state->robust_image_access2 && state->null_descriptor &&
+        state->separate_depth_stencil_layouts && state->bind_memory2 &&
+        state->copy_commands2 && state->dynamic_rendering &&
+        state->extended_dynamic_state && state->extended_dynamic_state2 &&
+        state->buffer_device_address && state->push_descriptor;
+}
+
+static BOOL vkd3d29_supported(const struct probe_state *state)
+{
+    return state->api13 && descriptor_indexing_features_complete(state) &&
+        update_after_bind_limits_complete(state) && state->sampler_mirror_clamp_to_edge &&
+        state->shader_draw_parameters && state->robust_buffer_access2 &&
+        state->robust_image_access2 && state->null_descriptor && state->push_descriptor;
 }
 
 static BOOL dxvk_transport_supported(const struct probe_state *state)
@@ -189,6 +273,71 @@ static void append_uab_limit(char *buffer, size_t buffer_size, const char *name,
     append_report_text(buffer, buffer_size, "[%s] %s: %u%s\r\n",
                        passed ? "OK" : "FAIL", name, value,
                        passed ? "" : " - below Gate A minimum 1000000");
+}
+
+static void append_descriptor_indexing_feature_results(char *buffer, size_t buffer_size,
+                                                       const struct probe_state *state)
+{
+    const VkPhysicalDeviceVulkan12Features *features = &state->vkd3d_features12;
+
+    append_feature_result(buffer, buffer_size, "inputAttachment dynamic indexing",
+                          features->shaderInputAttachmentArrayDynamicIndexing,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "uniform texel dynamic indexing",
+                          features->shaderUniformTexelBufferArrayDynamicIndexing,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "storage texel dynamic indexing",
+                          features->shaderStorageTexelBufferArrayDynamicIndexing,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "uniform buffer non-uniform indexing",
+                          features->shaderUniformBufferArrayNonUniformIndexing,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "sampled image non-uniform indexing",
+                          features->shaderSampledImageArrayNonUniformIndexing,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "storage buffer non-uniform indexing",
+                          features->shaderStorageBufferArrayNonUniformIndexing,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "storage image non-uniform indexing",
+                          features->shaderStorageImageArrayNonUniformIndexing,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "input attachment non-uniform indexing",
+                          features->shaderInputAttachmentArrayNonUniformIndexing,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "uniform texel non-uniform indexing",
+                          features->shaderUniformTexelBufferArrayNonUniformIndexing,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "storage texel non-uniform indexing",
+                          features->shaderStorageTexelBufferArrayNonUniformIndexing,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "uniform buffer UpdateAfterBind",
+                          features->descriptorBindingUniformBufferUpdateAfterBind,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "sampled image UpdateAfterBind",
+                          features->descriptorBindingSampledImageUpdateAfterBind,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "storage image UpdateAfterBind",
+                          features->descriptorBindingStorageImageUpdateAfterBind,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "storage buffer UpdateAfterBind",
+                          features->descriptorBindingStorageBufferUpdateAfterBind,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "uniform texel UpdateAfterBind",
+                          features->descriptorBindingUniformTexelBufferUpdateAfterBind,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "storage texel UpdateAfterBind",
+                          features->descriptorBindingStorageTexelBufferUpdateAfterBind,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "UpdateUnusedWhilePending",
+                          features->descriptorBindingUpdateUnusedWhilePending,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "PartiallyBound", features->descriptorBindingPartiallyBound,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "VariableDescriptorCount",
+                          features->descriptorBindingVariableDescriptorCount,
+                          "descriptor indexing field is disabled");
+    append_feature_result(buffer, buffer_size, "runtimeDescriptorArray", features->runtimeDescriptorArray,
+                          "descriptor indexing field is disabled");
 }
 
 struct capability_report_window {
@@ -294,9 +443,12 @@ static void show_capability_report(const struct probe_state *state,
     char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE + 16];
     char api_version[32];
     char dxvk_report[4096];
-    char vkd3d_report[4096];
+    char vkd3d_report[16384];
     BOOL dxvk_supported = dxvk_transport_supported(state);
-    BOOL vkd3d_supported = vkd3d_policy_supported(state);
+    BOOL vkd3d26 = vkd3d26_supported(state);
+    BOOL vkd3d28 = vkd3d28_supported(state);
+    BOOL vkd3d29 = vkd3d29_supported(state);
+    BOOL manual_evidence_only = state->interactive;
 
     json_safe_copy(device_name, sizeof(device_name), state->properties.deviceName);
     version_text(state->properties.apiVersion, api_version, sizeof(api_version));
@@ -328,64 +480,121 @@ static void show_capability_report(const struct probe_state *state,
     append_feature_result(dxvk_report, sizeof(dxvk_report), "maintenance4",
                           state->maintenance4, "Vulkan 1.3 feature is unavailable");
     append_report_text(dxvk_report, sizeof(dxvk_report), "\r\nRuntime checks\r\n");
-    append_feature_result(dxvk_report, sizeof(dxvk_report), "Vulkan device creation",
-                          state->transport_device_create_ok,
-                          "required DXVK transport features could not create a device");
-    append_feature_result(dxvk_report, sizeof(dxvk_report), "QueueSubmit2 timeline round trip",
-                          state->timeline_round_trip_ok,
-                          "timeline submit, wait, or counter verification failed");
-    append_report_text(dxvk_report, sizeof(dxvk_report),
-                       "\r\nDXVK support on this PE path: %s\r\n"
-                       "This probe does not load or replace DXVK DLLs.\r\n",
-                       dxvk_supported ? "SUPPORTED" : "UNSUPPORTED");
+    if (manual_evidence_only) {
+        append_report_text(dxvk_report, sizeof(dxvk_report),
+                           "NOT RUN in the interactive report.\r\n"
+                           "The automated DXVK suite owns device creation and QueueSubmit2 "
+                           "round-trip validation; this prevents a failed transport from "
+                           "hiding the capability window.\r\n\r\n"
+                           "DXVK result on this PE path: CAPABILITY EVIDENCE COLLECTED "
+                           "(not an integration verdict)\r\n"
+                           "This probe does not load or replace DXVK DLLs.\r\n");
+    } else {
+        append_feature_result(dxvk_report, sizeof(dxvk_report), "Vulkan device creation",
+                              state->transport_device_create_ok,
+                              "required DXVK transport features could not create a device");
+        append_feature_result(dxvk_report, sizeof(dxvk_report), "QueueSubmit2 timeline round trip",
+                              state->timeline_round_trip_ok,
+                              "timeline submit, wait, or counter verification failed");
+        append_report_text(dxvk_report, sizeof(dxvk_report),
+                           "\r\nDXVK support on this PE path: %s\r\n"
+                           "This probe does not load or replace DXVK DLLs.\r\n",
+                           dxvk_supported ? "SUPPORTED" : "UNSUPPORTED");
+    }
 
     vkd3d_report[0] = 0;
     append_report_text(vkd3d_report, sizeof(vkd3d_report),
-                       "VKD3D Gate A capability\r\n\r\n"
+                       "VKD3D capability evidence\r\n\r\n"
                        "Scope: Windows PE -> winevulkan -> Venus\r\n"
                        "vkd3d-proton loaded: no\r\n"
                        "Adapter: %s\r\nVulkan API: %s\r\n\r\n"
-                       "Gate A feature requirements\r\n",
+                       "Version verdicts from upstream driver requirements\r\n",
                        device_name[0] ? device_name : "unavailable", api_version);
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "Vulkan API 1.3", state->api13,
-                          "adapter exposes Vulkan below 1.3");
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "core robustBufferAccess",
-                          state->core.robustBufferAccess, "core feature is disabled");
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "robustBufferAccess2",
-                          state->robust_buffer_access2, "VK_EXT_robustness2 feature is unavailable");
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "robustImageAccess2",
-                          state->robust_image_access2, "VK_EXT_robustness2 feature is unavailable");
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "nullDescriptor",
-                          state->null_descriptor, "VK_EXT_robustness2 feature is unavailable");
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "descriptorIndexing",
-                          state->descriptor_indexing, "Vulkan 1.2 feature is unavailable");
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "bufferDeviceAddress",
-                          state->buffer_device_address, "Vulkan 1.2 feature is unavailable");
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "timelineSemaphore",
-                          state->timeline_semaphore, "Vulkan 1.2 feature is unavailable");
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "synchronization2",
-                          state->synchronization2, "Vulkan 1.3 feature is unavailable");
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "dynamicRendering",
-                          state->dynamic_rendering, "Vulkan 1.3 feature is unavailable");
-    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "maintenance4",
-                          state->maintenance4, "Vulkan 1.3 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "vkd3d-proton 2.6 (Vulkan 1.1)",
+                          vkd3d26, "one or more mandatory 2.6 rows below failed");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "vkd3d-proton 2.8 (Vulkan 1.1)",
+                          vkd3d28, "one or more mandatory 2.8 rows below failed");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "vkd3d-proton 2.9 Modern (Vulkan 1.3)",
+                          vkd3d29, "one or more mandatory 2.9 rows below failed");
     append_report_text(vkd3d_report, sizeof(vkd3d_report),
-                       "\r\nUpdateAfterBind per-set limits\r\n");
-    append_uab_limit(vkd3d_report, sizeof(vkd3d_report), "Sampled images",
-                     state->max_descriptor_set_update_after_bind_sampled_images);
-    append_uab_limit(vkd3d_report, sizeof(vkd3d_report), "Storage images",
-                     state->max_descriptor_set_update_after_bind_storage_images);
+                       "\r\nAPI baseline\r\n");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "Vulkan API 1.1 (2.6 / 2.8)",
+                          state->api11, "adapter exposes Vulkan below 1.1");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "Vulkan API 1.3 (2.9 Modern only)",
+                          state->api13, "adapter exposes Vulkan below 1.3");
+    append_report_text(vkd3d_report, sizeof(vkd3d_report),
+                       "\r\nMandatory descriptor indexing features (2.6 / 2.8 / 2.9)\r\n");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report),
+                          "VK_EXT_descriptor_indexing or Vulkan 1.2", state->extension_descriptor_indexing,
+                          "neither the extension nor Vulkan 1.2 core capability is exposed");
+    append_descriptor_indexing_feature_results(vkd3d_report, sizeof(vkd3d_report), state);
+    append_report_text(vkd3d_report, sizeof(vkd3d_report),
+                       "\r\nMandatory UpdateAfterBind per-set limits (minimum 1000000; UniformBuffer excluded)\r\n");
+    append_uab_limit(vkd3d_report, sizeof(vkd3d_report), "Samplers",
+                     state->vkd3d_properties12.maxDescriptorSetUpdateAfterBindSamplers);
     append_uab_limit(vkd3d_report, sizeof(vkd3d_report), "Storage buffers",
-                     state->max_descriptor_set_update_after_bind_storage_buffers);
+                     state->vkd3d_properties12.maxDescriptorSetUpdateAfterBindStorageBuffers);
+    append_uab_limit(vkd3d_report, sizeof(vkd3d_report), "Sampled images",
+                     state->vkd3d_properties12.maxDescriptorSetUpdateAfterBindSampledImages);
+    append_uab_limit(vkd3d_report, sizeof(vkd3d_report), "Storage images",
+                     state->vkd3d_properties12.maxDescriptorSetUpdateAfterBindStorageImages);
+    append_uab_limit(vkd3d_report, sizeof(vkd3d_report), "Input attachments",
+                     state->vkd3d_properties12.maxDescriptorSetUpdateAfterBindInputAttachments);
     append_report_text(vkd3d_report, sizeof(vkd3d_report),
                        "Observed descriptors in all pools: %u\r\n\r\n"
-                       "VKD3D Gate A on this PE path: %s\r\n"
-                       "Full approval requires matching Host, Guest, and Wine Vulkan probes.\r\n",
-                       state->max_update_after_bind_descriptors_in_all_pools,
-                       vkd3d_supported ? "SUPPORTED" : "UNSUPPORTED");
-    printf("DXVK 2.6.2: %s\nVKD3D Gate A: %s\n",
-           dxvk_supported ? "SUPPORTED" : "UNSUPPORTED",
-           vkd3d_supported ? "SUPPORTED" : "UNSUPPORTED");
+                       "Mandatory extension and feature inventory\r\n",
+                       state->vkd3d_properties12.maxUpdateAfterBindDescriptorsInAllPools);
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "timelineSemaphore (VK_KHR / core 1.2)",
+                          state->timeline_semaphore, "required timeline semaphore feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "VK_KHR_sampler_mirror_clamp_to_edge (2.6 / 2.8)",
+                          state->extension_sampler_mirror_clamp_to_edge,
+                          "required Legacy extension is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "samplerMirrorClampToEdge feature (2.9 Modern)",
+                          state->sampler_mirror_clamp_to_edge,
+                          "required Modern core feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "VK_EXT_robustness2 robustBufferAccess2",
+                          state->robust_buffer_access2, "required robustness2 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "VK_EXT_robustness2 robustImageAccess2",
+                          state->robust_image_access2, "required robustness2 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "VK_EXT_robustness2 nullDescriptor",
+                          state->null_descriptor, "required robustness2 feature is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "separate depth/stencil layouts (VK_KHR / core 1.2)",
+                          state->separate_depth_stencil_layouts, "required layout capability is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "bind memory2 (VK_KHR / core 1.1)",
+                          state->bind_memory2, "required memory-binding capability is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "create renderpass2 (2.6; VK_KHR / core 1.2)",
+                          state->create_renderpass2, "required by vkd3d-proton 2.6");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "copy commands2 (VK_KHR / core 1.3)",
+                          state->copy_commands2, "required copy-commands capability is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "dynamicRendering (2.8; VK_KHR / core 1.3)",
+                          state->dynamic_rendering, "required by vkd3d-proton 2.8");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "VK_EXT_extended_dynamic_state (2.8)",
+                          state->extended_dynamic_state, "required by vkd3d-proton 2.8");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "VK_EXT_extended_dynamic_state2 (2.8)",
+                          state->extended_dynamic_state2, "required by vkd3d-proton 2.8");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "bufferDeviceAddress (2.8; VK_KHR / core 1.2)",
+                          state->buffer_device_address, "required by vkd3d-proton 2.8");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "VK_KHR_push_descriptor (2.8 / 2.9)",
+                          state->push_descriptor, "required push descriptor extension is unavailable");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "shaderDrawParameters (2.9 Modern)",
+                          state->shader_draw_parameters, "required by vkd3d-proton 2.9");
+    append_report_text(vkd3d_report, sizeof(vkd3d_report),
+                       "\r\nRecommended, not gating\r\n");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report), "VK_EXT_image_view_min_lod",
+                          state->extension_image_view_min_lod, "upstream recommends it for optimal behavior");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report),
+                          "VK_EXT_mutable_descriptor_type or VK_VALVE alias",
+                          state->extension_mutable_descriptor_type,
+                          "upstream recommends it; it is not mandatory");
+    append_report_text(vkd3d_report, sizeof(vkd3d_report),
+                       "\r\nThis is Windows PE path evidence only. It does not load VKD3D DLLs.\r\n"
+                       "Integration remains blocked unless Host, Guest, and Wine probes match this device capability.\r\n");
+    printf("DXVK 2.6.2: %s\nVKD3D Proton 2.6: %s\nVKD3D Proton 2.8: %s\nVKD3D Proton 2.9: %s\n",
+           manual_evidence_only ? "EVIDENCE ONLY" :
+               (dxvk_supported ? "SUPPORTED" : "UNSUPPORTED"),
+           vkd3d26 ? "SUPPORTED" : "UNSUPPORTED",
+           vkd3d28 ? "SUPPORTED" : "UNSUPPORTED",
+           vkd3d29 ? "SUPPORTED" : "UNSUPPORTED");
     fflush(stdout);
 
     common_controls.dwSize = sizeof(common_controls);
@@ -547,7 +756,10 @@ static void write_result(const struct probe_state *state, const char *status,
             "  },\n"
             "  \"vkd3dCapability\": {\"scope\":\"windows-pe-vulkan-path\","
             "\"vkd3dLoaded\":false,\"requiredUpdateAfterBindPerSet\":1000000,"
-            "\"supportedOnThisPath\":%s},\n"
+            "\"profiles\":{"
+            "\"vkd3dProton26\":{\"minimumVulkanApi\":\"1.1\",\"supportedOnThisPath\":%s},"
+            "\"vkd3dProton28\":{\"minimumVulkanApi\":\"1.1\",\"supportedOnThisPath\":%s},"
+            "\"vkd3dProton29Modern\":{\"minimumVulkanApi\":\"1.3\",\"supportedOnThisPath\":%s}}},\n"
             "  \"capabilityAudit\":%s,\n"
             "  \"metrics\": {\"cpuReadBytes\":0,\"cpuUploadBytes\":0,"
             "\"gpuCopyCount\":0,\"queueSubmitCount\":0,"
@@ -604,7 +816,8 @@ static void write_result(const struct probe_state *state, const char *status,
             state->transport_device_create_ok && state->timeline_round_trip_ok ? "PASS" : "FAIL",
             state->transport_device_create_ok && state->timeline_round_trip_ok
                 ? "D3D11_FEATURE_PROBE_PENDING" : "BLOCKED",
-            bool_text(vkd3d_policy_supported(state)),
+            bool_text(vkd3d26_supported(state)), bool_text(vkd3d28_supported(state)),
+            bool_text(vkd3d29_supported(state)),
             state->capability_audit ? state->capability_audit : "{}",
             bool_text(state->fallback_detected),
             (unsigned long long)(now_ms() - state->started_ms));
@@ -643,25 +856,45 @@ static BOOL query_requirements(VkPhysicalDevice physical, struct probe_state *st
     uint32_t count = 0;
     VkExtensionProperties *extensions = NULL;
     VkPhysicalDeviceFeatures2 features2 = { 0 };
+    VkPhysicalDeviceVulkan11Features vk11 = { 0 };
     VkPhysicalDeviceVulkan12Features vk12 = { 0 };
     VkPhysicalDeviceVulkan13Features vk13 = { 0 };
+    VkPhysicalDeviceDescriptorIndexingFeatures descriptor_indexing = { 0 };
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline_semaphore = { 0 };
+    VkPhysicalDeviceBufferDeviceAddressFeatures buffer_device_address = { 0 };
+    VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures separate_depth_stencil = { 0 };
+    VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering = { 0 };
     VkPhysicalDeviceRobustness2FeaturesEXT robustness2 = { 0 };
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extended_dynamic_state = { 0 };
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT extended_dynamic_state2 = { 0 };
     VkPhysicalDeviceTransformFeedbackFeaturesEXT transform_feedback = { 0 };
     VkPhysicalDeviceProperties2 properties2 = { 0 };
     VkPhysicalDeviceVulkan12Properties properties12 = { 0 };
+    VkPhysicalDeviceDescriptorIndexingProperties descriptor_properties = { 0 };
     VkPhysicalDeviceIDProperties id_properties = { 0 };
     void **tail = &features2.pNext;
-    BOOL api12 = state->properties.apiVersion >= VK_API_VERSION_1_2;
     BOOL has_robustness2;
     BOOL has_transform_feedback;
 
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    vk11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     vk12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     vk13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    descriptor_indexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    timeline_semaphore.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    buffer_device_address.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    separate_depth_stencil.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES;
+    dynamic_rendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
     robustness2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
+    extended_dynamic_state.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
+    extended_dynamic_state2.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
     transform_feedback.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT;
     properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     properties12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+    descriptor_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES;
     id_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
 
     if (vkEnumerateDeviceExtensionProperties(physical, NULL, &count, NULL) != VK_SUCCESS)
@@ -675,36 +908,208 @@ static BOOL query_requirements(VkPhysicalDevice physical, struct probe_state *st
     has_robustness2 = has_extension(extensions, count, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
     has_transform_feedback = has_extension(extensions, count,
                                             VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
+    state->extension_descriptor_indexing = state->api12 ||
+        has_extension(extensions, count, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+    state->extension_timeline_semaphore = state->api12 ||
+        has_extension(extensions, count, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+    state->extension_sampler_mirror_clamp_to_edge = state->api12 ||
+        has_extension(extensions, count, VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
+    state->extension_create_renderpass2 = state->api12 ||
+        has_extension(extensions, count, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME);
+    state->extension_separate_depth_stencil_layouts = state->api12 ||
+        has_extension(extensions, count, VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME);
+    state->extension_bind_memory2 = state->api11 ||
+        has_extension(extensions, count, VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+    state->extension_copy_commands2 = state->api13 ||
+        has_extension(extensions, count, VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME);
+    state->extension_dynamic_rendering = state->api13 ||
+        has_extension(extensions, count, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+    state->extension_buffer_device_address = state->api12 ||
+        has_extension(extensions, count, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+    state->extension_push_descriptor =
+        has_extension(extensions, count, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    state->extension_extended_dynamic_state =
+        has_extension(extensions, count, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+    state->extension_extended_dynamic_state2 =
+        has_extension(extensions, count, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
+    state->extension_image_view_min_lod =
+        has_extension(extensions, count, VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
+    state->extension_mutable_descriptor_type =
+        has_extension(extensions, count, "VK_EXT_mutable_descriptor_type") ||
+        has_extension(extensions, count, "VK_VALVE_mutable_descriptor_type");
 #define APPEND_FEATURE(feature, enabled) do { \
     if (enabled) { *tail = &(feature); tail = &(feature).pNext; } \
 } while (0)
-    APPEND_FEATURE(vk12, api12);
+    APPEND_FEATURE(vk11, state->api11);
+    APPEND_FEATURE(vk12, state->api12);
     APPEND_FEATURE(vk13, state->api13);
+    APPEND_FEATURE(descriptor_indexing, !state->api12 && state->extension_descriptor_indexing);
+    APPEND_FEATURE(timeline_semaphore, !state->api12 && state->extension_timeline_semaphore);
+    APPEND_FEATURE(buffer_device_address, !state->api12 && state->extension_buffer_device_address);
+    APPEND_FEATURE(separate_depth_stencil,
+                   !state->api12 && state->extension_separate_depth_stencil_layouts);
+    APPEND_FEATURE(dynamic_rendering, !state->api13 && state->extension_dynamic_rendering);
     APPEND_FEATURE(robustness2, has_robustness2);
+    APPEND_FEATURE(extended_dynamic_state, state->extension_extended_dynamic_state);
+    APPEND_FEATURE(extended_dynamic_state2, state->extension_extended_dynamic_state2);
     APPEND_FEATURE(transform_feedback, has_transform_feedback);
 #undef APPEND_FEATURE
     vkGetPhysicalDeviceFeatures2(physical, &features2);
-    properties2.pNext = &properties12;
-    properties12.pNext = &id_properties;
+    if (state->api12) {
+        properties2.pNext = &properties12;
+        properties12.pNext = &id_properties;
+    } else if (state->extension_descriptor_indexing) {
+        properties2.pNext = &descriptor_properties;
+        descriptor_properties.pNext = &id_properties;
+    } else {
+        properties2.pNext = &id_properties;
+    }
     vkGetPhysicalDeviceProperties2(physical, &properties2);
+
+    state->vkd3d_features11 = vk11;
+    state->vkd3d_features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    if (state->api12) {
+        state->vkd3d_features12 = vk12;
+        state->vkd3d_properties12 = properties12;
+    } else {
+        VkPhysicalDeviceVulkan12Features *features = &state->vkd3d_features12;
+        VkPhysicalDeviceVulkan12Properties *properties = &state->vkd3d_properties12;
+
+        features->descriptorIndexing = state->extension_descriptor_indexing;
+        features->shaderInputAttachmentArrayDynamicIndexing =
+            descriptor_indexing.shaderInputAttachmentArrayDynamicIndexing;
+        features->shaderUniformTexelBufferArrayDynamicIndexing =
+            descriptor_indexing.shaderUniformTexelBufferArrayDynamicIndexing;
+        features->shaderStorageTexelBufferArrayDynamicIndexing =
+            descriptor_indexing.shaderStorageTexelBufferArrayDynamicIndexing;
+        features->shaderUniformBufferArrayNonUniformIndexing =
+            descriptor_indexing.shaderUniformBufferArrayNonUniformIndexing;
+        features->shaderSampledImageArrayNonUniformIndexing =
+            descriptor_indexing.shaderSampledImageArrayNonUniformIndexing;
+        features->shaderStorageBufferArrayNonUniformIndexing =
+            descriptor_indexing.shaderStorageBufferArrayNonUniformIndexing;
+        features->shaderStorageImageArrayNonUniformIndexing =
+            descriptor_indexing.shaderStorageImageArrayNonUniformIndexing;
+        features->shaderInputAttachmentArrayNonUniformIndexing =
+            descriptor_indexing.shaderInputAttachmentArrayNonUniformIndexing;
+        features->shaderUniformTexelBufferArrayNonUniformIndexing =
+            descriptor_indexing.shaderUniformTexelBufferArrayNonUniformIndexing;
+        features->shaderStorageTexelBufferArrayNonUniformIndexing =
+            descriptor_indexing.shaderStorageTexelBufferArrayNonUniformIndexing;
+        features->descriptorBindingUniformBufferUpdateAfterBind =
+            descriptor_indexing.descriptorBindingUniformBufferUpdateAfterBind;
+        features->descriptorBindingSampledImageUpdateAfterBind =
+            descriptor_indexing.descriptorBindingSampledImageUpdateAfterBind;
+        features->descriptorBindingStorageImageUpdateAfterBind =
+            descriptor_indexing.descriptorBindingStorageImageUpdateAfterBind;
+        features->descriptorBindingStorageBufferUpdateAfterBind =
+            descriptor_indexing.descriptorBindingStorageBufferUpdateAfterBind;
+        features->descriptorBindingUniformTexelBufferUpdateAfterBind =
+            descriptor_indexing.descriptorBindingUniformTexelBufferUpdateAfterBind;
+        features->descriptorBindingStorageTexelBufferUpdateAfterBind =
+            descriptor_indexing.descriptorBindingStorageTexelBufferUpdateAfterBind;
+        features->descriptorBindingUpdateUnusedWhilePending =
+            descriptor_indexing.descriptorBindingUpdateUnusedWhilePending;
+        features->descriptorBindingPartiallyBound = descriptor_indexing.descriptorBindingPartiallyBound;
+        features->descriptorBindingVariableDescriptorCount =
+            descriptor_indexing.descriptorBindingVariableDescriptorCount;
+        features->runtimeDescriptorArray = descriptor_indexing.runtimeDescriptorArray;
+        features->samplerMirrorClampToEdge = state->extension_sampler_mirror_clamp_to_edge;
+        features->timelineSemaphore = timeline_semaphore.timelineSemaphore;
+        features->bufferDeviceAddress = buffer_device_address.bufferDeviceAddress;
+        features->bufferDeviceAddressCaptureReplay =
+            buffer_device_address.bufferDeviceAddressCaptureReplay;
+        features->bufferDeviceAddressMultiDevice =
+            buffer_device_address.bufferDeviceAddressMultiDevice;
+        features->separateDepthStencilLayouts = separate_depth_stencil.separateDepthStencilLayouts;
+        properties->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+        properties->maxUpdateAfterBindDescriptorsInAllPools =
+            descriptor_properties.maxUpdateAfterBindDescriptorsInAllPools;
+        properties->maxPerStageDescriptorUpdateAfterBindSamplers =
+            descriptor_properties.maxPerStageDescriptorUpdateAfterBindSamplers;
+        properties->maxPerStageDescriptorUpdateAfterBindUniformBuffers =
+            descriptor_properties.maxPerStageDescriptorUpdateAfterBindUniformBuffers;
+        properties->maxPerStageDescriptorUpdateAfterBindStorageBuffers =
+            descriptor_properties.maxPerStageDescriptorUpdateAfterBindStorageBuffers;
+        properties->maxPerStageDescriptorUpdateAfterBindSampledImages =
+            descriptor_properties.maxPerStageDescriptorUpdateAfterBindSampledImages;
+        properties->maxPerStageDescriptorUpdateAfterBindStorageImages =
+            descriptor_properties.maxPerStageDescriptorUpdateAfterBindStorageImages;
+        properties->maxPerStageDescriptorUpdateAfterBindInputAttachments =
+            descriptor_properties.maxPerStageDescriptorUpdateAfterBindInputAttachments;
+        properties->maxPerStageUpdateAfterBindResources =
+            descriptor_properties.maxPerStageUpdateAfterBindResources;
+        properties->maxDescriptorSetUpdateAfterBindSamplers =
+            descriptor_properties.maxDescriptorSetUpdateAfterBindSamplers;
+        properties->maxDescriptorSetUpdateAfterBindUniformBuffers =
+            descriptor_properties.maxDescriptorSetUpdateAfterBindUniformBuffers;
+        properties->maxDescriptorSetUpdateAfterBindUniformBuffersDynamic =
+            descriptor_properties.maxDescriptorSetUpdateAfterBindUniformBuffersDynamic;
+        properties->maxDescriptorSetUpdateAfterBindStorageBuffers =
+            descriptor_properties.maxDescriptorSetUpdateAfterBindStorageBuffers;
+        properties->maxDescriptorSetUpdateAfterBindStorageBuffersDynamic =
+            descriptor_properties.maxDescriptorSetUpdateAfterBindStorageBuffersDynamic;
+        properties->maxDescriptorSetUpdateAfterBindSampledImages =
+            descriptor_properties.maxDescriptorSetUpdateAfterBindSampledImages;
+        properties->maxDescriptorSetUpdateAfterBindStorageImages =
+            descriptor_properties.maxDescriptorSetUpdateAfterBindStorageImages;
+        properties->maxDescriptorSetUpdateAfterBindInputAttachments =
+            descriptor_properties.maxDescriptorSetUpdateAfterBindInputAttachments;
+        properties->shaderUniformBufferArrayNonUniformIndexingNative =
+            descriptor_properties.shaderUniformBufferArrayNonUniformIndexingNative;
+        properties->shaderSampledImageArrayNonUniformIndexingNative =
+            descriptor_properties.shaderSampledImageArrayNonUniformIndexingNative;
+        properties->shaderStorageBufferArrayNonUniformIndexingNative =
+            descriptor_properties.shaderStorageBufferArrayNonUniformIndexingNative;
+        properties->shaderStorageImageArrayNonUniformIndexingNative =
+            descriptor_properties.shaderStorageImageArrayNonUniformIndexingNative;
+        properties->shaderInputAttachmentArrayNonUniformIndexingNative =
+            descriptor_properties.shaderInputAttachmentArrayNonUniformIndexingNative;
+        properties->robustBufferAccessUpdateAfterBind =
+            descriptor_properties.robustBufferAccessUpdateAfterBind;
+        properties->quadDivergentImplicitLod = descriptor_properties.quadDivergentImplicitLod;
+    }
+    state->vkd3d_features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    if (state->api13) {
+        state->vkd3d_features13 = vk13;
+    } else {
+        state->vkd3d_features13.dynamicRendering = dynamic_rendering.dynamicRendering;
+    }
 
     state->robust_buffer_access2 = has_robustness2 && robustness2.robustBufferAccess2;
     state->robust_image_access2 = has_robustness2 && robustness2.robustImageAccess2;
     state->null_descriptor = has_robustness2 && robustness2.nullDescriptor;
-    state->synchronization2 = state->api13 && vk13.synchronization2;
-    state->dynamic_rendering = state->api13 && vk13.dynamicRendering;
-    state->maintenance4 = state->api13 && vk13.maintenance4;
-    state->timeline_semaphore = api12 && vk12.timelineSemaphore;
-    state->buffer_device_address = api12 && vk12.bufferDeviceAddress;
-    state->descriptor_indexing = api12 && vk12.descriptorIndexing;
+    state->synchronization2 = state->api13 && state->vkd3d_features13.synchronization2;
+    state->dynamic_rendering = state->extension_dynamic_rendering &&
+        state->vkd3d_features13.dynamicRendering;
+    state->maintenance4 = state->api13 && state->vkd3d_features13.maintenance4;
+    state->timeline_semaphore = state->extension_timeline_semaphore &&
+        state->vkd3d_features12.timelineSemaphore;
+    state->buffer_device_address = state->extension_buffer_device_address &&
+        state->vkd3d_features12.bufferDeviceAddress;
+    state->descriptor_indexing = state->extension_descriptor_indexing &&
+        state->vkd3d_features12.descriptorIndexing;
+    state->sampler_mirror_clamp_to_edge = state->extension_sampler_mirror_clamp_to_edge &&
+        (!state->api12 || state->vkd3d_features12.samplerMirrorClampToEdge);
+    state->shader_draw_parameters = state->api11 && state->vkd3d_features11.shaderDrawParameters;
+    state->create_renderpass2 = state->extension_create_renderpass2;
+    state->separate_depth_stencil_layouts = state->extension_separate_depth_stencil_layouts &&
+        (!state->api12 || state->vkd3d_features12.separateDepthStencilLayouts);
+    state->bind_memory2 = state->extension_bind_memory2;
+    state->copy_commands2 = state->extension_copy_commands2;
+    state->push_descriptor = state->extension_push_descriptor;
+    state->extended_dynamic_state = state->extension_extended_dynamic_state &&
+        extended_dynamic_state.extendedDynamicState;
+    state->extended_dynamic_state2 = state->extension_extended_dynamic_state2 &&
+        extended_dynamic_state2.extendedDynamicState2;
     state->max_update_after_bind_descriptors_in_all_pools =
-        properties12.maxUpdateAfterBindDescriptorsInAllPools;
+        state->vkd3d_properties12.maxUpdateAfterBindDescriptorsInAllPools;
     state->max_descriptor_set_update_after_bind_sampled_images =
-        properties12.maxDescriptorSetUpdateAfterBindSampledImages;
+        state->vkd3d_properties12.maxDescriptorSetUpdateAfterBindSampledImages;
     state->max_descriptor_set_update_after_bind_storage_images =
-        properties12.maxDescriptorSetUpdateAfterBindStorageImages;
+        state->vkd3d_properties12.maxDescriptorSetUpdateAfterBindStorageImages;
     state->max_descriptor_set_update_after_bind_storage_buffers =
-        properties12.maxDescriptorSetUpdateAfterBindStorageBuffers;
+        state->vkd3d_properties12.maxDescriptorSetUpdateAfterBindStorageBuffers;
     state->transform_feedback = has_transform_feedback && transform_feedback.transformFeedback;
     state->geometry_streams = has_transform_feedback && transform_feedback.geometryStreams;
     state->dual_src_blend = state->core.dualSrcBlend;
@@ -737,7 +1142,8 @@ static BOOL query_requirements(VkPhysicalDevice physical, struct probe_state *st
         state->null_descriptor && state->synchronization2 && state->dynamic_rendering &&
         state->maintenance4 && state->timeline_semaphore;
     state->capability_audit = winehua_vkd3d_capability_audit(
-        physical, extensions, count, &vk12, &vk13, &properties12, &id_properties);
+        physical, extensions, count, &state->vkd3d_features11, &state->vkd3d_features12,
+        &state->vkd3d_features13, &state->vkd3d_properties12, &id_properties);
     if (!state->capability_audit) {
         free(extensions);
         return FALSE;
@@ -938,11 +1344,13 @@ int main(int argc, char **argv)
     application.applicationVersion = 1;
     application.pEngineName = "WineHua";
     application.engineVersion = 1;
-    application.apiVersion = VK_API_VERSION_1_3;
+    /* A capability probe must be able to inspect the 1.1-based 2.6/2.8
+     * profiles. Requesting 1.3 here would hide those devices entirely. */
+    application.apiVersion = VK_API_VERSION_1_1;
     instance_info.pApplicationInfo = &application;
     result = vkCreateInstance(&instance_info, NULL, &instance);
     if (result != VK_SUCCESS) {
-        publish_result(&state, "UNSUPPORTED", "vkCreateInstance Vulkan 1.3 failed");
+        publish_result(&state, "UNSUPPORTED", "vkCreateInstance Vulkan 1.1 failed");
         return 3;
     }
     result = vkEnumeratePhysicalDevices(instance, &count, NULL);
@@ -957,16 +1365,21 @@ int main(int argc, char **argv)
     }
     vkGetPhysicalDeviceProperties(physical, &state.properties);
     vkGetPhysicalDeviceFeatures(physical, &state.core);
+    state.api11 = state.properties.apiVersion >= VK_API_VERSION_1_1;
+    state.api12 = state.properties.apiVersion >= VK_API_VERSION_1_2;
     state.api13 = state.properties.apiVersion >= VK_API_VERSION_1_3;
     state.fallback_detected = strstr(state.properties.deviceName, "llvmpipe") != NULL ||
         strstr(state.properties.deviceName, "softpipe") != NULL;
     if (state.fallback_detected) { failure = "software Vulkan fallback detected"; goto cleanup; }
     if (!query_requirements(physical, &state)) { failure = "capability query failed"; goto cleanup; }
-    if (!state.api13) {
-        publish_result(&state, "UNSUPPORTED", "Guest adapter exposes Vulkan below 1.3");
-        vkDestroyInstance(instance, NULL);
-        free(state.capability_audit);
-        return 3;
+    if (state.initial_vkd3d_tab || state.interactive) {
+        publish_result(&state, "PASS",
+                       state.interactive ?
+                           "Interactive DXVK and VKD3D capability evidence collected; "
+                           "no transport runtime or VKD3D runtime was loaded" :
+                           "VKD3D capability evidence collected; no VKD3D runtime was loaded");
+        exit_code = 0;
+        goto cleanup;
     }
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, NULL);
     {

@@ -454,6 +454,17 @@ def _vkd3d_layer_payload(path: Path, layer: str) -> dict:
         "driverVersion": capabilities.get("driverVersion"),
         "apiVersion": capabilities.get("deviceApiVersion", ""),
     }
+    extension_names = {
+        str(item.get("name")) for item in audit.get("deviceExtensions", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+
+    def extension_or_core(name: str, major: int, minor: int) -> bool:
+        return name in extension_names or _api_at_least(identity["apiVersion"], major, minor)
+
+    feature_chain = audit.get("featureChain") or {}
+    vulkan11 = feature_chain.get("vulkan11") or {}
+    vulkan12_features = feature_chain.get("vulkan12") or {}
     evidence = {
         "descriptorIndexing": explicit(capabilities.get("descriptorIndexing"),
                                         vulkan12.get("descriptorIndexing")),
@@ -468,6 +479,21 @@ def _vkd3d_layer_payload(path: Path, layer: str) -> dict:
                                  transport.get("maintenance4")),
         "bufferDeviceAddress": explicit(capabilities.get("bufferDeviceAddress"),
                                         vulkan12.get("bufferDeviceAddress")),
+        "samplerMirrorClampToEdge": explicit(
+            capabilities.get("samplerMirrorClampToEdge"),
+            vulkan12_features.get("samplerMirrorClampToEdge")),
+        "samplerMirrorClampToEdgeExtension": extension_or_core(
+            "VK_KHR_sampler_mirror_clamp_to_edge", 1, 2),
+        "shaderDrawParameters": explicit(capabilities.get("shaderDrawParameters"),
+                                           vulkan11.get("shaderDrawParameters")),
+        "createRenderpass2": extension_or_core("VK_KHR_create_renderpass2", 1, 2),
+        "separateDepthStencilLayouts": extension_or_core(
+            "VK_KHR_separate_depth_stencil_layouts", 1, 2),
+        "bindMemory2": extension_or_core("VK_KHR_bind_memory2", 1, 1),
+        "copyCommands2": extension_or_core("VK_KHR_copy_commands2", 1, 3),
+        "extendedDynamicState": "VK_EXT_extended_dynamic_state" in extension_names,
+        "extendedDynamicState2": "VK_EXT_extended_dynamic_state2" in extension_names,
+        "pushDescriptor": "VK_KHR_push_descriptor" in extension_names,
     }
     descriptor_fields = (
         "descriptorIndexing",
@@ -508,13 +534,18 @@ def _vkd3d_layer_payload(path: Path, layer: str) -> dict:
                 all(name in descriptor_features for name in descriptor_fields)),
             "updateAfterBindLimits": all(name in audit.get("updateAfterBindLimits", {}) for name in (
                 "maxUpdateAfterBindDescriptorsInAllPools",
+                "maxDescriptorSetUpdateAfterBindSamplers",
                 "maxDescriptorSetUpdateAfterBindSampledImages",
                 "maxDescriptorSetUpdateAfterBindStorageImages",
-                "maxDescriptorSetUpdateAfterBindStorageBuffers")),
+                "maxDescriptorSetUpdateAfterBindStorageBuffers",
+                "maxDescriptorSetUpdateAfterBindInputAttachments")),
             "deviceUuid": isinstance(audit.get("deviceUuid"), str) and len(audit["deviceUuid"]) == 32,
             "driverUuid": isinstance(audit.get("driverUuid"), str) and len(audit["driverUuid"]) == 32,
             "deviceExtensions": isinstance(audit.get("deviceExtensions"), list) and bool(audit["deviceExtensions"]),
-            "featureChain": isinstance(feature_chain, dict) and isinstance(feature_chain.get("vulkan12"), dict) and isinstance(feature_chain.get("vulkan13"), dict),
+            "featureChain": (isinstance(feature_chain, dict) and
+                             isinstance(feature_chain.get("vulkan11"), dict) and
+                             isinstance(feature_chain.get("vulkan12"), dict) and
+                             isinstance(feature_chain.get("vulkan13"), dict)),
             "propertyChain": isinstance(property_chain, dict) and isinstance(property_chain.get("vulkan12"), dict),
             "queues": isinstance(audit.get("queues"), list) and bool(audit["queues"]),
             "memory": isinstance(memory, dict) and bool(memory.get("types")) and bool(memory.get("heaps")),
@@ -538,16 +569,8 @@ def _api_at_least(value: object, major: int, minor: int) -> bool:
         return False
 
 
-def _vkd3d_profile_decision(layers: list[dict], name: str, api: tuple[int, int]) -> dict:
-    required = {
-        "descriptorIndexing": True,
-        "robustness2": True,
-        "timelineSemaphore": True,
-        "synchronization2": True,
-        "dynamicRendering": True,
-        "maintenance4": True,
-        "bufferDeviceAddress": True,
-    }
+def _vkd3d_profile_decision(layers: list[dict], name: str, api: tuple[int, int],
+                            required: tuple[str, ...]) -> dict:
     reasons: list[str] = []
     for layer in layers:
         prefix = layer["layer"]
@@ -555,21 +578,24 @@ def _vkd3d_profile_decision(layers: list[dict], name: str, api: tuple[int, int])
             reasons.append(f"{prefix}: probe status {layer['probeStatus']}")
         if not _api_at_least(layer["identity"]["apiVersion"], *api):
             reasons.append(f"{prefix}: Vulkan API below {api[0]}.{api[1]}")
-        for field, expected in required.items():
+        for field in required:
             actual = layer["evidence"].get(field)
             if actual is None:
                 reasons.append(f"{prefix}: missing independent evidence for {field}")
-            elif actual != expected:
+            elif actual is not True:
                 reasons.append(f"{prefix}: {field}={actual}")
         for field, observed in layer["audit"].items():
             if not observed:
                 reasons.append(f"{prefix}: missing independent audit field {field}")
-        for field in ("maxDescriptorSetUpdateAfterBindSampledImages",
+        for field in ("maxDescriptorSetUpdateAfterBindSamplers",
+                      "maxDescriptorSetUpdateAfterBindSampledImages",
                       "maxDescriptorSetUpdateAfterBindStorageImages",
-                      "maxDescriptorSetUpdateAfterBindStorageBuffers"):
+                      "maxDescriptorSetUpdateAfterBindStorageBuffers",
+                      "maxDescriptorSetUpdateAfterBindInputAttachments"):
             try:
                 value = int(layer["updateAfterBindLimits"].get(field))
             except (TypeError, ValueError):
+                reasons.append(f"{prefix}: missing independent evidence for {field}")
                 continue
             if value < 1_000_000:
                 reasons.append(f"{prefix}: {field}={value} below 1000000")
@@ -594,8 +620,21 @@ def write_vkd3d_capability_decision(root_directory: Path, run_records: list[dict
     }
     layers = [_vkd3d_layer_payload(path, layer) for layer, path in paths.items()]
     profiles = [
-        _vkd3d_profile_decision(layers, "legacy-vkd3d-proton-2.6", (1, 1)),
-        _vkd3d_profile_decision(layers, "modern-vkd3d-proton-2.9", (1, 3)),
+        _vkd3d_profile_decision(
+            layers, "legacy-vkd3d-proton-2.6", (1, 1),
+            ("descriptorIndexing", "robustness2", "timelineSemaphore",
+             "samplerMirrorClampToEdgeExtension", "createRenderpass2",
+             "separateDepthStencilLayouts", "bindMemory2", "copyCommands2")),
+        _vkd3d_profile_decision(
+            layers, "legacy-vkd3d-proton-2.8", (1, 1),
+            ("descriptorIndexing", "robustness2", "timelineSemaphore",
+             "samplerMirrorClampToEdgeExtension", "separateDepthStencilLayouts", "bindMemory2",
+             "copyCommands2", "dynamicRendering", "extendedDynamicState",
+             "extendedDynamicState2", "bufferDeviceAddress", "pushDescriptor")),
+        _vkd3d_profile_decision(
+            layers, "modern-vkd3d-proton-2.9", (1, 3),
+            ("descriptorIndexing", "robustness2", "samplerMirrorClampToEdge",
+             "shaderDrawParameters", "pushDescriptor")),
     ]
     capability_hash = hashlib.sha256(json.dumps([
         {"layer": layer["layer"], "probeStatus": layer["probeStatus"],

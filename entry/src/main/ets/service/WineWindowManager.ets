@@ -89,7 +89,8 @@ export class WineWindowManager {
 
   setAutomationMode(enabled: boolean): void {
     this.automationMode = enabled;
-    this.isDesktopMode = deviceInfo.deviceType === 'tablet' && !enabled;
+    this.isDesktopMode = (deviceInfo.deviceType === 'tablet' || deviceInfo.deviceType === 'phone') &&
+      !enabled;
     testNapi.setDesktopMode(this.isDesktopMode);
     hilog.info(DOMAIN, TAG,
       '[MW] automation mode=%{public}s desktop mode=%{public}s',
@@ -147,6 +148,15 @@ export class WineWindowManager {
       this.onToplevelEvent(id, event, data);
     });
     hilog.info(DOMAIN, TAG, '[MW] toplevel callback registered OK');
+
+    // A launcher resume recreates EntryAbility while the Wine desktop root can
+    // still be alive.  No new desktop_root event is emitted in that case, so
+    // explicitly bring the existing desktop compositor back to the foreground.
+    if (this.isDesktopMode && this.desktopRootId > 0) {
+      hilog.info(DOMAIN, TAG, '[MW] restoring existing DesktopAbility root=%{public}d',
+        this.desktopRootId);
+      this.startDesktopAbility(this.desktopRootId);
+    }
   }
 
   // -- WineWindowAbility 调用: 注册 / 注销 --

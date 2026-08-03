@@ -104,7 +104,8 @@ static int winehua_vkd3d_append_format(struct winehua_vkd3d_json_builder *builde
 
 static char *winehua_vkd3d_capability_audit(
     VkPhysicalDevice physical, const VkExtensionProperties *extensions,
-    uint32_t extension_count, const VkPhysicalDeviceVulkan12Features *features12,
+    uint32_t extension_count, const VkPhysicalDeviceVulkan11Features *features11,
+    const VkPhysicalDeviceVulkan12Features *features12,
     const VkPhysicalDeviceVulkan13Features *features13,
     const VkPhysicalDeviceVulkan12Properties *properties12,
     const VkPhysicalDeviceIDProperties *id_properties)
@@ -128,15 +129,19 @@ static char *winehua_vkd3d_capability_audit(
     winehua_vkd3d_json_append(&builder, "],\"descriptorIndexingFeatures\":");
     winehua_vkd3d_append_descriptor_features(&builder, features12);
     winehua_vkd3d_json_append(&builder,
-        ",\"featureChain\":{\"vulkan12\":{\"timelineSemaphore\":%s,"
+        ",\"featureChain\":{\"vulkan11\":{\"shaderDrawParameters\":%s},"
+        "\"vulkan12\":{\"timelineSemaphore\":%s,"
         "\"bufferDeviceAddress\":%s,\"bufferDeviceAddressCaptureReplay\":%s,"
-        "\"bufferDeviceAddressMultiDevice\":%s,\"scalarBlockLayout\":%s},"
+        "\"bufferDeviceAddressMultiDevice\":%s,\"samplerMirrorClampToEdge\":%s,"
+        "\"scalarBlockLayout\":%s},"
         "\"vulkan13\":{\"synchronization2\":%s,\"dynamicRendering\":%s,"
         "\"maintenance4\":%s}},",
+        winehua_vkd3d_bool(features11->shaderDrawParameters),
         winehua_vkd3d_bool(features12->timelineSemaphore),
         winehua_vkd3d_bool(features12->bufferDeviceAddress),
         winehua_vkd3d_bool(features12->bufferDeviceAddressCaptureReplay),
         winehua_vkd3d_bool(features12->bufferDeviceAddressMultiDevice),
+        winehua_vkd3d_bool(features12->samplerMirrorClampToEdge),
         winehua_vkd3d_bool(features12->scalarBlockLayout),
         winehua_vkd3d_bool(features13->synchronization2),
         winehua_vkd3d_bool(features13->dynamicRendering),
