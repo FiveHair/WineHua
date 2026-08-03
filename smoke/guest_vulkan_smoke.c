@@ -19,6 +19,7 @@ struct probe_state {
     uint32_t loader_api;
     VkPhysicalDeviceProperties properties;
     VkPhysicalDeviceFeatures features;
+    VkPhysicalDeviceVulkan12Features vkd3d_features12;
     uint32_t max_update_after_bind_descriptors_in_all_pools;
     uint32_t max_descriptor_set_update_after_bind_sampled_images;
     uint32_t max_descriptor_set_update_after_bind_storage_images;
@@ -34,6 +35,8 @@ struct probe_state {
     int bc6;
     int bc7;
     int descriptor_indexing;
+    int descriptor_indexing_extension;
+    int timeline_semaphore_extension;
     int api13;
     int core_robust_buffer_access;
     int robust_buffer_access2;
@@ -49,6 +52,9 @@ struct probe_state {
     int transport_device_create_attempted;
     int transport_device_create_ok;
     VkResult transport_device_create_result;
+    int vkd3d_bindless_device_create_attempted;
+    int vkd3d_bindless_device_create_ok;
+    VkResult vkd3d_bindless_device_create_result;
     int scalar_block_layout;
     int robustness2;
     int transform_feedback;
@@ -176,6 +182,11 @@ static void write_result(const struct probe_state *state, const char *status,
             "\"maxDescriptorSetUpdateAfterBindStorageImages\":%u,"
             "\"maxDescriptorSetUpdateAfterBindStorageBuffers\":%u}},\n"
             "  \"checks\": {\"bufferCopy\":%s,\"imageClear\":%s},\n"
+            "  \"vkd3dCapability\": {\"scope\":\"guest-venus-vulkan-path\","
+            "\"vkd3dLoaded\":false,\"upstreamViewDescriptorMinimum\":1000000,"
+            "\"experimentalViewDescriptorMinimum\":500000,\"samplerDescriptorMinimum\":2048,"
+            "\"inputAttachmentsAreGating\":false,"
+            "\"deviceCreation\":{\"attempted\":%s,\"result\":%d,\"passed\":%s}},\n"
             "  \"dxvk262\": {\"transport\":{\"api13\":%s,"
             "\"coreRobustBufferAccess\":%s,\"robustBufferAccess2\":%s,"
             "\"robustImageAccess2\":%s,\"nullDescriptor\":%s,"
@@ -238,6 +249,9 @@ static void write_result(const struct probe_state *state, const char *status,
             state->max_descriptor_set_update_after_bind_storage_buffers,
             state->buffer_copy_ok ? "true" : "false",
             state->image_clear_ok ? "true" : "false",
+            state->vkd3d_bindless_device_create_attempted ? "true" : "false",
+            (int)state->vkd3d_bindless_device_create_result,
+            state->vkd3d_bindless_device_create_ok ? "true" : "false",
             state->api13 ? "true" : "false",
             state->core_robust_buffer_access ? "true" : "false",
             state->robust_buffer_access2 ? "true" : "false",
@@ -355,7 +369,7 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     int api11 = state->properties.apiVersion >= VK_API_VERSION_1_1;
     int api12 = state->properties.apiVersion >= VK_API_VERSION_1_2;
     int api13 = state->properties.apiVersion >= VK_API_VERSION_1_3;
-    int has_robustness2, has_transform_feedback, has_synchronization2;
+    int has_descriptor_indexing, has_robustness2, has_transform_feedback, has_synchronization2;
     int has_dynamic_rendering, has_maintenance4, has_maintenance5, has_maintenance6;
     int has_custom_border_color;
 
@@ -369,6 +383,10 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
         return 0;
     }
 
+    has_descriptor_indexing = has_extension(extensions, extension_count,
+                                             VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+    state->timeline_semaphore_extension = has_extension(
+        extensions, extension_count, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
     has_robustness2 = has_extension(extensions, extension_count, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
     has_transform_feedback = has_extension(extensions, extension_count, VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
     has_synchronization2 = api13 || has_extension(extensions, extension_count, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
@@ -400,6 +418,8 @@ static int query_extended_capabilities(VkPhysicalDevice physical, struct probe_s
     vkGetPhysicalDeviceProperties2(physical, &properties2);
 
     state->api13 = api13;
+    state->descriptor_indexing_extension = has_descriptor_indexing;
+    state->vkd3d_features12 = vulkan12;
     state->core_robust_buffer_access = state->features.robustBufferAccess;
     state->descriptor_indexing = api12 && vulkan12.descriptorIndexing;
     state->scalar_block_layout = api12 && vulkan12.scalarBlockLayout;
@@ -507,6 +527,92 @@ static VkResult create_dxvk26_transport_device(VkPhysicalDevice physical,
     return result;
 }
 
+static int vkd3d26_bindless_features_complete(const struct probe_state *state)
+{
+    const VkPhysicalDeviceVulkan12Features *features = &state->vkd3d_features12;
+
+    return state->descriptor_indexing_extension && state->timeline_semaphore_extension &&
+        features->shaderUniformBufferArrayNonUniformIndexing &&
+        features->shaderSampledImageArrayNonUniformIndexing &&
+        features->shaderStorageBufferArrayNonUniformIndexing &&
+        features->shaderStorageImageArrayNonUniformIndexing &&
+        features->shaderUniformTexelBufferArrayNonUniformIndexing &&
+        features->shaderStorageTexelBufferArrayNonUniformIndexing &&
+        features->descriptorBindingUniformBufferUpdateAfterBind &&
+        features->descriptorBindingSampledImageUpdateAfterBind &&
+        features->descriptorBindingStorageImageUpdateAfterBind &&
+        features->descriptorBindingStorageBufferUpdateAfterBind &&
+        features->descriptorBindingUniformTexelBufferUpdateAfterBind &&
+        features->descriptorBindingStorageTexelBufferUpdateAfterBind &&
+        features->descriptorBindingUpdateUnusedWhilePending &&
+        features->descriptorBindingPartiallyBound &&
+        features->descriptorBindingVariableDescriptorCount &&
+        features->runtimeDescriptorArray;
+}
+
+static VkResult create_vkd3d26_bindless_device(VkPhysicalDevice physical,
+                                                const struct probe_state *state)
+{
+    const char *extensions[] = {
+        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
+        VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
+    };
+    float priority = 1.0f;
+    VkPhysicalDeviceDescriptorIndexingFeatures descriptor_indexing = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES };
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline_semaphore = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES };
+    VkPhysicalDeviceRobustness2FeaturesEXT robustness2 = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT };
+    VkDeviceQueueCreateInfo queue_info = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+    VkDeviceCreateInfo device_info = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
+    VkDevice device = VK_NULL_HANDLE;
+    VkResult result;
+
+    if (state->properties.apiVersion < VK_API_VERSION_1_1 ||
+        !vkd3d26_bindless_features_complete(state) || !state->timeline_semaphore ||
+        !state->robust_buffer_access2 || !state->robust_image_access2 ||
+        !state->null_descriptor || state->queue_family == UINT32_MAX)
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+
+    descriptor_indexing.shaderUniformBufferArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.shaderUniformTexelBufferArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.shaderStorageTexelBufferArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingUniformTexelBufferUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+    descriptor_indexing.descriptorBindingPartiallyBound = VK_TRUE;
+    descriptor_indexing.descriptorBindingVariableDescriptorCount = VK_TRUE;
+    descriptor_indexing.runtimeDescriptorArray = VK_TRUE;
+    timeline_semaphore.timelineSemaphore = VK_TRUE;
+    robustness2.robustBufferAccess2 = VK_TRUE;
+    robustness2.robustImageAccess2 = VK_TRUE;
+    robustness2.nullDescriptor = VK_TRUE;
+    descriptor_indexing.pNext = &timeline_semaphore;
+    timeline_semaphore.pNext = &robustness2;
+
+    queue_info.queueFamilyIndex = state->queue_family;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = &priority;
+    device_info.pNext = &descriptor_indexing;
+    device_info.queueCreateInfoCount = 1;
+    device_info.pQueueCreateInfos = &queue_info;
+    device_info.enabledExtensionCount = sizeof(extensions) / sizeof(extensions[0]);
+    device_info.ppEnabledExtensionNames = extensions;
+    result = vkCreateDevice(physical, &device_info, NULL, &device);
+    if (result == VK_SUCCESS)
+        vkDestroyDevice(device, NULL);
+    return result;
+}
+
 int main(int argc, char **argv)
 {
     struct probe_state state;
@@ -540,6 +646,7 @@ int main(int argc, char **argv)
     state.queue_family = UINT32_MAX;
     state.loader_api = VK_API_VERSION_1_0;
     state.transport_device_create_result = VK_NOT_READY;
+    state.vkd3d_bindless_device_create_result = VK_NOT_READY;
     dxvk26_requirements = !strcmp(argument_value(argc, argv, "--dxvk26-requirements", "0"), "1");
     vkd3d_capability = argument_present(argc, argv, "--vkd3d-capability");
     if (!getenv("VN_DEBUG") || !strstr(getenv("VN_DEBUG"), "vtest") ||
@@ -589,13 +696,6 @@ int main(int argc, char **argv)
         goto cleanup;
     }
     if (state.fallback_detected) { failure = "software Vulkan fallback detected"; goto cleanup; }
-    if (vkd3d_capability) {
-        write_result(&state, "PASS", "vkd3d-capability",
-                     "VKD3D capability evidence collected; no VKD3D runtime was loaded");
-        exit_code = 0;
-        goto cleanup;
-    }
-
     vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, NULL);
     {
         VkQueueFamilyProperties *queues = calloc(count, sizeof(*queues));
@@ -609,6 +709,23 @@ int main(int argc, char **argv)
         free(queues);
     }
     if (state.queue_family == UINT32_MAX) { failure = "no graphics queue family"; goto cleanup; }
+    if (vkd3d_capability) {
+        state.vkd3d_bindless_device_create_attempted = 1;
+        state.vkd3d_bindless_device_create_result =
+            create_vkd3d26_bindless_device(physical, &state);
+        state.vkd3d_bindless_device_create_ok =
+            state.vkd3d_bindless_device_create_result == VK_SUCCESS;
+        if (!state.vkd3d_bindless_device_create_ok) {
+            write_result(&state, "UNSUPPORTED", "vkd3d-capability",
+                         "VKD3D 2.6 bindless feature-chain vkCreateDevice failed");
+            exit_code = 3;
+            goto cleanup;
+        }
+        write_result(&state, "PASS", "vkd3d-capability",
+                     "VKD3D 2.6 bindless device creation passed; no VKD3D runtime was loaded");
+        exit_code = 0;
+        goto cleanup;
+    }
     if (dxvk26_requirements) {
         if (!state.api13) {
             write_result(&state, "UNSUPPORTED", "dxvk26-requirements",

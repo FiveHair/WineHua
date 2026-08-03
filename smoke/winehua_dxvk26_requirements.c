@@ -101,6 +101,10 @@ struct probe_state {
     BOOL transport_device_create_ok;
     VkResult transport_device_create_result;
 
+    BOOL vkd3d_bindless_device_create_attempted;
+    BOOL vkd3d_bindless_device_create_ok;
+    VkResult vkd3d_bindless_device_create_result;
+
     BOOL timeline_round_trip_ok;
     VkResult timeline_semaphore_create_result;
     VkResult timeline_submit_result;
@@ -179,14 +183,14 @@ static BOOL vkd3d_bindless_features_complete(const struct probe_state *state)
 {
     const VkPhysicalDeviceVulkan12Features *features = &state->vkd3d_features12;
 
-    return state->extension_descriptor_indexing && features->descriptorIndexing &&
-        features->shaderUniformTexelBufferArrayDynamicIndexing &&
-        features->shaderStorageTexelBufferArrayDynamicIndexing &&
+    return state->extension_descriptor_indexing &&
+        features->shaderUniformBufferArrayNonUniformIndexing &&
         features->shaderSampledImageArrayNonUniformIndexing &&
         features->shaderStorageBufferArrayNonUniformIndexing &&
         features->shaderStorageImageArrayNonUniformIndexing &&
         features->shaderUniformTexelBufferArrayNonUniformIndexing &&
         features->shaderStorageTexelBufferArrayNonUniformIndexing &&
+        features->descriptorBindingUniformBufferUpdateAfterBind &&
         features->descriptorBindingSampledImageUpdateAfterBind &&
         features->descriptorBindingStorageImageUpdateAfterBind &&
         features->descriptorBindingStorageBufferUpdateAfterBind &&
@@ -205,9 +209,11 @@ static BOOL update_after_bind_limits_complete(const struct probe_state *state,
 
     return properties->maxPerStageDescriptorUpdateAfterBindSamplers >= 2048u &&
         properties->maxDescriptorSetUpdateAfterBindSamplers >= 2048u &&
+        properties->maxPerStageDescriptorUpdateAfterBindUniformBuffers >= view_descriptor_minimum &&
         properties->maxPerStageDescriptorUpdateAfterBindStorageBuffers >= view_descriptor_minimum &&
         properties->maxPerStageDescriptorUpdateAfterBindSampledImages >= view_descriptor_minimum &&
         properties->maxPerStageDescriptorUpdateAfterBindStorageImages >= view_descriptor_minimum &&
+        properties->maxDescriptorSetUpdateAfterBindUniformBuffers >= view_descriptor_minimum &&
         properties->maxDescriptorSetUpdateAfterBindStorageBuffers >= view_descriptor_minimum &&
         properties->maxDescriptorSetUpdateAfterBindSampledImages >= view_descriptor_minimum &&
         properties->maxDescriptorSetUpdateAfterBindStorageImages >= view_descriptor_minimum;
@@ -220,7 +226,8 @@ static BOOL vkd3d26_supported(const struct probe_state *state)
         state->extension_sampler_mirror_clamp_to_edge && state->robust_buffer_access2 &&
         state->robust_image_access2 && state->null_descriptor &&
         state->separate_depth_stencil_layouts && state->bind_memory2 &&
-        state->create_renderpass2 && state->copy_commands2;
+        state->create_renderpass2 && state->copy_commands2 &&
+        state->vkd3d_bindless_device_create_ok;
 }
 
 static BOOL vkd3d28_supported(const struct probe_state *state)
@@ -232,7 +239,8 @@ static BOOL vkd3d28_supported(const struct probe_state *state)
         state->separate_depth_stencil_layouts && state->bind_memory2 &&
         state->copy_commands2 && state->dynamic_rendering &&
         state->extended_dynamic_state && state->extended_dynamic_state2 &&
-        state->buffer_device_address && state->push_descriptor;
+        state->buffer_device_address && state->push_descriptor &&
+        state->vkd3d_bindless_device_create_ok;
 }
 
 static BOOL vkd3d29_supported(const struct probe_state *state)
@@ -240,7 +248,8 @@ static BOOL vkd3d29_supported(const struct probe_state *state)
     return state->api13 && vkd3d_bindless_features_complete(state) &&
         update_after_bind_limits_complete(state, 1000000u) && state->sampler_mirror_clamp_to_edge &&
         state->shader_draw_parameters && state->robust_buffer_access2 &&
-        state->robust_image_access2 && state->null_descriptor && state->push_descriptor;
+        state->robust_image_access2 && state->null_descriptor && state->push_descriptor &&
+        state->vkd3d_bindless_device_create_ok;
 }
 
 static BOOL vkd3d26_limited_500k_candidate(const struct probe_state *state)
@@ -250,7 +259,8 @@ static BOOL vkd3d26_limited_500k_candidate(const struct probe_state *state)
         state->extension_sampler_mirror_clamp_to_edge && state->robust_buffer_access2 &&
         state->robust_image_access2 && state->null_descriptor &&
         state->separate_depth_stencil_layouts && state->bind_memory2 &&
-        state->create_renderpass2 && state->copy_commands2;
+        state->create_renderpass2 && state->copy_commands2 &&
+        state->vkd3d_bindless_device_create_ok;
 }
 
 static BOOL dxvk_transport_supported(const struct probe_state *state)
@@ -539,6 +549,10 @@ static void show_capability_report(const struct probe_state *state,
     append_feature_result(vkd3d_report, sizeof(vkd3d_report),
                           "Experimental 500K 2.6 candidate (default off)", vkd3d500k,
                           "same required features are not available, or a view limit is below 500000");
+    append_feature_result(vkd3d_report, sizeof(vkd3d_report),
+                          "2.6 bindless feature-chain Vulkan device creation",
+                          state->vkd3d_bindless_device_create_ok,
+                          "the requested descriptor-indexing, timeline, and robustness2 chain was rejected");
     append_report_text(vkd3d_report, sizeof(vkd3d_report),
                        "\r\nAPI baseline\r\n");
     append_feature_result(vkd3d_report, sizeof(vkd3d_report), "Vulkan API 1.1 (2.6 / 2.8)",
@@ -797,6 +811,7 @@ static void write_result(const struct probe_state *state, const char *status,
             "\"vkd3dLoaded\":false,\"upstreamViewDescriptorMinimum\":1000000,"
             "\"experimentalViewDescriptorMinimum\":500000,\"samplerDescriptorMinimum\":2048,"
             "\"inputAttachmentsAreGating\":false,"
+            "\"deviceCreation\":{\"attempted\":%s,\"result\":%d,\"passed\":%s},"
             "\"profiles\":{"
             "\"vkd3dProton26\":{\"minimumVulkanApi\":\"1.1\",\"supportedOnThisPath\":%s},"
             "\"vkd3dProton28\":{\"minimumVulkanApi\":\"1.1\",\"supportedOnThisPath\":%s},"
@@ -859,6 +874,9 @@ static void write_result(const struct probe_state *state, const char *status,
             state->transport_device_create_ok && state->timeline_round_trip_ok ? "PASS" : "FAIL",
             state->transport_device_create_ok && state->timeline_round_trip_ok
                 ? "D3D11_FEATURE_PROBE_PENDING" : "BLOCKED",
+            bool_text(state->vkd3d_bindless_device_create_attempted),
+            (int)state->vkd3d_bindless_device_create_result,
+            bool_text(state->vkd3d_bindless_device_create_ok),
             bool_text(vkd3d26_supported(state)), bool_text(vkd3d28_supported(state)),
             bool_text(vkd3d29_supported(state)), bool_text(vkd3d26_limited_500k_candidate(state)),
             state->capability_audit ? state->capability_audit : "{}",
@@ -1342,6 +1360,93 @@ cleanup:
     return result;
 }
 
+static VkResult create_vkd3d26_bindless_device(VkPhysicalDevice physical,
+                                                const struct probe_state *state)
+{
+    const char *extensions[] = {
+        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
+        VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
+    };
+    float priority = 1.0f;
+    VkPhysicalDeviceDescriptorIndexingFeatures descriptor_indexing = { 0 };
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline_semaphore = { 0 };
+    VkPhysicalDeviceRobustness2FeaturesEXT robustness2 = { 0 };
+    VkDeviceQueueCreateInfo queue = { 0 };
+    VkDeviceCreateInfo create = { 0 };
+    VkDevice device = VK_NULL_HANDLE;
+    VkResult result;
+
+    if (!state->api11 || !vkd3d_bindless_features_complete(state) ||
+        !state->timeline_semaphore || !state->robust_buffer_access2 ||
+        !state->robust_image_access2 || !state->null_descriptor ||
+        state->queue_family == UINT32_MAX)
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+
+    descriptor_indexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    timeline_semaphore.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    robustness2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
+    queue.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    create.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    descriptor_indexing.shaderUniformBufferArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.shaderUniformTexelBufferArrayDynamicIndexing = VK_TRUE;
+    descriptor_indexing.shaderStorageTexelBufferArrayDynamicIndexing = VK_TRUE;
+    descriptor_indexing.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.shaderUniformTexelBufferArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.shaderStorageTexelBufferArrayNonUniformIndexing = VK_TRUE;
+    descriptor_indexing.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingUniformTexelBufferUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE;
+    descriptor_indexing.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+    descriptor_indexing.descriptorBindingPartiallyBound = VK_TRUE;
+    descriptor_indexing.descriptorBindingVariableDescriptorCount = VK_TRUE;
+    descriptor_indexing.runtimeDescriptorArray = VK_TRUE;
+    timeline_semaphore.timelineSemaphore = VK_TRUE;
+    robustness2.robustBufferAccess2 = VK_TRUE;
+    robustness2.robustImageAccess2 = VK_TRUE;
+    robustness2.nullDescriptor = VK_TRUE;
+    descriptor_indexing.pNext = &timeline_semaphore;
+    timeline_semaphore.pNext = &robustness2;
+
+    queue.queueFamilyIndex = state->queue_family;
+    queue.queueCount = 1;
+    queue.pQueuePriorities = &priority;
+    create.pNext = &descriptor_indexing;
+    create.queueCreateInfoCount = 1;
+    create.pQueueCreateInfos = &queue;
+    create.enabledExtensionCount = 3;
+    create.ppEnabledExtensionNames = extensions;
+    result = vkCreateDevice(physical, &create, NULL, &device);
+    if (result == VK_SUCCESS)
+        vkDestroyDevice(device, NULL);
+    return result;
+}
+
+static BOOL select_graphics_queue(VkPhysicalDevice physical, struct probe_state *state)
+{
+    VkQueueFamilyProperties *queues;
+    uint32_t count = 0;
+    uint32_t i;
+
+    vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, NULL);
+    queues = calloc(count ? count : 1, sizeof(*queues));
+    if (!queues) return FALSE;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, queues);
+    for (i = 0; i < count; ++i) {
+        if (queues[i].queueCount && (queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+            state->queue_family = i;
+            break;
+        }
+    }
+    free(queues);
+    return state->queue_family != UINT32_MAX;
+}
+
 int main(int argc, char **argv)
 {
     struct probe_state state;
@@ -1350,7 +1455,6 @@ int main(int argc, char **argv)
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     uint32_t count = 0;
-    uint32_t i;
     VkResult result;
     const char *failure = "unknown failure";
     int exit_code = 1;
@@ -1369,6 +1473,7 @@ int main(int argc, char **argv)
     state.queue_family = UINT32_MAX;
     state.loader_api = VK_API_VERSION_1_0;
     state.transport_device_create_result = VK_NOT_READY;
+    state.vkd3d_bindless_device_create_result = VK_NOT_READY;
     state.timeline_semaphore_create_result = VK_NOT_READY;
     state.timeline_submit_result = VK_NOT_READY;
     state.timeline_wait_result = VK_NOT_READY;
@@ -1415,29 +1520,31 @@ int main(int argc, char **argv)
         strstr(state.properties.deviceName, "softpipe") != NULL;
     if (state.fallback_detected) { failure = "software Vulkan fallback detected"; goto cleanup; }
     if (!query_requirements(physical, &state)) { failure = "capability query failed"; goto cleanup; }
+    if (!select_graphics_queue(physical, &state)) {
+        failure = "no graphics queue family";
+        goto cleanup;
+    }
     if (state.initial_vkd3d_tab || state.interactive) {
+        state.vkd3d_bindless_device_create_attempted = TRUE;
+        state.vkd3d_bindless_device_create_result =
+            create_vkd3d26_bindless_device(physical, &state);
+        state.vkd3d_bindless_device_create_ok =
+            state.vkd3d_bindless_device_create_result == VK_SUCCESS;
+        if (!state.vkd3d_bindless_device_create_ok) {
+            publish_result(&state, "UNSUPPORTED",
+                           "VKD3D 2.6 bindless feature-chain vkCreateDevice failed");
+            vkDestroyInstance(instance, NULL);
+            free(state.capability_audit);
+            return 3;
+        }
         publish_result(&state, "PASS",
                        state.interactive ?
                            "Interactive DXVK and VKD3D capability evidence collected; "
-                           "no transport runtime or VKD3D runtime was loaded" :
-                           "VKD3D capability evidence collected; no VKD3D runtime was loaded");
+                           "VKD3D 2.6 bindless device creation passed; no VKD3D runtime was loaded" :
+                           "VKD3D 2.6 bindless device creation passed; no VKD3D runtime was loaded");
         exit_code = 0;
         goto cleanup;
     }
-    vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, NULL);
-    {
-        VkQueueFamilyProperties *queues = calloc(count ? count : 1, sizeof(*queues));
-        if (!queues) { failure = "queue family allocation failed"; goto cleanup; }
-        vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, queues);
-        for (i = 0; i < count; ++i) {
-            if (queues[i].queueCount && (queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
-                state.queue_family = i;
-                break;
-            }
-        }
-        free(queues);
-    }
-    if (state.queue_family == UINT32_MAX) { failure = "no graphics queue family"; goto cleanup; }
     result = create_transport_device(physical, &state);
     state.transport_device_create_ok = state.transport_device_create_result == VK_SUCCESS;
     if (!state.transport_device_create_ok) {

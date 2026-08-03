@@ -462,12 +462,19 @@ def _vkd3d_layer_payload(path: Path, layer: str) -> dict:
     def extension_or_core(name: str, major: int, minor: int) -> bool:
         return name in extension_names or _api_at_least(identity["apiVersion"], major, minor)
 
+    descriptor_features = audit.get("descriptorIndexingFeatures")
+    bindless_descriptor_indexing = (
+        "VK_EXT_descriptor_indexing" in extension_names and
+        isinstance(descriptor_features, dict) and
+        all(descriptor_features.get(name) is True
+            for name in VKD3D_BINDLESS_DESCRIPTOR_FEATURES))
     feature_chain = audit.get("featureChain") or {}
     vulkan11 = feature_chain.get("vulkan11") or {}
     vulkan12_features = feature_chain.get("vulkan12") or {}
     evidence = {
         "descriptorIndexing": explicit(capabilities.get("descriptorIndexing"),
                                         vulkan12.get("descriptorIndexing")),
+        "bindlessDescriptorIndexing": bindless_descriptor_indexing,
         "robustness2": explicit(capabilities.get("robustness2"), pe_robustness2),
         "timelineSemaphore": explicit(capabilities.get("timelineSemaphore"),
                                        timeline_round_trip.get("feature")),
@@ -518,7 +525,6 @@ def _vkd3d_layer_payload(path: Path, layer: str) -> dict:
         "descriptorBindingVariableDescriptorCount",
         "runtimeDescriptorArray",
     )
-    descriptor_features = audit.get("descriptorIndexingFeatures")
     memory = audit.get("memory")
     formats = audit.get("formats")
     property_chain = audit.get("propertyChain")
@@ -535,10 +541,12 @@ def _vkd3d_layer_payload(path: Path, layer: str) -> dict:
             "updateAfterBindLimits": all(name in audit.get("updateAfterBindLimits", {}) for name in (
                 "maxUpdateAfterBindDescriptorsInAllPools",
                 "maxPerStageDescriptorUpdateAfterBindSamplers",
+                "maxPerStageDescriptorUpdateAfterBindUniformBuffers",
                 "maxPerStageDescriptorUpdateAfterBindSampledImages",
                 "maxPerStageDescriptorUpdateAfterBindStorageImages",
                 "maxPerStageDescriptorUpdateAfterBindStorageBuffers",
                 "maxDescriptorSetUpdateAfterBindSamplers",
+                "maxDescriptorSetUpdateAfterBindUniformBuffers",
                 "maxDescriptorSetUpdateAfterBindSampledImages",
                 "maxDescriptorSetUpdateAfterBindStorageImages",
                 "maxDescriptorSetUpdateAfterBindStorageBuffers")),
@@ -556,6 +564,8 @@ def _vkd3d_layer_payload(path: Path, layer: str) -> dict:
                 "R8G8B8A8_UNORM", "D24_UNORM_S8_UINT", "BC1_RGBA_UNORM_BLOCK", "BC7_UNORM_BLOCK")),
         },
         "descriptorIndexingFeatures": descriptor_features,
+        "vkd3dDeviceCreation": ((payload.get("vkd3dCapability") or {})
+                                  .get("deviceCreation")),
         "updateAfterBindLimits": audit.get("updateAfterBindLimits", {}),
         "evidenceHash": hashlib.sha256(
             json.dumps({"identity": identity, "evidence": evidence, "audit": audit},
@@ -574,13 +584,13 @@ def _api_at_least(value: object, major: int, minor: int) -> bool:
 
 
 VKD3D_BINDLESS_DESCRIPTOR_FEATURES = (
-    "shaderUniformTexelBufferArrayDynamicIndexing",
-    "shaderStorageTexelBufferArrayDynamicIndexing",
+    "shaderUniformBufferArrayNonUniformIndexing",
     "shaderSampledImageArrayNonUniformIndexing",
     "shaderStorageBufferArrayNonUniformIndexing",
     "shaderStorageImageArrayNonUniformIndexing",
     "shaderUniformTexelBufferArrayNonUniformIndexing",
     "shaderStorageTexelBufferArrayNonUniformIndexing",
+    "descriptorBindingUniformBufferUpdateAfterBind",
     "descriptorBindingSampledImageUpdateAfterBind",
     "descriptorBindingStorageImageUpdateAfterBind",
     "descriptorBindingStorageBufferUpdateAfterBind",
@@ -593,9 +603,11 @@ VKD3D_BINDLESS_DESCRIPTOR_FEATURES = (
 )
 
 VKD3D_VIEW_DESCRIPTOR_LIMIT_FIELDS = (
+    "maxPerStageDescriptorUpdateAfterBindUniformBuffers",
     "maxPerStageDescriptorUpdateAfterBindSampledImages",
     "maxPerStageDescriptorUpdateAfterBindStorageImages",
     "maxPerStageDescriptorUpdateAfterBindStorageBuffers",
+    "maxDescriptorSetUpdateAfterBindUniformBuffers",
     "maxDescriptorSetUpdateAfterBindSampledImages",
     "maxDescriptorSetUpdateAfterBindStorageImages",
     "maxDescriptorSetUpdateAfterBindStorageBuffers",
@@ -631,6 +643,13 @@ def _vkd3d_profile_decision(layers: list[dict], name: str, api: tuple[int, int],
                 actual = descriptor_features.get(field)
                 if actual is not True:
                     reasons.append(f"{prefix}: descriptor indexing {field}={actual}")
+        if prefix in ("guest", "wine-pe-x64"):
+            device_creation = layer.get("vkd3dDeviceCreation")
+            if not isinstance(device_creation, dict):
+                reasons.append(f"{prefix}: missing bindless vkCreateDevice evidence")
+            elif device_creation.get("passed") is not True:
+                reasons.append(
+                    f"{prefix}: bindless vkCreateDevice result {device_creation.get('result')}")
         for field, observed in layer["audit"].items():
             if not observed:
                 reasons.append(f"{prefix}: missing independent audit field {field}")
@@ -680,25 +699,25 @@ def write_vkd3d_capability_decision(root_directory: Path, run_records: list[dict
     profiles = [
         _vkd3d_profile_decision(
             layers, "legacy-vkd3d-proton-2.6", (1, 1),
-            ("descriptorIndexing", "robustness2", "timelineSemaphore",
+            ("bindlessDescriptorIndexing", "robustness2", "timelineSemaphore",
              "samplerMirrorClampToEdgeExtension", "createRenderpass2",
              "separateDepthStencilLayouts", "bindMemory2", "copyCommands2"),
             1_000_000),
         _vkd3d_profile_decision(
             layers, "legacy-vkd3d-proton-2.8", (1, 1),
-            ("descriptorIndexing", "robustness2", "timelineSemaphore",
+            ("bindlessDescriptorIndexing", "robustness2", "timelineSemaphore",
              "samplerMirrorClampToEdgeExtension", "separateDepthStencilLayouts", "bindMemory2",
              "copyCommands2", "dynamicRendering", "extendedDynamicState",
              "extendedDynamicState2", "bufferDeviceAddress", "pushDescriptor"),
             1_000_000),
         _vkd3d_profile_decision(
             layers, "modern-vkd3d-proton-2.9", (1, 3),
-            ("descriptorIndexing", "robustness2", "samplerMirrorClampToEdge",
+            ("bindlessDescriptorIndexing", "robustness2", "samplerMirrorClampToEdge",
              "shaderDrawParameters", "pushDescriptor"),
             1_000_000),
         _vkd3d_profile_decision(
             layers, "experimental-vkd3d-proton-2.6-limited-500k", (1, 1),
-            ("descriptorIndexing", "robustness2", "timelineSemaphore",
+            ("bindlessDescriptorIndexing", "robustness2", "timelineSemaphore",
              "samplerMirrorClampToEdgeExtension", "createRenderpass2",
              "separateDepthStencilLayouts", "bindMemory2", "copyCommands2"),
             500_000, experimental=True),
