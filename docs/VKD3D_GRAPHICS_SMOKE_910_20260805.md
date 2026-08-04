@@ -125,3 +125,76 @@ Retained r8 logs outside the repository have SHA-256 hashes
 `a20445682d127b418ddd32ca4bc458d359c677ad9d52f9e67cf5f319432686a8`
 (Host) and `0a70c655cdf6752e90aab9767d722c50390fe93a352c4648dee6723bb4bb69c1`
 (Guest stderr).
+
+## r9 ordering failure and root cause
+
+The first 1,000-frame attempt failed after Guest frame 145. The Host decoder
+reported `vkCmdBindDescriptorSets resulted in CS error`, entered its fatal
+state, and the Guest aborted its Venus ring submission. The retained r9 Host
+and Guest logs have SHA-256 hashes
+`887c2c1291eb03e5e081c209acd1be41160740c765210b5b8e55708b35626456`
+and `3ae4f3ffab48b64fb9959d0d279ff743cf260e67273c9606208adc4c4c6979d9`.
+
+The failure was initially correlated with the 128 KiB Venus ring size, but the
+shared ring uses one SHM fd on both sides and its normal wrap implementation is
+unchanged. The decisive difference was in the process environment: the stable
+DXVK/Venus path uses `BOX64_DYNAREC_WEAKBARRIER=0` and
+`VN_WINEHUA_STRONG_RING_BARRIER=1`, while the VKD3D experiment recorded the
+default weak-barrier value `2` and no strong publication barrier. The
+experiment deliberately keeps the product D3D11 backend as WineD3D, so it had
+bypassed the DXVK-only transport defaults even though its isolated D3D12 DLL
+was issuing Vulkan commands through Venus.
+
+Commit `5dde3da` applies those two ordering requirements in
+`capabilityProbeEnvironment()`, which is used by the PE Vulkan probe and
+isolated VKD3D experiments. It does not alter ordinary WineD3D, DXVK Legacy,
+DXVK Modern, or default desktop launches. No wait, sleep, or flush compensation
+was added.
+
+## r10 ordering-fix boundary result
+
+The fixed HAP has SHA-256
+`1b4206216813583eaacd1692b5764ffd93c57c97276777df18718499fd41e974`.
+Its embedded `wine-data.zip` remains
+`ea2f9f9e410416dd2688469f032481b1d01cb3c93350a237cd83c06379db6be5`;
+the Guest Vulkan loader is x86-64 and Host `libentry.so` is AArch64.
+
+After a full uninstall/reinstall and clean prefix, r10 recorded both corrected
+environment values, two `WineHua strong ring publish barrier enabled` records,
+and completed 200/200 frames in 4,467 ms with exit code zero. The physical
+SurfaceQueue reached frame 120 with 120 signals and zero failures. Retained r10
+Host and Guest logs have SHA-256 hashes
+`b80febffc700e414cda12a45bd06bbca2d2b22988e77afe52ea69310bfbea0ea`
+and `487070e98872c07765f6f3def6bddf73a2d44eeeabfeeff6ed2b5784921ae42e`.
+
+## Three clean 1,000-frame physical-display results
+
+Each qualifying run used the fixed HAP, a unique experiment ID, full bundle
+uninstall/reinstall, and a clean Wine prefix. The Guest emitted frame 1,000,
+wrote `status=PASS`, and exited zero. The Host SurfaceQueue reached at least
+frame 960 with zero failures in every run.
+
+| Experiment | Guest result | Elapsed | FPS | Host frame 960 |
+| --- | --- | ---: | ---: | --- |
+| `vkd3d-500k-f74c040a-graphics-r11-1000f` | PASS 1000/1000 | 14,405 ms | 69.420 | signals=961, failures=0 |
+| `vkd3d-500k-f74c040a-graphics-r12-1000f` | PASS 1000/1000 | 14,842 ms | 67.376 | signals=963, failures=0 |
+| `vkd3d-500k-f74c040a-graphics-r13-1000f` | PASS 1000/1000 | 14,946 ms | 66.908 | signals=963, failures=0 |
+
+The asynchronous release signal counter can be ahead of the published-frame
+counter while queued buffers retire; no signal operation failed. None of the
+three runs contains a command-stream decoder error, fatal ring abort, sleep,
+`vkDeviceWaitIdle`, or global-flush workaround.
+
+| Log | SHA-256 |
+| --- | --- |
+| `vkd3d-graphics-r11-1000f-host.log` | `7bb58f4bb0f20b4875311ff17e8e888d304d4dc2f79b58cb1a50b6ec212f76dd` |
+| `vkd3d-graphics-r11-1000f-stderr.log` | `ccb99419a2e19326174d8651a15ef0bfae87c2769c4bf352ea3b752b8ddf345a` |
+| `vkd3d-graphics-r12-1000f-host.log` | `dbcde49adca2a59d8ebef2d707f20671195ff3b7f810497b1193eff963b7b9d1` |
+| `vkd3d-graphics-r12-1000f-stderr.log` | `55eed356cc08e296ed36763c2f7aa03e883ecedb77046645b037c28c29cd03bd` |
+| `vkd3d-graphics-r13-1000f-host.log` | `f58467ccd6c8d411c47947845f7d1b3d6db09879463e4639457393a6cada8b1d` |
+| `vkd3d-graphics-r13-1000f-stderr.log` | `7a2c8149fce935f2af756f50622edb0f12717f33c234e213b7d3f0fcd4fc3f92` |
+
+This completes the isolated 1,000-frame physical-display gate on the recorded
+910 device and exact runtime artifacts. D3D12 remains default-off. BDA,
+multiple queues, BrokerPresent, and the full DXVK regression remain mandatory
+before any real DX12 game qualification.

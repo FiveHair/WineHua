@@ -98,6 +98,12 @@ three independently reinstalled runs passed with identical build identity,
 post-teardown result records, and process exit status. See
 `VKD3D_DESCRIPTOR_500K_910_20260804.md`.
 
-The next isolated gates are BDA, multiple queues, and BrokerPresent. A physical
-display run must then sustain 1,000 frames before any DX12 game test. D3D12
-remains default-off throughout these gates.
+The isolated physical-display gate is now also complete on Maleoon 910: after
+correcting the VKD3D experiment's Box64/Venus command-ring ordering, three
+independently reinstalled runs sustained 1,000/1,000 Guest frames and reached
+Host frame 960 with zero SurfaceQueue failures. See
+`VKD3D_GRAPHICS_SMOKE_910_20260805.md`.
+
+The remaining isolated gates are BDA, multiple queues, BrokerPresent, and the
+full DXVK regression. D3D12 remains default-off, and no real DX12 game test is
+qualified until those gates pass.
