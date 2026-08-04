@@ -40,6 +40,24 @@ static bool FileHasData(const char* path) {
     return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
 }
 
+static bool FileContainsExactRecord(const std::string& path, const char* expected)
+{
+    FILE* file = fopen(path.c_str(), "r");
+    if (!file) return false;
+    char record[64] = {};
+    const size_t expectedLength = strlen(expected);
+    size_t length = fread(record, 1, sizeof(record), file);
+    fclose(file);
+
+    // Older test builds wrote the token through the Windows text CRT, which
+    // transparently appended CRLF. Keep those valid completed prefixes usable
+    // while requiring the exact token itself.
+    while (length > expectedLength &&
+           (record[length - 1] == '\n' || record[length - 1] == '\r'))
+        --length;
+    return length == expectedLength && !memcmp(record, expected, expectedLength);
+}
+
 static bool DirExists(const char* path) {
     struct stat st;
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
@@ -430,6 +448,8 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
     {
         std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin +
             "|wineserver|-f|-p|__env=WINEPREFIX=" + p->prefixDir;
+        if (p->prefixDir == WINE_SMOKE_PREFIX)
+            wsEntryParams += "|__env=WINEHUA_PROCESS_EXIT_TELEMETRY=1";
         OH_LOG_INFO(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
         NativeChildProcess_Args wsArgs = {};
         wsArgs.entryParams = const_cast<char*>(wsEntryParams.c_str());
@@ -474,14 +494,39 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
                          initMarker.c_str());
             return false;
         }
+        // wineboot derives this prefix-root path from WINECONFIGDIR, the same
+        // dynamic Windows path it already uses for .update-timestamp. Do not
+        // rely on WINEPREFIX or a custom launcher variable being imported.
+        const std::string winebootStatus =
+            p->prefixDir + "/.winehua-wineboot-init-status";
+        unlink(winebootStatus.c_str());
+        if (FILE* request = fopen(winebootStatus.c_str(), "wb")) {
+            static constexpr char token[] = "wineboot-init-request";
+            const bool written = fwrite(token, 1, sizeof(token) - 1, request) == sizeof(token) - 1;
+            const bool closed = fclose(request) == 0;
+            if (!written || !closed) {
+                OH_LOG_ERROR(LOG_APP,
+                             "[Launch-Async] cannot publish wineboot completion request: %{public}s",
+                             winebootStatus.c_str());
+                unlink(winebootStatus.c_str());
+                return false;
+            }
+        } else {
+            OH_LOG_ERROR(LOG_APP,
+                         "[Launch-Async] cannot create wineboot completion request: %{public}s",
+                         winebootStatus.c_str());
+            return false;
+        }
         auto* ws = WaylandServer::GetInstance();
         ws->SetDesktopRootRecognitionEnabled(false);
-        // wineboot creates shell-owned helper windows while initializing a fresh
-        // prefix.  Keep those helpers on the desktop path even when the smoke
-        // suite itself uses managed windows; otherwise the first clean-prefix
-        // session can leave Wayland/audio/graphics services half initialized.
+        // The bootstrap worker creates shell-owned helper windows before the
+        // requested test starts. Give only those helpers desktop-root routing;
+        // this does not change the caller's managed/single-window UI mode.
+        const bool bootstrapNeedsDesktopSurfaces =
+            p->automationMode && p->prefixDir == WINE_SMOKE_PREFIX;
         const char* desktopTag =
-            (ws->IsDesktopMode() || p->automationMode) ? "__winehua_desktop__|" : "";
+            (ws->IsDesktopMode() || bootstrapNeedsDesktopSurfaces) ?
+                "__winehua_desktop__|" : "";
 #ifdef __aarch64__
         std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag +
             "wineboot|--init|__env=WINEPREFIX=" + p->prefixDir;
@@ -489,6 +534,12 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag +
             "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir;
 #endif
+        if (p->automationMode && p->prefixDir == WINE_SMOKE_PREFIX) {
+            // A clean, headless verification prefix has no use for optional
+            // .NET/HTML components. Avoid their interactive download dialogs.
+            entryParams += "|__env=WINEDLLOVERRIDES=mscoree,mshtml=";
+            entryParams += "|__env=WINEHUA_BOOTSTRAP_PHASE=clean-automation";
+        }
         // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
@@ -526,17 +577,22 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
                 napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
             return false;
         }
-        /* wineboot 已退出: registry 仍在 wineserver flush 途中 (实测落盘延迟
-         * 稳定 ~13s), 宽限窗口等文件就绪 — 文件到位即通过, 不会满等 */
-        if (!WaitFor("wine prefix",
-                     [&p]() { return IsWinePrefixInitialized(p->prefixDir); },
-                     60000, 200)) {
-            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot exited but prefix incomplete, abort");
+        /* The NCP wrapper can finish before the broker-launched wineboot.exe.
+         * Require both Wine's final success marker and the durable prefix
+         * contents; early registry files alone are not a valid init result. */
+        if (!WaitFor("wineboot completion",
+                     [&p, &winebootStatus]() {
+                         return FileContainsExactRecord(winebootStatus, "wineboot-init-ok") &&
+                                IsWinePrefixInitialized(p->prefixDir);
+                     }, 60000, 200)) {
+            OH_LOG_ERROR(LOG_APP,
+                         "[Launch-Async] wineboot did not report successful completion; prefix remains unready");
             if (gStateTsfn)
                 napi_call_threadsafe_function(gStateTsfn, strdup("wineboot-failed"), napi_tsfn_blocking);
             return false;
         }
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot completed (%{public}d s)", aliveMs / 1000);
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] wineboot worker completed (%{public}d s)", aliveMs / 1000);
+        unlink(winebootStatus.c_str());
         unlink(initMarker.c_str());
         ws->SetDesktopRootRecognitionEnabled(true);
         ws->PromotePendingDesktopRoot();
