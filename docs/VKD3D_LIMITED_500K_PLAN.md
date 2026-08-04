@@ -110,6 +110,13 @@ SRV/UAV GPUVA compute access, BDA output readback, and byte-for-byte results
 while retaining the 500K final-slot descriptor coverage. See
 `VKD3D_BDA_910_20260805.md`.
 
-The remaining isolated gates are multiple queues, BrokerPresent, and the full
-DXVK regression. D3D12 remains default-off, and no real DX12 game test is
-qualified until those gates pass.
+The multiple-queue gate is complete on Maleoon 910. Three independently
+reinstalled runs validated COPY-to-DIRECT and DIRECT-to-COPY fence dependencies,
+two COPY submissions, one DIRECT submission, and a 256-byte
+upload/default/readback path. See `VKD3D_MULTIQUEUE_910_20260805.md`.
+
+The 1,000-frame physical-display evidence already exercises the isolated
+`venus_broker_present` route. The remaining qualification work is to reconcile
+that evidence as the BrokerPresent gate and run the full DXVK product
+regression. D3D12 remains default-off, and no real DX12 game test is qualified
+until those checks pass.
