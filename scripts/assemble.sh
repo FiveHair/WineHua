@@ -461,10 +461,16 @@ EOF
     cp "$BUILD_DIR/wine-ohos/nls/"*.nls "$wine_data/share/wine/nls/"
     # winmd
     cp "$BUILD_DIR/wine-ohos/include/"*.winmd "$wine_data/share/wine/winmd/"
-    # Wine Mono (.NET 运行时)
-    if ls "$BUILD_DIR/wine-ohos/share/wine/mono/"*.msi >/dev/null 2>&1; then
-        cp "$BUILD_DIR/wine-ohos/share/wine/mono/"*.msi "$wine_data/share/wine/mono/"
+    # Wine Mono (.NET 运行时). Default builds require the exact MSI expected
+    # by mscoree/appwiz; an empty directory would otherwise leave wineboot in
+    # an interactive installer forever on first launch.
+    local wine_mono_msi="$BUILD_DIR/wine-ohos/share/wine/mono/wine-mono-11.1.0-x86.msi"
+    if [ "${BUILD_WINE_MONO:-1}" = "1" ]; then
+        [ -s "$wine_mono_msi" ] || err "Wine Mono MSI missing: $wine_mono_msi"
+        cp "$wine_mono_msi" "$wine_data/share/wine/mono/"
         log "    wine-mono.msi → rawfile share/wine/mono/"
+    else
+        log "    Wine Mono: SKIP (BUILD_WINE_MONO=0)"
     fi
     # wine.inf (含 OHOS font substitutes)
     cp "$BUILD_DIR/wine-ohos/loader/wine.inf" "$wine_data/share/wine/"

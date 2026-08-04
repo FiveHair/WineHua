@@ -112,6 +112,7 @@ struct Index {
   @State processList: ProcessInfo[] = [];
   @State initOverlayVisible: boolean = false;
   @State initOverlayText: string = '';
+  @State initInProgress: boolean = false;
   private hasRawfileWineData: boolean = false;
   private zHome: string = '/storage/Users/currentUser/Download';
   private automationMode: boolean = false;
@@ -145,29 +146,35 @@ struct Index {
 
     testNapi.setStateCallback((s: string) => {
       hilog.info(DOMAIN, 'wine', 'state: %{public}s', s);
-      this.state = s;
 
       const colonIdx = s.indexOf(':');
       const pid = colonIdx >= 0 ? parseInt(s.substring(0, colonIdx)) : -1;
       const stateMsg = colonIdx >= 0 ? s.substring(colonIdx + 1) : s;
+      this.state = stateMsg;
 
       if (stateMsg == 'wineserver-starting' || stateMsg == 'wineboot-starting') {
+        this.initInProgress = true;
         this.setInitStatus('Wine 正在初始化...', true);
       } else if (stateMsg == 'wine-ready') {
-        this.setInitStatus('已就绪', false);
-        // wineboot 可能还在后台初始化 prefix，轮询等待 drive_c 就绪
+        // C++ publishes wine-ready only after wineboot's durable completion
+        // marker. Confirm the prefix once more before exposing the desktop.
+        this.setInitStatus('正在确认 Wine 环境...', true);
         this.waitForPrefix();
       } else if (stateMsg == 'wine-running') {
-        this.setInitStatus('运行中', false);
         this.refreshProcessList();
+        if (!this.initInProgress) this.setInitStatus('运行中', false);
       } else if (stateMsg == 'exited') {
         this.refreshProcessList();
         const running = this.processList.filter(p => p.state === 'running');
-        if (running.length === 0) {
+        if (!this.initInProgress && this.prefixReady && running.length === 0) {
           this.setInitStatus('已就绪', false);
         }
-      } else if (stateMsg == 'wine-failed') {
-        this.setInitStatus('启动失败', false);
+      } else if (stateMsg == 'wine-failed' || stateMsg == 'wineboot-failed' ||
+        stateMsg == 'wineserver-failed') {
+        this.initInProgress = false;
+        const failureText = stateMsg == 'wineboot-failed' ? 'Wine 初始化失败' :
+          (stateMsg == 'wineserver-failed' ? 'Wine 服务启动失败' : '启动失败');
+        this.setInitStatus(failureText, false);
         this.refreshProcessList();
       }
     });
@@ -311,7 +318,8 @@ struct Index {
       try {
         if (testNapi.checkWinePrefix(this.prefixMode)) {
           this.prefixReady = true;
-          this.initOverlayVisible = false;
+          this.initInProgress = false;
+          this.setInitStatus('已就绪', false);
           this.curDir = this.driveC;
           this.dirStack = [];
           this.listDir(this.driveC);
@@ -329,6 +337,7 @@ struct Index {
       this.startRequestedSmoke();
       this.startRequestedGame();
     } else {
+      this.initInProgress = false;
       this.setInitStatus('Wine 前缀初始化超时', false);
       hilog.error(DOMAIN, 'wine', 'prefix remained unavailable after initialization timeout');
     }
@@ -667,6 +676,7 @@ struct Index {
       return;
     }
     hilog.info(DOMAIN, 'wine', 'auto-init: starting Wine...');
+    this.initInProgress = true;
     this.setInitStatus('启动服务...', true);
     /* The renderer process is created while startServer() initializes the
      * broker, before the isolated PE receives capabilityProbeEnvironment().
@@ -681,6 +691,7 @@ struct Index {
       hostShadowProfile, this.smokeRequest.experimentId);
     const ok: boolean = testNapi.startServer(this.sockPath);
     if (!ok) {
+      this.initInProgress = false;
       this.setInitStatus('启动服务失败', false);
       return;
     }
@@ -911,25 +922,25 @@ struct Index {
         if (!this.prefixReady) {
           Button('初始化 Wine')
             .width('100%').backgroundColor('#285')
-            .enabled(this.state != 'wineserver-starting' && this.state != 'wineboot-starting')
+            .enabled(!this.initInProgress)
             .onClick(this.doInit)
             .margin({ bottom: 8 })
         } else {
           Button('重置 Wine')
             .width('100%').backgroundColor('#633')
-            .enabled(this.state != 'wineserver-starting' && this.state != 'wineboot-starting' && this.state != 'wine-running')
+            .enabled(!this.initInProgress && this.state != 'wine-running')
             .onClick(this.doReset)
             .margin({ bottom: 8 })
           Button('重启 Wine')
             .width('100%').backgroundColor('#652')
-            .enabled(this.state != 'wineserver-starting' && this.state != 'wineboot-starting' && this.state != 'wine-running')
+            .enabled(!this.initInProgress && this.state != 'wine-running')
             .onClick(this.doInit)
             .margin({ bottom: 8 })
         }
 
         Button('开发测试（Core）')
           .width('100%').backgroundColor('#246')
-          .enabled(this.state != 'wineserver-starting' && this.state != 'wineboot-starting')
+          .enabled(!this.initInProgress)
           .onClick(this.startDeveloperSmoke)
           .margin({ bottom: 8 })
 
@@ -1040,7 +1051,7 @@ struct Index {
                   if (this.isExe(name)) {
                     Button('启动')
                       .height(32)
-                      .enabled(this.state != 'wineserver-starting' && this.state != 'wineboot-starting')
+                      .enabled(!this.initInProgress)
                       .onClick(() => this.doRun(name))
                   }
                 }
