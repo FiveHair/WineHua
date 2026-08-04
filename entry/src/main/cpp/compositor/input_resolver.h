@@ -62,6 +62,10 @@ public:
                                double& dx, double& dy);
 
 private:
+    // root 尺寸解析 (FindInputTargetAt / SurfaceLocalToDesktop 两处全屏 fit
+    // 计算共用): root toplevel state 有尺寸用它的, 否则回退到 output 尺寸
+    void ResolveRootSize(int& rootW, int& rootH) const;
+
     ToplevelManager& tmgr_;
     DesktopCompositor& compositor_;
     const uint32_t& desktopRootToplevelId_;

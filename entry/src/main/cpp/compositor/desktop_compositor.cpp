@@ -812,10 +812,11 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             if (hasFullscreen && layer.toplevelId == fullscreenId) {
                 const int layerDispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
                 const int layerDispH = sl.vpDstH > 0 ? std::min(sl.vpDstH, sl.h) : sl.h;
-                const int layerDstX = transform.offX + static_cast<int>(lround((layerX - fullscreenX) * transform.scale));
-                const int layerDstY = transform.offY + static_cast<int>(lround((layerY - fullscreenY) * transform.scale));
-                const int layerDstW = std::max(1, static_cast<int>(lround(layerDispW * transform.scale)));
-                const int layerDstH = std::max(1, static_cast<int>(lround(layerDispH * transform.scale)));
+                // 与输入 FindInputTargetAt 全屏分支同几何 (FitMapLayerRect 唯一实现)
+                int layerDstX, layerDstY, layerDstW, layerDstH;
+                FitMapLayerRect(transform, layerX - fullscreenX, layerY - fullscreenY,
+                                layerDispW, layerDispH,
+                                layerDstX, layerDstY, layerDstW, layerDstH);
                 BlitScaled(composited.data(), rootW, rootH,
                            sl.pixels.data(), sl.w, layerDispW, layerDispH,
                            layerDstX, layerDstY, layerDstW, layerDstH,

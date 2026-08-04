@@ -1,11 +1,9 @@
 #include "input_resolver.h"
 #include "toplevel_manager.h"
 #include "desktop_compositor.h"
-#include "compositor_utils.h"
 #include "geometry.h"
 #include "compositor/surface_data.h"
 #include <algorithm>
-#include <cmath>
 #include <hilog/log.h>
 
 #undef LOG_DOMAIN
@@ -22,6 +20,13 @@ InputResolver::InputResolver(ToplevelManager& tmgr, DesktopCompositor& composito
     , outputW_(outputW)
     , outputH_(outputH)
 {
+}
+
+void InputResolver::ResolveRootSize(int& rootW, int& rootH) const
+{
+    const auto* rootSt = tmgr_.FindToplevelLocked(desktopRootToplevelId_);
+    rootW = (rootSt && rootSt->Width() > 0) ? rootSt->Width() : outputW_;
+    rootH = (rootSt && rootSt->Height() > 0) ? rootSt->Height() : outputH_;
 }
 
 uint32_t InputResolver::FindToplevelAt(int x, int y)
@@ -41,9 +46,8 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
     // 全屏窗口作为普通层参与 Z 序, 命中几何用 fit (与渲染 blitToplevel/
     // blitSubsurface 同一变换); "盖在游戏之上的层优先命中"由逆序天然
     // 保证, 不再有独立的前置命中循环。
-    const auto* rootSt = tmgr_.FindToplevelLocked(rootId);
-    const int rootW = (rootSt && rootSt->Width() > 0) ? rootSt->Width() : outputW_;
-    const int rootH = (rootSt && rootSt->Height() > 0) ? rootSt->Height() : outputH_;
+    int rootW, rootH;
+    ResolveRootSize(rootW, rootH);
     const auto layers = compositor_.BuildLayerListLocked(rootW, rootH);
 
     // 全屏目标选取 + fit 几何 — 与渲染侧 (TakeToplevelFrame) 共用单一实现:
@@ -126,10 +130,10 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
                 // fit 变换, 与渲染 blitSubsurface 全屏分支同几何)
                 const int layerDispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
                 const int layerDispH = sl.vpDstH > 0 ? std::min(sl.vpDstH, sl.h) : sl.h;
-                const int layerScrX = static_cast<int>(lround(FitMapX(transform, layer.x - fsWinX)));
-                const int layerScrY = static_cast<int>(lround(FitMapY(transform, layer.y - fsWinY)));
-                const int layerScrW = std::max(1, static_cast<int>(lround(layerDispW * transform.scale)));
-                const int layerScrH = std::max(1, static_cast<int>(lround(layerDispH * transform.scale)));
+                int layerScrX, layerScrY, layerScrW, layerScrH;
+                FitMapLayerRect(transform, layer.x - fsWinX, layer.y - fsWinY,
+                                layerDispW, layerDispH,
+                                layerScrX, layerScrY, layerScrW, layerScrH);
                 if (x >= layerScrX && x < layerScrX + layerScrW &&
                     y >= layerScrY && y < layerScrY + layerScrH) {
                     out.toplevelId = fullscreenId;
@@ -225,9 +229,8 @@ bool InputResolver::SurfaceLocalToDesktop(wl_resource* surface, double lx, doubl
     if (st->IsFullscreen()) {
         // 与 FindInputTargetAt 全屏分支同一几何 (ComputeFullscreenFitLocked),
         // 保证 warp 锚点与输入逆映射互为正反变换
-        const auto* rootSt = tmgr_.FindToplevelLocked(desktopRootToplevelId_);
-        const int rootW = (rootSt && rootSt->Width() > 0) ? rootSt->Width() : outputW_;
-        const int rootH = (rootSt && rootSt->Height() > 0) ? rootSt->Height() : outputH_;
+        int rootW, rootH;
+        ResolveRootSize(rootW, rootH);
         FitRect transform;
         if (!compositor_.ComputeFullscreenFitLocked(tl, rootW, rootH, transform)) return false;
         dx = transform.offX + lx * transform.scale;
