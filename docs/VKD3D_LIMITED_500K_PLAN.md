@@ -1,6 +1,6 @@
 # VKD3D Limited 500K Adaptation Plan
 
-> Updated: 2026-08-04
+> Updated: 2026-08-05
 
 > Status: isolated experimental implementation. No vkd3d-proton DLL is
 > packaged, loaded, or selected by the product runtime.
@@ -104,6 +104,12 @@ independently reinstalled runs sustained 1,000/1,000 Guest frames and reached
 Host frame 960 with zero SurfaceQueue failures. See
 `VKD3D_GRAPHICS_SMOKE_910_20260805.md`.
 
-The remaining isolated gates are BDA, multiple queues, BrokerPresent, and the
-full DXVK regression. D3D12 remains default-off, and no real DX12 game test is
+The BDA gate is also complete on Maleoon 910 with the ordering-fixed HAP. Three
+independently reinstalled runs validated non-zero GPU virtual addresses, root
+SRV/UAV GPUVA compute access, BDA output readback, and byte-for-byte results
+while retaining the 500K final-slot descriptor coverage. See
+`VKD3D_BDA_910_20260805.md`.
+
+The remaining isolated gates are multiple queues, BrokerPresent, and the full
+DXVK regression. D3D12 remains default-off, and no real DX12 game test is
 qualified until those gates pass.
