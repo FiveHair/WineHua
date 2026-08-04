@@ -175,12 +175,18 @@ assemble_pad() {
 
     # -- 2. PE DLL + 数据文件 → rawfile (两种架构共用) --
     # x86_64-windows/ — 复制所有运行时 PE 文件
-    # 注意: .cpl 打包 (含 appwiz.cpl), 但依赖 wine-mono msi 同包就位:
-    # wineboot 初始化时 mscoree.dll 触发 appwiz.cpl install_mono →
-    # install_addon 在 WINEDATADIR/mono/ 找到 msi → 静默安装不弹框;
-    # 若 msi 缺失 (BUILD_WINE_MONO=0) 则弹 DialogBoxW 模态框, OHOS
-    # 无头环境无人响应 → wineboot 永久阻塞. 故 cpl 与 mono msi 必须同包.
-    for ext in dll drv exe sys acm ax ocx tlb cpl; do
+    # .cpl (含 appwiz.cpl) 是否打包由 BUILD_WINE_MONO 决定:
+    #   =1 (本地默认): 打包 cpl + build_deps 下载 mono msi, 保留 .NET/控制面板.
+    #   =0 (CI 无 curl): 不打包 cpl. 若 mono 缺失, wineboot 初始化时 mscoree.dll
+    #   会 CreateProcess "control.exe appwiz.cpl install_mono" 弹 DialogBoxW 模态框,
+    #   OHOS 无头环境无人响应 → wineboot 永久阻塞 (mscoree WaitForSingleObject 无限
+    #   等待). 去掉 appwiz.cpl 后 control.exe 加载 cpl 失败立即退出, mscoree 走
+    #   "无 .NET 运行时"路径不卡死.
+    local pe_exts="dll drv exe sys acm ax ocx tlb"
+    if [ "${BUILD_WINE_MONO:-1}" = "1" ]; then
+        pe_exts="$pe_exts cpl"
+    fi
+    for ext in $pe_exts; do
         for f in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.$ext; do
             [ -f "$f" ] && cp "$f" "$wine_data/bin/x86_64-windows/"
         done
@@ -203,7 +209,8 @@ assemble_pad() {
     # 注意: wineboot/rpcss/services/conhost 等服务程序只有 x86_64 版,
     # WoW64 下它们由 Wine 以 64 位进程拉起, 属上游 WoW64 的正常行为.
     mkdir -p "$wine_data/bin/i386-windows"
-    for ext in dll drv exe sys acm ax ocx tlb cpl; do
+    # 与 x86_64 一致: cpl 仅当 BUILD_WINE_MONO=1 时打包 (见上方 pe_exts 注释)
+    for ext in $pe_exts; do
         for f in "$BUILD_DIR/wine-ohos/dlls/"*/i386-windows/*.$ext; do
             [ -f "$f" ] && cp "$f" "$wine_data/bin/i386-windows/"
         done
