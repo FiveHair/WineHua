@@ -237,3 +237,47 @@ Retained evidence outside the repository:
 | `vkd3d-manual-ui-910-20260805-stderr.log` | `7fab1141d630627caad39a02893834a971b06aca807b9380a7881c43b41d4c15` |
 | `vkd3d-manual-ui-910-20260805-hilog.log` | `9c4ba3c51cf90ae5baef934b8f60d2ca17ea0a3fb353458f5771762854155f2f` |
 | `vkd3d-manual-ui-910-20260805.jpeg` | `27e7001ca8a04f6dcf9ab20efdab74dc80158e8ca6f36caf3d79e4eec6657f3f` |
+
+## User-visible result reporting qualification
+
+The manual button now passes explicit `--result` and `--checkpoint` paths to
+the isolated graphics smoke. The ArkTS UI monitors those files and reports the
+current D3D12 stage and frame count while running. It retains the authoritative
+PASS/FAIL result, frames, elapsed time, FPS, and failure stage after the PE
+exits instead of allowing the generic process callback to replace the result
+with `Ready`.
+
+The reporting change was rebuilt and tested after another full
+force-stop/uninstall/install cycle on the same 910. The signed HAP was newer
+than the source and had SHA-256
+`cb6b2413d35add3a2c658e1865a7e5ab8af68144bdec7edc0d9dbd9fee707f6e`.
+Its embedded and assembled `wine-data.zip` both matched
+`688ca5c69e30b3880750c598b1cb8b0e2449392791ad1ac542511987a6e047c0`;
+Guest EGL remained x86-64 and Host `libentry.so` remained AArch64.
+
+Before entering the experiment, the normal DXVK Legacy prefix reached the
+blue Wine desktop. The opt-in run then generated this authoritative result:
+
+```json
+{"status":"PASS","stage":"complete","frames":1000,"target_frames":1000,"elapsed_ms":15318,"fps":65.283,"width":640,"height":480,"sync_interval":0}
+```
+
+The UI displayed `PASS: 1000/1000`, `15.318 s`, and `65.283 FPS` after
+completion. The PE exited zero. The packaged and isolated runtime copies of
+`d3d12.dll` both matched
+`c0fc7447f6b298db02330e89f48053806a13349f05eaac01af4e0d3b2d1a6149`;
+the smoke executable matched
+`cba49085ffcb6e2e98380977253ed0a06863ddc2b671e998e294af3683478dc5`.
+The retained Host and stderr logs contained no device loss, decoder error,
+fatal ring abort, release failure, or `vkDeviceWaitIdle` record. A cold restart
+again restored the normal blue DXVK Legacy desktop.
+
+Retained evidence outside the repository:
+
+| Evidence | SHA-256 |
+| --- | --- |
+| `vkd3d-ui-result-910-20260805-host.log` | `47d6a3e6908ffff09949b2aa148b9b46cbda29a483f8b7af7646d11474bd4bd2` |
+| `vkd3d-ui-result-910-20260805-stderr.log` | `63b9fc1ed50edb9d7e7ac013aba36ffd58ab33ccc1e363359461529cf9f3a2e0` |
+| `vkd3d-ui-result-910-20260805.json` | `fc50ba8741fc6433a43e7616c7d4106b81af16542dcc0c9e867b59b637036621` |
+| `vkd3d-ui-result-910-20260805-checkpoint.json` | `dbdf1d85b54d180d008c5a66bcb924289bad1fad37c69d0016a1924d443ec40a` |
+| `winehua-vkd3d-after-result-910-20260805.jpeg` | `025ed97b59c93462f00bdf10de10f91bd9090b92c6c2d26e46331038d35ec9e9` |

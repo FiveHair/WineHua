@@ -86,6 +86,24 @@ interface ProcessInfo {
   state: string;
 }
 
+interface Vkd3dManualResult {
+  status: string;
+  stage: string;
+  frames: number;
+  target_frames: number;
+  elapsed_ms: number;
+  fps: number;
+  width: number;
+  height: number;
+  sync_interval: number;
+}
+
+interface Vkd3dManualCheckpoint {
+  state: string;
+  stage: string;
+  frames: number;
+}
+
 @Entry
 @Component
 struct Index {
@@ -130,6 +148,11 @@ struct Index {
   private experimentMode: boolean = false;
   private experimentStaged: boolean = false;
   private pendingVkd3dSmoke: boolean = false;
+  @State vkd3dSmokePhase: string = 'idle';
+  @State vkd3dSmokeStatus: string = '尚未运行';
+  @State vkd3dSmokeDetail: string = '点击下方按钮后，将在独立 .wine-smoke 中验证物理显示 1000 帧。';
+  private manualVkd3dSmokePid: number = -1;
+  private manualVkd3dSmokeExited: boolean = false;
 
   aboutToAppear(): void {
     this.smokeRequest = parseSmokeRequest(this.smokeRequestText);
@@ -165,11 +188,16 @@ struct Index {
         this.waitForPrefix();
       } else if (stateMsg == 'wine-running') {
         this.refreshProcessList();
-        if (!this.initInProgress) this.setInitStatus('运行中', false);
+        if (!this.initInProgress && !this.keepManualVkd3dStatus()) this.setInitStatus('运行中', false);
       } else if (stateMsg == 'exited') {
+        if (this.vkd3dSmokePhase === 'running' && pid === this.manualVkd3dSmokePid) {
+          this.manualVkd3dSmokeExited = true;
+          hilog.info(DOMAIN, 'VKD3D', 'manual smoke process exited pid=%{public}d', pid);
+        }
         this.refreshProcessList();
         const running = this.processList.filter(p => p.state === 'running');
-        if (!this.initInProgress && this.prefixReady && running.length === 0) {
+        if (!this.initInProgress && this.prefixReady && running.length === 0 &&
+          !this.keepManualVkd3dStatus()) {
           this.setInitStatus('已就绪', false);
         }
       } else if (stateMsg == 'wine-failed' || stateMsg == 'wineboot-failed' ||
@@ -177,6 +205,12 @@ struct Index {
         this.initInProgress = false;
         const failureText = stateMsg == 'wineboot-failed' ? 'Wine 初始化失败' :
           (stateMsg == 'wineserver-failed' ? 'Wine 服务启动失败' : '启动失败');
+        if (this.pendingVkd3dSmoke || this.vkd3dSmokePhase === 'running') {
+          this.pendingVkd3dSmoke = false;
+          this.vkd3dSmokePhase = 'fail';
+          this.vkd3dSmokeStatus = `FAIL：${failureText}`;
+          this.vkd3dSmokeDetail = '隔离 Wine/Vulkan 会话未能进入 DX12 测试程序。';
+        }
         this.setInitStatus(failureText, false);
         this.refreshProcessList();
       }
@@ -230,6 +264,51 @@ struct Index {
     this.statusText = text;
     this.initOverlayText = text;
     this.initOverlayVisible = visible;
+  }
+
+  private keepManualVkd3dStatus(): boolean {
+    return this.d3dBackend === 'vkd3d_limited_500k' && this.vkd3dSmokePhase !== 'idle';
+  }
+
+  private vkd3dStageText(stage: string): string {
+    switch (stage) {
+      case 'startup': return '程序启动';
+      case 'window_class': return '窗口类注册';
+      case 'window': return '窗口创建';
+      case 'load_d3d12': return '加载 d3d12.dll';
+      case 'load_dxgi': return '加载 dxgi.dll';
+      case 'd3d12_export': return '解析 D3D12CreateDevice';
+      case 'd3d12_root_signature_export': return '解析根签名接口';
+      case 'dxgi_export': return '解析 DXGI 工厂接口';
+      case 'device': return '创建 D3D12 设备';
+      case 'command_queue': return '创建命令队列';
+      case 'swapchain': return '创建交换链';
+      case 'command_allocator': return '创建命令分配器';
+      case 'root_signature_serialize': return '序列化根签名';
+      case 'root_signature_create':
+      case 'root_signature': return '创建根签名';
+      case 'graphics_pso': return '创建图形管线';
+      case 'command_list': return '创建命令列表';
+      case 'command_list_close': return '关闭初始化命令列表';
+      case 'vertex_buffer': return '创建顶点缓冲';
+      case 'vertex_map': return '映射顶点缓冲';
+      case 'rtv_heap': return '创建 RTV 描述符堆';
+      case 'swapchain_buffers':
+      case 'swapchain_buffer': return '获取交换链缓冲';
+      case 'fence': return '创建 Fence';
+      case 'fence_event': return '创建 Fence 事件';
+      case 'assets_complete': return '图形资源准备完成';
+      case 'render_loop': return '物理显示循环';
+      case 'fence_signal': return '提交 Fence 信号';
+      case 'fence_event_on_completion': return '注册 Fence 完成事件';
+      case 'fence_wait': return '等待 Fence';
+      case 'allocator_reset': return '重置命令分配器';
+      case 'command_list_reset': return '重置命令列表';
+      case 'command_list_close_frame': return '关闭逐帧命令列表';
+      case 'present': return '物理显示 Present';
+      case 'complete': return '完整 1000 帧';
+      default: return stage.length > 0 ? stage : '未知阶段';
+    }
   }
 
   // Pad: 从 rawfile 取出 wine-data.zip → zlib.decompressFile 解压到 files/wine/
@@ -888,18 +967,122 @@ struct Index {
     hilog.error(DOMAIN, 'Experiment', 'result timeout id=%{public}s path=%{public}s', experimentId, path);
   }
 
+  private monitorManualVkd3dResult = async (resultPath: string, checkpointPath: string): Promise<void> => {
+    let lastCheckpoint = '';
+    let exitObservedAt = 0;
+    for (let attempt = 0; attempt < 360; ++attempt) {
+      const resultText = readTextIfExists(resultPath);
+      if (resultText.length > 0) {
+        try {
+          const result = JSON.parse(resultText) as Vkd3dManualResult;
+          const passed = result.status === 'PASS' && result.stage === 'complete' &&
+            result.frames === result.target_frames && result.target_frames === 1000;
+          this.vkd3dSmokePhase = passed ? 'pass' : 'fail';
+          this.vkd3dSmokeStatus = passed ?
+            `PASS：${result.frames}/${result.target_frames} 帧` :
+            `FAIL：${this.vkd3dStageText(result.stage)}`;
+          this.vkd3dSmokeDetail = passed ?
+            `耗时 ${(result.elapsed_ms / 1000).toFixed(3)} 秒｜${result.fps.toFixed(3)} FPS｜` +
+              `${result.width}×${result.height}｜阶段 ${result.stage}` :
+            `未通过阶段：${this.vkd3dStageText(result.stage)}（${result.stage}）；` +
+              `已完成 ${result.frames}/${result.target_frames} 帧。`;
+          this.statusText = passed ?
+            `DX12 示例 PASS：${result.frames} 帧，${result.fps.toFixed(3)} FPS` :
+            `DX12 示例 FAIL：${this.vkd3dStageText(result.stage)}`;
+          hilog.info(DOMAIN, 'VKD3D',
+            'manual smoke authoritative result=%{public}s path=%{public}s', resultText, resultPath);
+          return;
+        } catch (error) {
+          hilog.warn(DOMAIN, 'VKD3D', 'manual result parse pending error=%{public}s text=%{public}s',
+            JSON.stringify(error), resultText);
+        }
+      }
+
+      const checkpointText = readTextIfExists(checkpointPath);
+      if (checkpointText.length > 0 && checkpointText !== lastCheckpoint) {
+        lastCheckpoint = checkpointText;
+        try {
+          const checkpoint = JSON.parse(checkpointText) as Vkd3dManualCheckpoint;
+          this.vkd3dSmokeStatus = `运行中：${this.vkd3dStageText(checkpoint.stage)}`;
+          this.vkd3dSmokeDetail = `当前阶段 ${checkpoint.stage}｜已显示 ${checkpoint.frames}/1000 帧`;
+          this.statusText = `DX12 示例运行中：${checkpoint.frames}/1000 帧`;
+          hilog.info(DOMAIN, 'VKD3D', 'manual smoke checkpoint=%{public}s', checkpointText);
+        } catch (error) {
+          hilog.warn(DOMAIN, 'VKD3D', 'manual checkpoint parse skipped error=%{public}s',
+            JSON.stringify(error));
+        }
+      }
+
+      if (this.manualVkd3dSmokeExited) {
+        if (exitObservedAt === 0) exitObservedAt = Date.now();
+        if (Date.now() - exitObservedAt >= 3000) {
+          this.vkd3dSmokePhase = 'fail';
+          this.vkd3dSmokeStatus = 'FAIL：进程退出但没有最终结果';
+          this.vkd3dSmokeDetail = lastCheckpoint.length > 0 ?
+            `最后检查点：${lastCheckpoint}` : '测试程序在写入首个检查点前退出，需查看初始化日志。';
+          this.statusText = 'DX12 示例 FAIL：未生成结果';
+          hilog.error(DOMAIN, 'VKD3D',
+            'manual smoke exited without result path=%{public}s checkpoint=%{public}s',
+            resultPath, lastCheckpoint);
+          return;
+        }
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, 500));
+    }
+
+    this.vkd3dSmokePhase = 'fail';
+    this.vkd3dSmokeStatus = 'FAIL：测试结果超时';
+    this.vkd3dSmokeDetail = lastCheckpoint.length > 0 ?
+      `180 秒内未完成；最后检查点：${lastCheckpoint}` : '180 秒内未生成检查点或结果。';
+    this.statusText = 'DX12 示例 FAIL：结果超时';
+    hilog.error(DOMAIN, 'VKD3D',
+      'manual smoke result timeout path=%{public}s checkpoint=%{public}s', resultPath, lastCheckpoint);
+  }
+
   private startPendingVkd3dSmoke = (): void => {
     if (!this.pendingVkd3dSmoke || !this.prefixReady) return;
     this.pendingVkd3dSmoke = false;
     const exePath = 'C:\\smoke\\x64\\winehua_d3d12_smoke.exe';
+    const resultPath = `${this.driveC}/smoke/results/vkd3d-manual.json`;
+    const checkpointPath = `${this.driveC}/smoke/results/vkd3d-manual.checkpoint.json`;
+    if (!ensureDirectory(`${this.driveC}/smoke/results`)) {
+      this.vkd3dSmokePhase = 'fail';
+      this.vkd3dSmokeStatus = 'FAIL：无法创建结果目录';
+      this.vkd3dSmokeDetail = resultPath;
+      this.statusText = 'DX12 示例启动失败（结果目录不可用）';
+      return;
+    }
+    for (const stalePath of [resultPath, checkpointPath]) {
+      try {
+        if (pathExists(stalePath)) fs.unlinkSync(stalePath);
+      } catch (error) {
+        this.vkd3dSmokePhase = 'fail';
+        this.vkd3dSmokeStatus = 'FAIL：无法清理上次测试结果';
+        this.vkd3dSmokeDetail = stalePath;
+        this.statusText = 'DX12 示例启动失败（旧结果清理失败）';
+        hilog.error(DOMAIN, 'VKD3D', 'manual stale result cleanup failed error=%{public}s path=%{public}s',
+          JSON.stringify(error), stalePath);
+        return;
+      }
+    }
     if (!stageManagedVkd3dRuntime('clean')) {
+      this.vkd3dSmokePhase = 'fail';
+      this.vkd3dSmokeStatus = 'FAIL：VKD3D DLL 校验失败';
+      this.vkd3dSmokeDetail = '实验 DLL 未能按隔离规则复制到 C:\\smoke\\x64。';
       this.statusText = 'DX12 示例启动失败（VKD3D DLL 校验失败）';
       hilog.error(DOMAIN, 'VKD3D', 'manual smoke runtime staging failed');
       return;
     }
+    this.vkd3dSmokePhase = 'running';
+    this.vkd3dSmokeStatus = '运行中：正在启动 DX12 程序';
+    this.vkd3dSmokeDetail = '等待 D3D12 设备、交换链与首帧检查点。';
+    this.manualVkd3dSmokePid = -1;
+    this.manualVkd3dSmokeExited = false;
     const result = testNapi.runWineProgram({
       windowsExePath: exePath,
-      argv: ['--frames', '1000', '--width', '640', '--height', '480', '--sync-interval', '0'],
+      argv: ['--frames', '1000', '--width', '640', '--height', '480', '--sync-interval', '0',
+        '--result', 'C:\\smoke\\results\\vkd3d-manual.json',
+        '--checkpoint', 'C:\\smoke\\results\\vkd3d-manual.checkpoint.json'],
       environment: this.capabilityProbeEnvironment(exePath),
       workingDirectory: 'C:\\smoke\\x64',
       prefixMode: 'clean',
@@ -907,7 +1090,22 @@ struct Index {
       presentBackend: 'venus_broker_present',
       automationMode: true
     }) as ProcessInfo;
-    this.statusText = result.pid > 0 ? 'DX12 示例运行中（1000 帧）' : 'DX12 示例启动失败';
+    this.manualVkd3dSmokePid = result.pid;
+    if (result.pid > 0) {
+      this.statusText = 'DX12 示例运行中（1000 帧）';
+      this.monitorManualVkd3dResult(resultPath, checkpointPath).catch((error: Object) => {
+        this.vkd3dSmokePhase = 'fail';
+        this.vkd3dSmokeStatus = 'FAIL：结果监控异常';
+        this.vkd3dSmokeDetail = JSON.stringify(error);
+        this.statusText = 'DX12 示例 FAIL：结果监控异常';
+        hilog.error(DOMAIN, 'VKD3D', 'manual result monitor failed error=%{public}s', JSON.stringify(error));
+      });
+    } else {
+      this.vkd3dSmokePhase = 'fail';
+      this.vkd3dSmokeStatus = 'FAIL：测试进程未启动';
+      this.vkd3dSmokeDetail = `启动状态：${result.state}`;
+      this.statusText = 'DX12 示例启动失败';
+    }
     hilog.info(DOMAIN, 'VKD3D',
       'manual smoke path=%{public}s pid=%{public}d status=%{public}s',
       exePath, result.pid, result.state);
@@ -917,6 +1115,11 @@ struct Index {
     if (this.initInProgress) return;
     this.selectD3dBackend('vkd3d_limited_500k');
     this.pendingVkd3dSmoke = true;
+    this.vkd3dSmokePhase = 'preparing';
+    this.vkd3dSmokeStatus = '准备中：隔离测试会话';
+    this.vkd3dSmokeDetail = '普通 .wine、DXVK DLL 与游戏目录不会被修改。';
+    this.manualVkd3dSmokePid = -1;
+    this.manualVkd3dSmokeExited = false;
     // Run the opt-in probe in the same isolated, managed-window boundary as
     // the qualified Gate C experiments. This keeps the user's normal prefix
     // and desktop/DXVK session untouched by the test payload.
@@ -946,6 +1149,9 @@ struct Index {
     } catch (e) {
       this.pendingVkd3dSmoke = false;
       this.initInProgress = false;
+      this.vkd3dSmokePhase = 'fail';
+      this.vkd3dSmokeStatus = 'FAIL：测试会话切换失败';
+      this.vkd3dSmokeDetail = JSON.stringify(e);
       this.setInitStatus('VKD3D 测试会话切换失败', false);
       hilog.error(DOMAIN, 'VKD3D', 'manual session restart failed: %{public}s', JSON.stringify(e));
     }
@@ -1022,9 +1228,19 @@ struct Index {
           Text('仅 x64；资源描述符堆上限 500,000；查询 Meta 暂不可用。普通启动仍使用 DXVK Legacy。')
             .fontSize(11).fontColor('#d9a').maxLines(3)
             .width('100%').margin({ bottom: 6 })
+          Text(this.vkd3dSmokeStatus)
+            .fontSize(13).fontWeight(FontWeight.Bold)
+            .fontColor(this.vkd3dSmokePhase === 'pass' ? '#5f8' :
+              (this.vkd3dSmokePhase === 'fail' ? '#f77' :
+                (this.vkd3dSmokePhase === 'running' || this.vkd3dSmokePhase === 'preparing' ? '#fc6' : '#aaa')))
+            .width('100%').margin({ bottom: 3 })
+          Text(this.vkd3dSmokeDetail)
+            .fontSize(11).fontColor('#bbb').maxLines(4)
+            .width('100%').margin({ bottom: 6 })
           Button('运行 DX12 1000 帧示例')
             .width('100%').height(36).backgroundColor('#764')
-            .enabled(!this.initInProgress)
+            .enabled(!this.initInProgress && this.vkd3dSmokePhase !== 'preparing' &&
+              this.vkd3dSmokePhase !== 'running')
             .onClick(this.startVkd3dSmoke)
             .margin({ bottom: 8 })
         }
