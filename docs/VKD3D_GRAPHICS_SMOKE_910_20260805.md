@@ -1,4 +1,4 @@
-# VKD3D Graphics Smoke Evidence — 910 — 2026-08-05
+# VKD3D Guest Swapchain Smoke Evidence — 910 — 2026-08-05
 
 ## Scope
 
@@ -70,12 +70,46 @@ The retained logs are stored outside the repository at `D:\MyProject`.
 
 ## Gate status
 
-The three-frame graphics construction and presentation smoke is reproducible on
-the 910 and is now qualified. It does not qualify games or the 1000-frame
-physical-display gate.
+The three-frame graphics construction, command submission, fence, and DXGI
+swapchain API smoke is reproducible on the 910. This qualifies only the Guest
+D3D12 execution path. It does not qualify physical presentation, games, or the
+1000-frame physical-display gate.
 
-Host presentation currently retries `vk_present` with `-11` (`EAGAIN`) at
-roughly 2.5-second intervals, producing about 20 seconds per completed frame.
-The next work item is to diagnose compositor buffer release/present pacing
-without adding a sleep or global synchronization workaround. The 1000-frame
-gate remains blocked until this throughput/correctness issue is fixed.
+A post-run Host log audit found that the Venus presenter did not attach to the
+Wine window. It waited for key `182205397598275` (`surface=67`) and timed out
+with `target missing` / `result=-11`, while the actual Wayland window later
+created `surface=71` (`key=182205397598279`). Wine maps the Host `-EAGAIN` to
+`VK_SUBOPTIMAL_KHR`, so the DXGI microtest can report `PASS` even when the Host
+did not publish its frames. The earlier interpretation of `-EAGAIN` as buffer
+release pacing was therefore incorrect.
+
+The staged VKD3D experiment selected `winehua.d3d_backend=wined3d`. The UI
+previously derived the Host presentation backend only from that D3D11 setting,
+selecting `virgl_compositor`, although the experiment-local `d3d12.dll`
+presented through Vulkan/Venus. The r7 correction routes only `vkd3d-*`
+experiments to `venus_broker_present`; ordinary WineD3D, DXVK Legacy/Modern,
+and default desktop launches remain unchanged.
+
+## r7 presenter-routing result
+
+The r7 run used a full uninstall/reinstall, a clean prefix, and the newly built
+HAP (`68a94c74855c0c5c5a8f8e7657a9f14017f98a251a842fbd154f46144753422d`).
+The launch log records `d3d=wined3d present=venus_broker_present`. The Host
+initially observed the expected startup race, then attached the same requested
+key after 42,364 microseconds and created a 640x480 FIFO swapchain successfully.
+
+The SurfaceQueue consumer published frame 1 with one signal and zero failures.
+The Guest completed 3/3 frames in 1,971 ms (`fps=1.522`) and exited with code
+zero. This proves that the corrected route reaches a real Host target; it does
+not yet prove three independently displayed frames or the continuous 1000-frame
+gate.
+
+Retained r7 logs outside the repository have SHA-256 hashes
+`9b2871443667a2b984941903a188ee946f7932ac1012cf99c474c391b501bf0e`
+(Host) and `3e91e901decba8c747a72be99d54268ac2e6fccf1838b0aeda139ecc55605be3`
+(Guest stderr).
+
+Physical presentation requires a matching Host target, successful presenter
+attachment/swapchain setup, `vk_present ret=0`, and observable frame publication.
+The 1000-frame gate remains blocked until those conditions pass without sleep,
+`vkDeviceWaitIdle`, or global-flush compensation.

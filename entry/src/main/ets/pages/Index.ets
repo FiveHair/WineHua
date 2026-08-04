@@ -595,8 +595,16 @@ struct Index {
     return environment;
   }
 
+  private isVkd3dExperiment(): boolean {
+    return this.experimentMode &&
+      this.smokeRequest.experimentId.indexOf('vkd3d-') === 0;
+  }
+
   private d3dPresentBackend(): string {
-    return this.d3dBackend.indexOf('dxvk_') === 0 ? 'venus_broker_present' : 'virgl_compositor';
+    // A staged VKD3D DLL presents through the Vulkan/Venus path even though
+    // D3D11 remains on WineD3D. Keep the override isolated to experiments.
+    return this.d3dBackend.indexOf('dxvk_') === 0 || this.isVkd3dExperiment() ?
+      'venus_broker_present' : 'virgl_compositor';
   }
 
   private selectD3dBackend = (backend: string): void => {
@@ -684,8 +692,7 @@ struct Index {
      * Make the VKD3D Gate C transport selection here so the already-running
      * host vtest process uses precise Host-to-Guest invalidation as well.
      * Keep this strictly scoped to staged VKD3D experiments. */
-    const hostShadowProfile = this.experimentMode &&
-      this.smokeRequest.experimentId.indexOf('vkd3d-') === 0
+    const hostShadowProfile = this.isVkd3dExperiment()
       ? 'shadow-precise-direct-fence' : this.perfProfileText;
     testNapi.setHostShadowProfile(hostShadowProfile);
     hilog.info(DOMAIN, 'Experiment', 'host shadow profile=%{public}s experiment=%{public}s',
