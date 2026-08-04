@@ -572,6 +572,15 @@ struct Index {
     environment['VK_DRIVER_FILES'] = guestVulkanIcd;
     environment['VK_ICD_FILENAMES'] = guestVulkanIcd;
     environment['VN_DEBUG'] = 'vtest';
+    /* capabilityProbeEnvironment() also serves isolated VKD3D experiments,
+     * whose product D3D backend intentionally remains WineD3D.  Those runs
+     * therefore bypass the DXVK-only transport defaults in
+     * d3dLaunchEnvironment().  Keep Box64's weak-barrier optimization off and
+     * publish the Venus ring with a full barrier here as well; otherwise a
+     * long-running PE Vulkan stream can eventually expose partially ordered
+     * command bytes to the native ARM64 renderer. */
+    environment['BOX64_DYNAREC_WEAKBARRIER'] = '0';
+    environment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
     environment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
     /* The vtest bridge has distinct Host and Guest mappings. Venus feedback
      * slots cannot establish a readback dependency here; use the direct
