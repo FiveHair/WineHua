@@ -3,7 +3,8 @@ import testNapi from 'libentry.so';
 import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
 import { zlib } from '@kit.BasicServicesKit';
 import { SmokeLaunchRequest, SmokeRunner, defaultSmokeRequest, parseSmokeRequest,
-  syncManagedSmoke } from '../service/SmokeRunner';
+  stageManagedVkd3dRuntime, syncManagedSmoke } from '../service/SmokeRunner';
+import { WineWindowManager } from '../service/WineWindowManager';
 
 const DOMAIN = 0x0000;
 const SOCK = '/data/storage/el2/base/files/.wine/wine-wayland';
@@ -123,7 +124,7 @@ struct Index {
   private smokeRequest: SmokeLaunchRequest = defaultSmokeRequest();
   private smokeStarted: boolean = false;
   private cleanPrefixPrepared: boolean = false;
-  private d3dBackend: string = 'dxvk_legacy';
+  @State d3dBackend: string = 'dxvk_legacy';
   private gameTestMode: boolean = false;
   private gameStarted: boolean = false;
   private experimentMode: boolean = false;
@@ -766,7 +767,11 @@ struct Index {
   }
 
   private startRequestedSmoke = (): void => {
-    if (!this.automationMode || this.smokeStarted) return;
+    // automationMode also selects the managed-window boundary used by the
+    // manual VKD3D probe. Only an explicit smoke request may start the full
+    // core suite; otherwise the suite races the standalone D3D12 process in
+    // the same clean prefix and tears down its session after a few seconds.
+    if (this.smokeRequest.mode !== 'smoke' || this.smokeStarted) return;
     this.smokeStarted = true;
     const runner = new SmokeRunner(this.smokeRequest, (text: string) => {
       this.statusText = text;
@@ -887,15 +892,20 @@ struct Index {
     if (!this.pendingVkd3dSmoke || !this.prefixReady) return;
     this.pendingVkd3dSmoke = false;
     const exePath = 'C:\\smoke\\x64\\winehua_d3d12_smoke.exe';
+    if (!stageManagedVkd3dRuntime('clean')) {
+      this.statusText = 'DX12 示例启动失败（VKD3D DLL 校验失败）';
+      hilog.error(DOMAIN, 'VKD3D', 'manual smoke runtime staging failed');
+      return;
+    }
     const result = testNapi.runWineProgram({
       windowsExePath: exePath,
       argv: ['--frames', '1000', '--width', '640', '--height', '480', '--sync-interval', '0'],
       environment: this.capabilityProbeEnvironment(exePath),
       workingDirectory: 'C:\\smoke\\x64',
-      prefixMode: 'reuse',
+      prefixMode: 'clean',
       d3dBackend: 'vkd3d_limited_500k',
       presentBackend: 'venus_broker_present',
-      automationMode: false
+      automationMode: true
     }) as ProcessInfo;
     this.statusText = result.pid > 0 ? 'DX12 示例运行中（1000 帧）' : 'DX12 示例启动失败';
     hilog.info(DOMAIN, 'VKD3D',
@@ -907,17 +917,27 @@ struct Index {
     if (this.initInProgress) return;
     this.selectD3dBackend('vkd3d_limited_500k');
     this.pendingVkd3dSmoke = true;
+    // Run the opt-in probe in the same isolated, managed-window boundary as
+    // the qualified Gate C experiments. This keeps the user's normal prefix
+    // and desktop/DXVK session untouched by the test payload.
+    this.automationMode = true;
+    WineWindowManager.getInstance().setAutomationMode(true);
+    this.prefixMode = 'clean';
+    this.prefixRoot = WINE_SMOKE_PREFIX;
+    this.driveC = `${this.prefixRoot}/drive_c`;
+    this.sockPath = `${this.prefixRoot}/wine-wayland`;
+    this.cleanPrefixPrepared = false;
     this.gameTestMode = true;
     this.statusText = '正在切换到隔离 VKD3D 测试会话...';
     this.initInProgress = true;
     this.initOverlayVisible = true;
-    this.initOverlayText = '正在重启图形运行时（不清除 Wine 前缀）';
+    this.initOverlayText = '正在准备独立 VKD3D 测试环境（普通 Wine 前缀不变）';
     try {
-      // A running VirGL host deliberately refuses live profile mutation.
-      // Stop only the managed Wine/graphics processes, keep the prefix, then
-      // let doInit() recreate vtest with the VKD3D direct-fence profile.
+      // A running VirGL host deliberately refuses live profile mutation. The
+      // isolated prefix uses a different Wayland socket, so stop the current
+      // server as well and let doInit() recreate the complete Gate C session.
       testNapi.setHostShadowProfile('shadow-precise-direct-fence');
-      testNapi.stopClient();
+      testNapi.stopAll();
       this.processList = [];
       this.state = 'idle';
       this.prefixReady = false;

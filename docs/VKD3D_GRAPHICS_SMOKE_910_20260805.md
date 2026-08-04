@@ -198,3 +198,42 @@ This completes the isolated 1,000-frame physical-display gate on the recorded
 910 device and exact runtime artifacts. D3D12 remains default-off. BDA,
 multiple queues, BrokerPresent, and the full DXVK regression remain mandatory
 before any real DX12 game qualification.
+
+## User-facing manual button qualification
+
+The packaged, default-off `VKD3D 2.6 (500K)` button was exercised after a full
+bundle uninstall/reinstall on the same 910 device. Two launch-boundary defects
+were corrected without changing the default DXVK runtime:
+
+- managed-window mode no longer implicitly starts the full core smoke suite;
+  only an explicit `smokeRequest.mode=smoke` request may do so;
+- the packaged `d3d12.dll` is copied only into the app-owned clean
+  `.wine-smoke/drive_c/smoke/x64` directory, beside the standalone PE where
+  Win32 `LoadLibrary("d3d12.dll")` searches. The normal `.wine`, DXVK overlays,
+  and user game directories are not modified.
+
+The final signed HAP (`SHA-256
+ede5fa0888c2e503ecd4ecaa76d467d79b583b99a31443586cbbc40e19493e3c`)
+embedded the exact assembled `wine-data.zip` (`SHA-256
+688ca5c69e30b3880750c598b1cb8b0e2449392791ad1ac542511987a6e047c0`).
+The staged and runtime `d3d12.dll` both matched
+`c0fc7447f6b298db02330e89f48053806a13349f05eaac01af4e0d3b2d1a6149`;
+the x64 smoke executable matched
+`cba49085ffcb6e2e98380977253ed0a06863ddc2b671e998e294af3683478dc5`.
+
+The manual 1,000-frame run completed in 14,592 ms at 68.531 FPS and exited
+zero. Guest checkpoints reached frames 1, 120, 960, and 1,000. The physical
+SurfaceQueue reached frame 960 with 961 release signals and zero failures; the
+presenter attached the requested target after 15,757 microseconds. No decoder
+error, fatal ring abort, device loss, or failed SurfaceQueue release was found.
+After the experiment, a cold application restart selected
+`WINEHUA_D3D_BACKEND=dxvk_legacy` and restored the normal blue Wine desktop.
+
+Retained evidence outside the repository:
+
+| Evidence | SHA-256 |
+| --- | --- |
+| `vkd3d-manual-ui-910-20260805-host.log` | `490b2bdfdcb22c77583a739a2bf71f739e6c0fd572317f8d0707a90c683f6900` |
+| `vkd3d-manual-ui-910-20260805-stderr.log` | `7fab1141d630627caad39a02893834a971b06aca807b9380a7881c43b41d4c15` |
+| `vkd3d-manual-ui-910-20260805-hilog.log` | `9c4ba3c51cf90ae5baef934b8f60d2ca17ea0a3fb353458f5771762854155f2f` |
+| `vkd3d-manual-ui-910-20260805.jpeg` | `27e7001ca8a04f6dcf9ab20efdab74dc80158e8ca6f36caf3d79e4eec6657f3f` |

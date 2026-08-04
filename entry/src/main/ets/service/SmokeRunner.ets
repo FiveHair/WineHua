@@ -233,6 +233,7 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     'x64/winehua_d3d8_smoke.exe', 'x64/winehua_d3d_switch_cube.exe',
     'x64/winehua_gpu_diagnostics.exe',
     'x64/winehua_win32_driver.exe', 'x64/winehua_dxvk26_requirements.exe',
+    'x64/winehua_d3d12_smoke.exe',
     'x86/winehua_audio_smoke.exe', 'x86/winehua_graphics_smoke.exe',
     'x86/winehua_vulkan_smoke.exe', 'x86/winehua_d3d11_smoke.exe',
     'x86/winehua_d3d8_smoke.exe', 'x86/winehua_d3d_switch_cube.exe',
@@ -278,6 +279,38 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     return sourceManifest === readText(`${target}/manifest.json`);
   } catch (error) {
     hilog.error(DOMAIN, 'SmokeRunner', 'managed smoke sync failed: %{public}s', JSON.stringify(error));
+    return false;
+  }
+}
+
+export function stageManagedVkd3dRuntime(prefixMode: string): boolean {
+  // The standalone VKD3D button is intentionally restricted to the app-owned
+  // clean prefix. LoadLibrary("d3d12.dll") searches beside the PE, while the
+  // Wine loader's WINEDLLPATH is not part of that Win32 file search path.
+  if (prefixMode !== 'clean') {
+    hilog.error(DOMAIN, 'VKD3D', 'refusing to stage VKD3D runtime outside clean prefix');
+    return false;
+  }
+  const source = `${WINE_ROOT}/vkd3d/limited-500k/x64/d3d12.dll`;
+  const target = `${prefixRoot(prefixMode)}/drive_c/smoke/x64/d3d12.dll`;
+  try {
+    const sourceStat = fs.statSync(source);
+    if (sourceStat.isDirectory() || sourceStat.size <= 0) return false;
+    if (pathExists(target)) fs.unlinkSync(target);
+    fs.copyFileSync(source, target);
+    const targetStat = fs.statSync(target);
+    if (targetStat.isDirectory() || targetStat.size !== sourceStat.size) {
+      fs.unlinkSync(target);
+      return false;
+    }
+    hilog.info(DOMAIN, 'VKD3D',
+      'managed runtime staged prefix=clean file=d3d12.dll bytes=%{public}d', targetStat.size);
+    return true;
+  } catch (error) {
+    try {
+      if (pathExists(target)) fs.unlinkSync(target);
+    } catch (_) {}
+    hilog.error(DOMAIN, 'VKD3D', 'managed runtime staging failed: %{public}s', JSON.stringify(error));
     return false;
   }
 }
