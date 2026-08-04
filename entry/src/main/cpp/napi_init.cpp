@@ -13,6 +13,7 @@
 #include "wine_launch.h"
 #include "wine_exe.h"
 #include "host_vulkan_probe.h"
+#include "experiment_payload.h"
 #include "phone_adapter/phone_adapter.h"
 
 #include <unistd.h>
@@ -123,6 +124,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         napi_get_value_string_utf8(env, args[0], profile, sizeof(profile), nullptr);
 
     const bool skip = !strcmp(profile, "shadow-none");
+    const bool directFence = !strcmp(profile, "shadow-precise-direct-fence");
     const bool preciseStrongTrace =
         !strcmp(profile, "shadow-precise-strong-ring-trace");
     const bool preciseStrongPerf =
@@ -216,7 +218,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         asyncPresent ||
         pollPresent ||
         mailboxPresent ||
-        !strcmp(profile, "shadow-precise-direct-fence") ||
+        directFence ||
         deferShmemUnref ||
         cpuShadowUpload;
     const char* mode = (preciseDirtyRing || preciseDirtyPerf || preciseDirtyGpuFrameProfile ||
@@ -248,6 +250,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         preciseDirtyNoUpload ? "no-gpu-upload" :
         preciseDirtyNoUploadFast ? "no-gpu-upload-fast" :
         (preciseStrongPerf || preciseDirtyPerf || preciseDirtyNoMerge) ? "perf" :
+        directFence ? "vkd3d-gate-c" :
         trace ? "1" : "0";
     setenv("VKR_WINEHUA_SHADOW_TRACE", shadowSelector, 1);
     setenv("VKR_WINEHUA_SHADOW_MERGE_RANGES", preciseDirtyNoMerge ? "0" : "1", 1);
@@ -270,6 +273,13 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     setenv("WINEHUA_VIRGL_HOST_DESCRIPTOR_UPDATE_SERIALIZE",
            preciseDirtyDescriptorSerialized ? "1" : "0", 1);
     setenv("WINEHUA_VIRGL_HOST_PRESENT_MODE", presentMode, 1);
+    /* Gate C owns this writable log path so its Host-side vtest diagnostics
+     * can be retrieved through HDC. Other profiles keep the regular cache. */
+    setenv("WINEHUA_VIRGL_HOST_LOG_PATH",
+           directFence
+               ? "/data/storage/el2/base/temp/vkd3d_virgl_host.log"
+               : "/data/storage/el2/base/cache/winehua_virgl_host.log",
+           1);
     OH_LOG_INFO(LOG_APP,
                 "[NAPI] host shadow profile=%{public}s mode=%{public}s "
                 "trace=%{public}s selector=%{public}s perf_summary=%{public}s "
@@ -315,6 +325,13 @@ static napi_value LaunchClient(napi_env env, napi_callback_info info) {
         char prefixMode[32] = {};
         napi_get_value_string_utf8(env, args[6], prefixMode, sizeof(prefixMode), nullptr);
         if (!strcmp(prefixMode, "clean")) p->prefixDir = WINE_SMOKE_PREFIX;
+    }
+    if (p->prefixDir == WINE_SMOKE_PREFIX && !p->automationMode) {
+        // The clean prefix is reserved for isolated smoke and experiment
+        // sessions. Never let a missing ArkTS boolean turn it into a desktop
+        // session, which would start Explorer ahead of the requested test.
+        OH_LOG_WARN(LOG_APP, "[Launch] clean prefix forces automation mode");
+        p->automationMode = true;
     }
     if (argc >= 8) {
         char d3dBackend[64] = {};
@@ -429,6 +446,68 @@ static napi_value ResetWinePrefix(napi_env env, napi_callback_info info) {
     }
     OH_LOG_INFO(LOG_APP, "[NAPI] resetWinePrefix: %{public}s %{public}s",
                 prefix, ok ? "cleared and recreated" : "reset failed");
+    napi_value result;
+    napi_get_boolean(env, ok, &result);
+    return result;
+}
+
+// -- NAPI: stageExperimentPayload --
+// Import a verified test payload into C:\\smoke\\experiments only after
+// validating every artifact hash. No product runtime directory is writable.
+static napi_value StageExperimentPayloadNapi(napi_env env, napi_callback_info info) {
+    size_t argc = 5;
+    napi_value args[5] = {};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool ok = false;
+    std::string message;
+    char experimentId[96] = {};
+    char prefixMode[32] = "reuse";
+    char sourceUrl[512] = {};
+    if (argc < 4 ||
+        napi_get_value_string_utf8(env, args[0], experimentId, sizeof(experimentId), nullptr) != napi_ok ||
+        napi_get_value_string_utf8(env, args[3], prefixMode, sizeof(prefixMode), nullptr) != napi_ok) {
+        message = "invalid experiment staging arguments";
+    } else {
+        if (argc >= 5 &&
+            napi_get_value_string_utf8(env, args[4], sourceUrl, sizeof(sourceUrl), nullptr) != napi_ok) {
+            message = "invalid experiment source URL";
+        }
+        bool namesIsArray = false;
+        bool hashesIsArray = false;
+        uint32_t nameCount = 0;
+        uint32_t hashCount = 0;
+        napi_is_array(env, args[1], &namesIsArray);
+        napi_is_array(env, args[2], &hashesIsArray);
+        if (namesIsArray && hashesIsArray) {
+            napi_get_array_length(env, args[1], &nameCount);
+            napi_get_array_length(env, args[2], &hashCount);
+        }
+        std::vector<winehua::ExperimentArtifact> artifacts;
+        if (!namesIsArray || !hashesIsArray || nameCount != hashCount || nameCount == 0 || nameCount > 16) {
+            message = "invalid experiment artifact list";
+        } else {
+            artifacts.reserve(nameCount);
+            for (uint32_t index = 0; index < nameCount; ++index) {
+                napi_value nameValue = nullptr;
+                napi_value hashValue = nullptr;
+                char name[128] = {};
+                char hash[96] = {};
+                if (napi_get_element(env, args[1], index, &nameValue) != napi_ok ||
+                    napi_get_element(env, args[2], index, &hashValue) != napi_ok ||
+                    napi_get_value_string_utf8(env, nameValue, name, sizeof(name), nullptr) != napi_ok ||
+                    napi_get_value_string_utf8(env, hashValue, hash, sizeof(hash), nullptr) != napi_ok) {
+                    message = "invalid experiment artifact item";
+                    artifacts.clear();
+                    break;
+                }
+                artifacts.push_back({name, hash});
+            }
+            if (!artifacts.empty() && message.empty())
+                ok = winehua::StageExperimentPayload(experimentId, artifacts, prefixMode, sourceUrl, &message);
+        }
+    }
+    OH_LOG_INFO(LOG_APP, "[Experiment] staging id=%{public}s result=%{public}s message=%{public}s",
+                experimentId, ok ? "PASS" : "FAIL", message.c_str());
     napi_value result;
     napi_get_boolean(env, ok, &result);
     return result;
@@ -925,6 +1004,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"terminateWineProcess", nullptr, TerminateWineProcess, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"checkWinePrefix",nullptr, CheckWinePrefix,nullptr, nullptr, nullptr, napi_default, nullptr},
         {"resetWinePrefix",nullptr, ResetWinePrefix,nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stageExperimentPayload", nullptr, StageExperimentPayloadNapi, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"runHostVulkanProbe", nullptr, RunHostVulkanProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopHostVulkanProbe", nullptr, StopHostVulkanProbeNapi, nullptr, nullptr, nullptr, napi_default, nullptr},
         // surfaceId 驱动的渲染器管理 (XComponentController 回调)

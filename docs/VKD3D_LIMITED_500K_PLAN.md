@@ -2,8 +2,8 @@
 
 > Updated: 2026-08-03
 
-> Status: qualification only. No vkd3d-proton DLL is packaged, loaded, or
-> selected by the product runtime.
+> Status: isolated experimental implementation. No vkd3d-proton DLL is
+> packaged, loaded, or selected by the product runtime.
 
 ## Objective
 
@@ -17,22 +17,30 @@ Vulkan feature or limit, and it must never make a device eligible for Gate B.
 
 ## Current 920 Evidence
 
-The four-layer audit from `regression-20260803-161509` observes these values
-on Maleoon 920:
+The four-layer audit from `regression-20260803-225528` observes these values
+on Maleoon 920. The capability hash is
+`bbfa91d471ea2f2d532da80c5601a4fe84bb3e81eb112838a0461176372e0e0d`.
 
-| Layer | Descriptor indexing | Resource UAB per-stage / per-set | Sampler UAB per-stage / per-set |
+| Layer | Aggregate descriptorIndexing | Required bindless fields | Requested 2.6 bindless device |
 | --- | --- | --- | --- |
-| Host Vulkan | yes | 500,000 / 500,000 | 500,000 / 500,000 |
-| Guest Venus | no | 500,000 / 500,000 | 500,000 / 500,000 |
-| Wine Vulkan x64 | evidence incomplete | 500,000 / 500,000 | 500,000 / 500,000 |
-| Wine PE x64 | no | 500,000 / 500,000 | 500,000 / 500,000 |
+| Host Vulkan | yes | all observed | not attempted |
+| Guest Venus | no | all observed | `VK_SUCCESS` |
+| Wine Vulkan x64 | yes | all observed | not attempted |
+| Wine PE x64 | no | all observed | `VK_SUCCESS` |
 
 `maxPerStageUpdateAfterBindResources` is 2,000,016 and
 `maxUpdateAfterBindDescriptorsInAllPools` is `UINT32_MAX`. The numeric limit
-is therefore potentially useful, but the Guest and Wine PE
-`descriptorIndexing=false` results block any runtime experiment today. This is
-a Venus capability path problem; modifying vkd3d-proton alone cannot bypass
-it.
+is therefore potentially useful. Every resource and sampler UAB per-stage and
+per-set limit is 500,000. The aggregate `descriptorIndexing` member is false
+for Guest Venus and Wine PE, but vkd3d-proton 2.6 gates the individual fields,
+not that aggregate member; the requested feature chain has already produced a
+real `VK_SUCCESS` device at those layers. It is not an experimental blocker.
+
+The 2,000,016 aggregate per-stage resource limit remains a real risk. Without
+a mutable-descriptor path, a root signature can require several independent
+500K resource layouts and exceed that aggregate. A real root-signature and
+descriptor microtest must therefore validate the exact layouts used before any
+runtime integration claim.
 
 ## Profile Definitions
 
@@ -49,12 +57,11 @@ cannot be silently truncated by the experimental profile.
 
 ## Implementation Sequence
 
-1. Make Guest Venus and Wine PE expose the required descriptor-indexing feature
-   bits truthfully. Re-run the four-layer capability audit and require a stable
-   capability hash before building a runtime candidate.
+1. Complete the four-layer audit and require a stable capability hash. This is
+   complete for `bbfa91d471ea2f2d532da80c5601a4fe84bb3e81eb112838a0461176372e0e0d`.
 2. Create `feature/vkd3d-capability-probe` in an isolated vkd3d-proton checkout
-   from the audited 2.6 revision. If it is introduced as a submodule, keep the
-   main repository gitlink pointed only at a pushed submodule commit.
+   from v2.6 commit `3e5aab6fb3e18f81a71b339be4cb5cdf55140980`. Do not add a
+   product submodule or alter a main-repository gitlink.
 3. Add a separately named, default-off 500K build profile. Reduce every
    descriptor-layout, variable-count allocation, descriptor-heap maximum,
    host mapping, and reported D3D12 view-heap limit coherently. Keep sampler
@@ -86,7 +93,8 @@ cannot be silently truncated by the experimental profile.
 
 ## Current Next Gate
 
-The immediate engineering task is a Guest Venus descriptor-indexing transport
-audit. Until the Guest and Wine PE feature chains report the required bits as
-enabled, the experimental 500K profile remains `UNSUPPORTED` and no vkd3d DLL
-is introduced.
+Build the isolated x64 DLLs with the explicit 500K option, record the version
+and hashes, and run a three-times-consistent device microtest. That microtest
+must cover both a 500K shader-visible resource heap and the real root-signature
+layout count; no HAP packaging or default D3D12 activation is permitted before
+it passes.

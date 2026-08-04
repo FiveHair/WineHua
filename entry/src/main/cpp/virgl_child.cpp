@@ -263,6 +263,7 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "VIRGL_DISABLE_NATIVE_FENCE_FD" ||
            key == "WINEHUA_VIRGL_SYNC_MODE" ||
            key == "WINEHUA_VIRGL_LOG_PATH" ||
+           key == "WINEHUA_VKD3D_GATE_C_TRACE" ||
            key == "VKR_WINEHUA_SHADOW_TO_HOST" ||
            key == "WINEHUA_VKR_TRACE_SAMPLED" ||
            key == "WINEHUA_VKR_TRACE_PIPELINE" ||

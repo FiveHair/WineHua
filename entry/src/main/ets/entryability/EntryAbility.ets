@@ -12,6 +12,11 @@ interface D3dEnvironmentEntry {
   value: string;
 }
 
+interface ExperimentArtifactEntry {
+  name: string;
+  sha256: string;
+}
+
 export default class EntryAbility extends UIAbility {
   private contentPage: string = 'pages/Index';
 
@@ -30,7 +35,33 @@ export default class EntryAbility extends UIAbility {
       (mode === '' ? persistedD3d : 'wined3d');
     const d3dBackend = requestedD3d === 'dxvk_legacy' ||
       requestedD3d === 'dxvk_modern_2_6' ? requestedD3d : 'wined3d';
-    const gamePath = value('winehua.game_path', '');
+    let gamePath = value('winehua.game_path', '');
+    const experimentId = value('winehua.experiment_id', '');
+    const experimentExecutable = value('winehua.experiment_executable', '');
+    const experimentResultName = value('winehua.experiment_result_name', '');
+    const experimentSourceUrl = value('winehua.experiment_source_url', '');
+    const experimentNames: string[] = [];
+    const experimentHashes: string[] = [];
+    if (mode === 'experiment') {
+      try {
+        const entries = JSON.parse(decodeURIComponent(
+          value('winehua.experiment_manifest_json', ''))) as ExperimentArtifactEntry[];
+        if (Array.isArray(entries)) {
+          for (const entry of entries) {
+            if (experimentNames.length >= 16) break;
+            if (entry && typeof entry.name === 'string' && typeof entry.sha256 === 'string') {
+              experimentNames.push(entry.name);
+              experimentHashes.push(entry.sha256);
+            }
+          }
+        }
+      } catch (_) {
+        hilog.warn(DOMAIN, 'Experiment', 'invalid experiment artifact manifest');
+      }
+      // The native importer validates the components again before it touches
+      // the prefix. Construct this path only for the isolated experiment tree.
+      gamePath = `C:\\smoke\\experiments\\${experimentId}\\${experimentExecutable}`;
+    }
     const requestedGameArgCount = Number(value('winehua.game_argc', '0'));
     const gameArgCount = Math.max(0, Math.min(64, Math.floor(requestedGameArgCount)));
     const gameArguments: string[] = [];
@@ -165,14 +196,20 @@ export default class EntryAbility extends UIAbility {
       .indexOf(requestedPerfProfile) >= 0 ? requestedPerfProfile : 'baseline';
     this.contentPage = mode === 'smoke' && suite === 'host-vulkan' ?
       'pages/HostVulkanSmoke' : 'pages/Index';
-    WineWindowManager.getInstance().setAutomationMode(mode === 'smoke');
+    // Experiments are explicitly requested through a Want and use the same
+    // headless Wine bootstrap as smoke. Normal launches remain interactive.
+    WineWindowManager.getInstance().setAutomationMode(mode === 'smoke' || mode === 'experiment');
     const request = JSON.stringify({
       mode: mode,
       runId: value('winehua.run_id', `${Date.now()}`),
       suite: suite,
       prefixMode: value('winehua.prefix', 'reuse'),
       longSeconds: Number(value('winehua.long_seconds', '3600')),
-      batchMappedFlush: value('winehua.batch_mapped_flush', '0') === '1'
+      batchMappedFlush: value('winehua.batch_mapped_flush', '0') === '1',
+      experimentId: experimentId,
+      experimentExecutable: experimentExecutable,
+      experimentResultName: experimentResultName,
+      experimentSourceUrl: experimentSourceUrl
     });
     AppStorage.setOrCreate<string>('winehua.smoke.request', request);
     AppStorage.set<string>('winehua.smoke.request', request);
@@ -180,6 +217,10 @@ export default class EntryAbility extends UIAbility {
     AppStorage.set<string>('winehua.d3d.backend', d3dBackend);
     AppStorage.setOrCreate<string>('winehua.game.path', gamePath);
     AppStorage.set<string>('winehua.game.path', gamePath);
+    AppStorage.setOrCreate<string[]>('winehua.experiment.names', experimentNames);
+    AppStorage.set<string[]>('winehua.experiment.names', experimentNames);
+    AppStorage.setOrCreate<string[]>('winehua.experiment.hashes', experimentHashes);
+    AppStorage.set<string[]>('winehua.experiment.hashes', experimentHashes);
     AppStorage.setOrCreate<string[]>('winehua.game.args', gameArguments);
     AppStorage.set<string[]>('winehua.game.args', gameArguments);
     AppStorage.setOrCreate<string[]>('winehua.game.d3d_env_keys', d3dEnvKeys);

@@ -53,6 +53,8 @@ export const queryWineProcess: (pid: number) => WineProcessHandle;
 export const terminateWineProcess: (pid: number) => boolean;
 export const checkWinePrefix: (prefixMode?: string) => boolean;
 export const resetWinePrefix: (prefixMode?: string) => boolean;
+export const stageExperimentPayload: (experimentId: string, names: string[], hashes: string[],
+  prefixMode: string, sourceUrl?: string) => boolean;
 export const runHostVulkanProbe: (surfaceId: bigint, runId: string) => boolean;
 export const stopHostVulkanProbe: () => boolean;
 export const setOutputSize: (w: number, h: number) => void;

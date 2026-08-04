@@ -1149,7 +1149,10 @@ void GraphicsBroker::StartVirglSocketServerLocked()
                         syncMode.c_str());
             syncMode = "egl-thread";
         }
-        const std::string virglLogPath = "/data/storage/el2/base/cache/winehua_virgl_host.log";
+        const char* requestedLogPath = getenv("WINEHUA_VIRGL_HOST_LOG_PATH");
+        const std::string virglLogPath = requestedLogPath && requestedLogPath[0]
+            ? requestedLogPath
+            : "/data/storage/el2/base/cache/winehua_virgl_host.log";
         const bool phoneMode = PhoneAdapter_IsPhoneMode();
         const char* requestedShadowMode =
             getenv("WINEHUA_VIRGL_HOST_SHADOW_MODE");

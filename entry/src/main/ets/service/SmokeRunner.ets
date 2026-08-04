@@ -18,6 +18,10 @@ export interface SmokeLaunchRequest {
   prefixMode: string;
   longSeconds: number;
   batchMappedFlush: boolean;
+  experimentId: string;
+  experimentExecutable: string;
+  experimentResultName: string;
+  experimentSourceUrl: string;
 }
 
 interface SmokeTestSpec {
@@ -183,7 +187,8 @@ function latestReplayShaderDirectory(prefix: string, current: string): string {
 
 export function defaultSmokeRequest(): SmokeLaunchRequest {
   return { mode: '', runId: '', suite: 'core', prefixMode: 'reuse', longSeconds: 3600,
-    batchMappedFlush: false };
+    batchMappedFlush: false, experimentId: '', experimentExecutable: '', experimentResultName: '',
+    experimentSourceUrl: '' };
 }
 
 export function parseSmokeRequest(text: string): SmokeLaunchRequest {
@@ -192,13 +197,18 @@ export function parseSmokeRequest(text: string): SmokeLaunchRequest {
   try {
     const value = JSON.parse(text) as SmokeLaunchRequest;
     return {
-      mode: value.mode === 'smoke' || value.mode === 'game' ? value.mode : '',
+      mode: value.mode === 'smoke' || value.mode === 'game' || value.mode === 'experiment' ? value.mode : '',
       runId: safeId(value.runId, `${Date.now()}`),
       suite: safeId(value.suite, 'core').toLowerCase(),
       prefixMode: value.prefixMode === 'clean' ? 'clean' : 'reuse',
       longSeconds: value.longSeconds >= 60 && value.longSeconds <= 3600 ?
         Math.floor(value.longSeconds) : 3600,
-      batchMappedFlush: value.batchMappedFlush === true
+      batchMappedFlush: value.batchMappedFlush === true,
+      experimentId: safeId(value.experimentId || '', ''),
+      experimentExecutable: safeId(value.experimentExecutable || '', ''),
+      experimentResultName: safeId(value.experimentResultName || '', ''),
+      experimentSourceUrl: typeof value.experimentSourceUrl === 'string' ?
+        value.experimentSourceUrl.substring(0, 480) : ''
     };
   } catch (_) {
     return fallback;

@@ -649,7 +649,15 @@ napi_value TerminateWineProcess(napi_env env, napi_callback_info info)
     int32_t pid = -1;
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (argc >= 1) napi_get_value_int32(env, args[0], &pid);
-    bool ok = pid > 0 && kill(pid, SIGKILL) == 0;
+    OH_LOG_WARN(LOG_APP,
+                "[WineProgram] terminateWineProcess requested pid=%{public}d signal=SIGKILL",
+                pid);
+    const bool ok = pid > 0 && kill(pid, SIGKILL) == 0;
+    if (!ok) {
+        OH_LOG_WARN(LOG_APP,
+                    "[WineProgram] terminateWineProcess failed pid=%{public}d errno=%{public}d(%{public}s)",
+                    pid, errno, strerror(errno));
+    }
     if (ok) RemoveProcess(pid, -1, "unknown");
     napi_value result;
     napi_get_boolean(env, ok, &result);

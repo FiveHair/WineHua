@@ -127,6 +127,7 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     const bool boundBufferList = config.shadowTrace == "perf";
     const bool cpuShadowUpload = config.shadowTrace == "cpu-upload";
     const bool legacyHostSync = config.shadowTrace == "legacy-host-sync";
+    const bool gateCTrace = config.shadowTrace == "vkd3d-gate-c";
     const std::string fromHostMode = explicitToHost ? "full" :
         (precise ? "precise" : config.shadowMode);
     const std::string toHostMode = explicitToHost || (precise && !preciseDirty)
@@ -140,6 +141,7 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     AppendEnv(params, "VTEST_SYNC_GL_FINISH", "1");
     AppendEnv(params, "WINEHUA_VIRGL_SYNC_MODE", config.syncMode);
     AppendEnv(params, "WINEHUA_VIRGL_LOG_PATH", config.logPath);
+    AppendEnv(params, "WINEHUA_VKD3D_GATE_C_TRACE", gateCTrace ? "1" : "0");
     AppendEnv(params, "WINEHUA_VKR_TRACE_SAMPLED", sampledTrace);
     AppendEnv(params, "WINEHUA_VKR_TRACE_CAPTURE", captureTrace ? "1" : "0");
     AppendEnv(params, "WINEHUA_VKR_TRACE_CAPTURE_LIMIT", captureTrace ? "20000" : "512");
@@ -150,7 +152,8 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     AppendEnv(params, "WINEHUA_VKR_TRACE_UBO_IDENTITY",
               frameAssocTrace ? "focused" : (captureTrace ? "1" : "0"));
     AppendEnv(params, "WINEHUA_VKR_TRACE_PRESENT_IMAGE", presentImageTrace ? "1" : "0");
-    AppendEnv(params, "WINEHUA_VKR_TRACE_PIPELINE", captureTrace ? "1" : "0");
+    AppendEnv(params, "WINEHUA_VKR_TRACE_PIPELINE",
+              (captureTrace || gateCTrace) ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_SHADOW_FROM_HOST", fromHostMode);
     AppendEnv(params, "VKR_WINEHUA_SHADOW_TO_HOST", toHostMode);
     AppendEnv(params, "VKR_WINEHUA_SHADOW_TRACE", captureTrace ? "1" : "0");

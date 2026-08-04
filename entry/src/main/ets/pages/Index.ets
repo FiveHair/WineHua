@@ -93,6 +93,8 @@ struct Index {
   @StorageLink('winehua.d3d.preference') d3dPreferenceText: string = 'dxvk_legacy';
   @StorageLink('winehua.game.path') gamePathText: string = '';
   @StorageLink('winehua.game.args') gameArguments: string[] = [];
+  @StorageLink('winehua.experiment.names') experimentNames: string[] = [];
+  @StorageLink('winehua.experiment.hashes') experimentHashes: string[] = [];
   @StorageLink('winehua.game.d3d_env_keys') d3dEnvKeys: string[] = [];
   @StorageLink('winehua.game.d3d_env_values') d3dEnvValues: string[] = [];
   @StorageLink('winehua.game.click_title_prefix') gameClickTitlePrefix: string = '';
@@ -123,11 +125,15 @@ struct Index {
   private d3dBackend: string = 'dxvk_legacy';
   private gameTestMode: boolean = false;
   private gameStarted: boolean = false;
+  private experimentMode: boolean = false;
+  private experimentStaged: boolean = false;
 
   aboutToAppear(): void {
     this.smokeRequest = parseSmokeRequest(this.smokeRequestText);
     this.automationMode = this.smokeRequest.mode === 'smoke';
-    this.gameTestMode = this.smokeRequest.mode === 'game';
+    this.experimentMode = this.smokeRequest.mode === 'experiment';
+    this.gameTestMode = this.smokeRequest.mode === 'game' || this.experimentMode;
+    this.experimentStaged = false;
     this.d3dBackend = this.d3dBackendText === 'dxvk_legacy' ||
       this.d3dBackendText === 'dxvk_modern_2_6' ? this.d3dBackendText : 'wined3d';
     this.prefixMode = this.smokeRequest.prefixMode;
@@ -532,7 +538,10 @@ struct Index {
    * SmokeRunner so a user-triggered run observes the real PE path. */
   private capabilityProbeEnvironment(windowsExePath: string): Record<string, string> {
     const environment = this.d3dLaunchEnvironment();
-    if (!windowsExePath.toLowerCase().endsWith('winehua_dxvk26_requirements.exe')) {
+    const requiresExperimentVulkan = this.experimentMode &&
+      windowsExePath.indexOf('C:\\smoke\\experiments\\') === 0;
+    if (!windowsExePath.toLowerCase().endsWith('winehua_dxvk26_requirements.exe') &&
+      !requiresExperimentVulkan) {
       return environment;
     }
     const guestVulkanRoot = `${WINE_ROOT}/bin/guest_vulkan`;
@@ -555,8 +564,23 @@ struct Index {
     environment['VK_ICD_FILENAMES'] = guestVulkanIcd;
     environment['VN_DEBUG'] = 'vtest';
     environment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
+    /* The vtest bridge has distinct Host and Guest mappings. Venus feedback
+     * slots cannot establish a readback dependency here; use the direct
+     * device-fence wait below instead of polling an invalid feedback value. */
     environment['VN_PERF'] =
       'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
+    environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
+    environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'precise';
+    if (this.smokeRequest.experimentId === 'vkd3d-500k-65f47dc-coherent') {
+      // Force the hash-verified DLL staged beside the microtest. Without an
+      // explicit override Wine may satisfy LoadLibrary("d3d12.dll") with its
+      // builtin module, which would invalidate the VKD3D experiment evidence.
+      environment['WINEDLLOVERRIDES'] = 'd3d12=n,b';
+      environment['VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC'] = '1';
+      // The Gate C probe intentionally excludes unsupported query meta
+      // pipelines. This profile is never selected for ordinary launches.
+      environment['VKD3D_WINEHUA_DISABLE_QUERY_META'] = '1';
+    }
     environment['WINEDEBUG'] = '+loaddll,+module';
     return environment;
   }
@@ -593,7 +617,7 @@ struct Index {
 
   private doInit = async (): Promise<void> => {
     // Automation owns an internal HOME and must never open a Picker.
-    if (this.automationMode) {
+    if (this.automationMode || this.experimentMode) {
       this.zHome = `${WINE_AUTOMATION_HOME}/`;
     } else if (this.gameTestMode) {
       // Game-test mode avoids the picker but keeps the same managed user home
@@ -607,7 +631,7 @@ struct Index {
     }
     // HDC shell cannot remove application-owned sandbox files. A clean smoke
     // prefix must be reset by the App before any server or socket is started.
-    if (this.automationMode && this.prefixMode === 'clean' && !this.cleanPrefixPrepared) {
+    if ((this.automationMode || this.experimentMode) && this.prefixMode === 'clean' && !this.cleanPrefixPrepared) {
       this.setInitStatus('正在创建干净测试环境...', true);
       const resetOk = testNapi.resetWinePrefix('clean') as boolean;
       if (!resetOk) {
@@ -644,14 +668,24 @@ struct Index {
     }
     hilog.info(DOMAIN, 'wine', 'auto-init: starting Wine...');
     this.setInitStatus('启动服务...', true);
-    testNapi.setHostShadowProfile(this.perfProfileText);
+    /* The renderer process is created while startServer() initializes the
+     * broker, before the isolated PE receives capabilityProbeEnvironment().
+     * Make the VKD3D Gate C transport selection here so the already-running
+     * host vtest process uses precise Host-to-Guest invalidation as well.
+     * Keep this strictly scoped to staged VKD3D experiments. */
+    const hostShadowProfile = this.experimentMode &&
+      this.smokeRequest.experimentId.indexOf('vkd3d-') === 0
+      ? 'shadow-precise-direct-fence' : this.perfProfileText;
+    testNapi.setHostShadowProfile(hostShadowProfile);
+    hilog.info(DOMAIN, 'Experiment', 'host shadow profile=%{public}s experiment=%{public}s',
+      hostShadowProfile, this.smokeRequest.experimentId);
     const ok: boolean = testNapi.startServer(this.sockPath);
     if (!ok) {
       this.setInitStatus('启动服务失败', false);
       return;
     }
     testNapi.launchClient(BOX64, [], this.sockPath, `${BIN_DIR}:${WINE_LIB}`, this.zHome,
-      this.automationMode, this.prefixMode, this.d3dBackend);
+      this.automationMode || this.experimentMode, this.prefixMode, this.d3dBackend);
   }
 
   private doReset = (): void => {
@@ -681,7 +715,7 @@ struct Index {
       prefixMode: this.prefixMode,
       d3dBackend: this.d3dBackend,
       presentBackend: this.d3dPresentBackend(),
-      automationMode: false
+      automationMode: this.experimentMode
     });
   }
 
@@ -706,19 +740,38 @@ struct Index {
   private startRequestedGame = (): void => {
     if (!this.gameTestMode || this.gameStarted || this.gamePathText.length === 0) return;
     this.gameStarted = true;
-    this.statusText = `Launching ${this.d3dBackend}: ${this.gamePathText}`;
-    const gamePath = this.gamePathText;
+    let gamePath = this.gamePathText;
+    const gameArguments = this.gameArguments.slice();
+    if (this.experimentMode) {
+      if (!this.smokeRequest.experimentId || !this.smokeRequest.experimentExecutable ||
+        !testNapi.stageExperimentPayload(this.smokeRequest.experimentId,
+          this.experimentNames.slice(), this.experimentHashes.slice(), this.prefixMode,
+          this.smokeRequest.experimentSourceUrl)) {
+        this.setInitStatus('实验载荷校验或导入失败', false);
+        hilog.error(DOMAIN, 'Experiment', 'payload staging failed id=%{public}s',
+          this.smokeRequest.experimentId);
+        return;
+      }
+      this.experimentStaged = true;
+      gamePath = `C:\\smoke\\experiments\\${this.smokeRequest.experimentId}\\` +
+        this.smokeRequest.experimentExecutable;
+      if (this.smokeRequest.experimentResultName.length > 0) {
+        gameArguments.push('--result', `C:\\smoke\\experiments\\${this.smokeRequest.experimentId}` +
+          `\\results\\${this.smokeRequest.experimentResultName}.json`);
+      }
+    }
+    this.statusText = `Launching ${this.d3dBackend}: ${gamePath}`;
     const result = testNapi.runWineProgram({
       windowsExePath: gamePath,
       // @StorageLink arrays are observable proxies. Pass a plain array across
       // the N-API boundary so napi_is_array can enumerate every game argument.
-      argv: this.gameArguments.slice(),
+      argv: gameArguments,
       environment: this.capabilityProbeEnvironment(gamePath),
       workingDirectory: this.windowsParentDirectory(gamePath),
-      prefixMode: 'reuse',
+      prefixMode: this.prefixMode,
       d3dBackend: this.d3dBackend,
       presentBackend: this.d3dPresentBackend(),
-      automationMode: false
+      automationMode: this.experimentMode
     }) as ProcessInfo;
     hilog.info(DOMAIN, 'GameTest',
       'game launch path=%{public}s argc=%{public}d env=%{public}d backend=%{public}s perf=%{public}s '
@@ -726,6 +779,11 @@ struct Index {
       gamePath, this.gameArguments.length, this.d3dEnvKeys.length,
       this.d3dBackend, this.perfProfileText,
       result.pid, result.state);
+    if (this.experimentMode && this.experimentStaged &&
+      this.smokeRequest.experimentResultName.length > 0) {
+      this.monitorExperimentResult(this.smokeRequest.experimentId,
+        this.smokeRequest.experimentResultName);
+    }
     if (this.gameClickTitlePrefix.length > 0 && this.gameClickButtonText.length > 0) {
       const titlePrefix = this.gameClickTitlePrefix;
       const buttonText = this.gameClickButtonText;
@@ -758,10 +816,37 @@ struct Index {
     }
   }
 
+  private monitorExperimentResult = async (experimentId: string, resultName: string): Promise<void> => {
+    const resultsDir = `${this.driveC}/smoke/experiments/${experimentId}/results`;
+    const path = `${resultsDir}/${resultName}.json`;
+    const checkpointPath = `${resultsDir}/${resultName}.checkpoint.json`;
+    let lastCheckpoint = '';
+    for (let attempt = 0; attempt < 180; ++attempt) {
+      const checkpoint = readTextIfExists(checkpointPath);
+      if (checkpoint.length > 0 && checkpoint !== lastCheckpoint) {
+        lastCheckpoint = checkpoint;
+        hilog.info(DOMAIN, 'Experiment', 'checkpoint id=%{public}s path=%{public}s json=%{public}s',
+          experimentId, checkpointPath, checkpoint);
+      }
+      if (pathExists(path)) {
+        const result = readTextIfExists(path);
+        this.setInitStatus(result.length > 0 ? '实验结果已生成' : '实验结果为空', false);
+        hilog.info(DOMAIN, 'Experiment',
+          'result id=%{public}s path=%{public}s json=%{public}s checkpoint=%{public}s',
+          experimentId, path, result, lastCheckpoint);
+        return;
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, 1000));
+    }
+    this.setInitStatus('实验结果超时', false);
+    hilog.error(DOMAIN, 'Experiment', 'result timeout id=%{public}s path=%{public}s', experimentId, path);
+  }
+
   private startDeveloperSmoke = (): void => {
     this.smokeRequest = {
       mode: 'smoke', runId: `developer-${Date.now()}`, suite: 'core',
-      prefixMode: 'reuse', longSeconds: 3600, batchMappedFlush: false
+      prefixMode: 'reuse', longSeconds: 3600, batchMappedFlush: false,
+      experimentId: '', experimentExecutable: '', experimentResultName: '', experimentSourceUrl: ''
     };
     this.automationMode = true;
     this.gameTestMode = false;
