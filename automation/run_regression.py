@@ -177,7 +177,8 @@ def get_device_text(hdc: str, device_id: str, remote_path: str) -> str:
 def save_device_file(hdc: str, device_id: str, remote_path: str, local_path: Path) -> None:
     local_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        [hdc, "-t", device_id, "file", "recv", remote_path, str(local_path)],
+        [hdc, "-t", device_id, "file", "recv", remote_path,
+         hdc_local_path(local_path)],
         capture_output=True, text=True)
 
 
