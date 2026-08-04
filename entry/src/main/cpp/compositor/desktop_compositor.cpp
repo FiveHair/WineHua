@@ -790,7 +790,16 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         auto blitSubsurface = [&](const CompositorLayer& layer) {
             if (layer.ShouldSkipCpu()) return;
             if (layer.w <= 0 || layer.h <= 0) return;
-            if (hasFullscreen && layer.toplevelId != fullscreenId) return;
+            if (hasFullscreen && layer.toplevelId != fullscreenId) {
+                // 只跳过"父 toplevel 也连带 fullscreen"的 subsurface (显示模式
+                // 切换时被 winewayland 批量标记的旧窗口残留菜单, 防盖在游戏上 —
+                // 与 blitToplevel 705 行同一规则); 非全屏普通窗口 (如游戏上方
+                // 新弹出的对话框) 的 subsurface 正常渲染。
+                // 旧规则无差别跳过所有非主全屏窗口的 subsurface, 导致
+                // "游戏全屏时新窗口的菜单被游戏覆盖" (2026-08-05 实测)。
+                const auto* parent = tmgr_.FindToplevelLocked(layer.toplevelId);
+                if (parent && parent->IsFullscreen()) return;
+            }
             const auto& sl = *layer.sub;
             int layerX = layer.x;
             int layerY = layer.y;

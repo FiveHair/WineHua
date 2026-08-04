@@ -21,9 +21,12 @@ struct InputTarget {
 
 // 输入命中裁决 (依赖 ToplevelManager + DesktopCompositor)
 //
-// 不变式: 命中顺序固定为 全屏窗口(含其 subsurface 层) → subsurface 层 →
-// toplevel → desktop root 兜底, 与渲染层序一致。zero-copy GL 层不参与
-// 置顶命中 (渲染时被遮挡重绘压回, 命中同样下放给 z-order 循环)。
+// 不变式: 命中顺序固定为 高于全屏窗口的层 (zIndex 更大, 渲染在游戏之上)
+// → 全屏窗口(含其 subsurface 层) → subsurface 层 → toplevel → desktop root
+// 兜底, 与渲染层序一致 (均遍历 BuildLayerListLocked 同一 Layer 列表)。
+// 全屏独占输入仅对"没有更高层窗口覆盖"的情形生效 — 游戏全屏时弹出的新
+// 窗口显示在游戏上方, 点击必须路由给它。zero-copy GL 层不参与置顶命中
+// (渲染时被遮挡重绘压回, 命中同样下放给 z-order 循环)。
 // 全屏黑边命中标 swallow, 调用方只吞 PRESS — MOVE/RELEASE 照常透传,
 // 否则按下拖到黑边松手会丢 release, 按键状态永久卡死 (见实现注释)。
 class InputResolver {

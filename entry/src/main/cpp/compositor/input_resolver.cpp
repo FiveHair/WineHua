@@ -77,6 +77,59 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
                     zst->PreFsW(), zst->PreFsH(), zst->Width(), zst->Height(),
                     transform.srcW, transform.srcH);
             }
+            // 前置命中: 盖在游戏之上的层优先 — 修复"全屏时弹出新窗口显示在上方、
+            // 点击却回到游戏"。渲染在游戏上方 (zIndex 更高) 的窗口在 Layer 列表
+            // (与渲染同源) 里排在游戏层之后, 先参与坐标命中, 命中即返回; 游戏自身
+            // 及其 subsurface 由下方 fit 分支处理。无更高层窗口时范围为空, 等价旧行为。
+            size_t fsIdx = layers.size();
+            for (size_t li = 0; li < layers.size(); ++li) {
+                if (layers[li].type == DesktopCompositor::CompositorLayer::Type::Toplevel &&
+                    layers[li].toplevelId == fullscreenId) { fsIdx = li; break; }
+            }
+            for (size_t li = layers.size(); li-- > fsIdx + 1;) {
+                const auto& layer = layers[li];
+                if (layer.ShouldSkipCpu()) continue;
+                if (layer.toplevelId == fullscreenId) continue;  // 游戏及其 subsurface 走 fit 分支
+                if (layer.type == DesktopCompositor::CompositorLayer::Type::Subsurface) {
+                    // 与渲染侧 blitSubsurface 对齐: 连带 fullscreen 旧窗口的
+                    // subsurface 渲染时被跳过, 命中同样下放 (防点到看不见的层)
+                    const auto* parent = tmgr_.FindToplevelLocked(layer.toplevelId);
+                    if (parent && parent->IsFullscreen()) continue;
+                    if (layer.w <= 0 || layer.h <= 0) continue;
+                    const auto& sl = *layer.sub;
+                    if (x >= layer.x && x < layer.x + layer.w && y >= layer.y && y < layer.y + layer.h) {
+                        if (sl.isExternal) {
+                            out.toplevelId = rootId;
+                            out.surface = tmgr_.GetSurfaceForToplevel(rootId);
+                            out.originX = 0;
+                            out.originY = 0;
+                        } else {
+                            out.toplevelId = layer.toplevelId;
+                            out.surface = sl.surface;
+                            out.originX = layer.x;
+                            out.originY = layer.y;
+                        }
+                        return out.surface != nullptr;
+                    }
+                } else if (layer.type == DesktopCompositor::CompositorLayer::Type::Toplevel) {
+                    // 与渲染侧 blitToplevel 对齐: 连带 fullscreen 的非主窗口
+                    // 渲染时被跳过, 命中同样下放 (防点到看不见的窗口)
+                    if (layer.fullscreen) continue;
+                    if (x >= layer.x && x < layer.x + layer.w && y >= layer.y && y < layer.y + layer.h) {
+                        wl_resource* surf = tmgr_.GetSurfaceForToplevel(layer.toplevelId);
+                        if (surf) {
+                            auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
+                            if (sd && sd->inputRegionEmpty) continue;
+                        }
+                        out.toplevelId = layer.toplevelId;
+                        out.surface = surf;
+                        out.originX = layer.x;
+                        out.originY = layer.y;
+                        out.scale = 1.0f;
+                        return out.surface != nullptr;
+                    }
+                }
+            }
             // 该窗口的 subsurface 层绘制在窗口内容之上, 先命中 (同一变换)
             for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
                 if (it->type != DesktopCompositor::CompositorLayer::Type::Subsurface) continue;
