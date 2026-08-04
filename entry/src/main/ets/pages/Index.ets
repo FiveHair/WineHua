@@ -580,7 +580,8 @@ struct Index {
       'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
     environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
     environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'precise';
-    if (this.smokeRequest.experimentId === 'vkd3d-500k-65f47dc-coherent') {
+    if (this.experimentMode &&
+      this.smokeRequest.experimentId.indexOf('vkd3d-500k-') === 0) {
       // Force the hash-verified DLL staged beside the microtest. Without an
       // explicit override Wine may satisfy LoadLibrary("d3d12.dll") with its
       // builtin module, which would invalidate the VKD3D experiment evidence.
