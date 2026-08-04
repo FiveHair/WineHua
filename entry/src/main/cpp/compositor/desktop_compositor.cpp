@@ -311,6 +311,20 @@ bool DesktopCompositor::ComputeFullscreenFitLocked(uint32_t toplevelId, int root
     return ComputeFitRect(rootW, rootH, contentW, contentH, out);
 }
 
+bool DesktopCompositor::ShouldSkipFullscreenCascade(const CompositorLayer& layer,
+                                                    uint32_t fullscreenId, bool fsOk,
+                                                    ToplevelManager& tmgr)
+{
+    if (!fsOk || layer.toplevelId == fullscreenId) return false;
+    if (layer.type == CompositorLayer::Type::Toplevel)
+        return layer.fullscreen;
+    if (layer.type == CompositorLayer::Type::Subsurface) {
+        const auto* parent = tmgr.FindToplevelLocked(layer.toplevelId);
+        return parent && parent->IsFullscreen();
+    }
+    return false;
+}
+
 void DesktopCompositor::ResolveSubsurfaceLayerPositionLocked(
     const SubsurfaceLayer& layer, int& x, int& y) const
 {
@@ -697,14 +711,9 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             // 跳过非主全屏的 toplevel: SHM 游戏只跳过被连带标 fullscreen 的
             // 旧窗口 (notepad/explorer 等, 显示模式切换时 winewayland 批量
             // 标记, fsPriority 选了游戏但它仍在 z-order 高位, 普通 blit 会
-            // 盖在游戏上面), 非全屏弹窗/对话框保留。
-            // 阶段 2: ZC 游戏不再独占跳过其它 toplevel — 它们正常合成进
-            // CPU 帧, 由 egl_renderer 按 zIndex 位置画 ZC 层并贴回上层
-            // (自然覆盖), 双 GL 实例互叠 bug 由此修复
-            // (见 COMPOSITOR_UNIFICATION.md §5 阶段 2)
-            if (hasFullscreen && layer.toplevelId != fullscreenId) {
-                if (layer.fullscreen) return;
-            }
+            // 盖在游戏上面), 非全屏弹窗/对话框保留。规则单一实现:
+            // ShouldSkipFullscreenCascade (与输入命中同源)
+            if (ShouldSkipFullscreenCascade(layer, fullscreenId, hasFullscreen, tmgr_)) return;
             auto* cst = tmgr_.FindToplevelLocked(layer.toplevelId);
             if (!cst) return;
             const auto& childPx = cst->Pixels();
@@ -790,16 +799,11 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         auto blitSubsurface = [&](const CompositorLayer& layer) {
             if (layer.ShouldSkipCpu()) return;
             if (layer.w <= 0 || layer.h <= 0) return;
-            if (hasFullscreen && layer.toplevelId != fullscreenId) {
-                // 只跳过"父 toplevel 也连带 fullscreen"的 subsurface (显示模式
-                // 切换时被 winewayland 批量标记的旧窗口残留菜单, 防盖在游戏上 —
-                // 与 blitToplevel 705 行同一规则); 非全屏普通窗口 (如游戏上方
-                // 新弹出的对话框) 的 subsurface 正常渲染。
-                // 旧规则无差别跳过所有非主全屏窗口的 subsurface, 导致
-                // "游戏全屏时新窗口的菜单被游戏覆盖" (2026-08-05 实测)。
-                const auto* parent = tmgr_.FindToplevelLocked(layer.toplevelId);
-                if (parent && parent->IsFullscreen()) return;
-            }
+            // 只跳过"父 toplevel 也连带 fullscreen"的 subsurface (显示模式
+            // 切换时被 winewayland 批量标记的旧窗口残留菜单, 防盖在游戏上);
+            // 非全屏普通窗口 (如游戏上方新弹出的对话框) 的 subsurface 正常
+            // 渲染。规则单一实现: ShouldSkipFullscreenCascade (与输入命中同源)
+            if (ShouldSkipFullscreenCascade(layer, fullscreenId, hasFullscreen, tmgr_)) return;
             const auto& sl = *layer.sub;
             int layerX = layer.x;
             int layerY = layer.y;

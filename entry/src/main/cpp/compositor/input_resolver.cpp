@@ -104,17 +104,11 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
         const auto& layer = *it;
         if (layer.ShouldSkipCpu()) continue;
 
-        // 连带 fullscreen 跳过 (与渲染 blitToplevel 705 / blitSubsurface 793
-        // 同一规则): fsOk 时, 非主全屏窗口 (被连带标记的旧窗口) 渲染被跳过,
-        // 命中同样下放 (防点到看不见的层); 非全屏弹窗/对话框保留
-        if (fsOk && layer.toplevelId != fullscreenId) {
-            if (layer.type == DesktopCompositor::CompositorLayer::Type::Toplevel) {
-                if (layer.fullscreen) continue;
-            } else if (layer.type == DesktopCompositor::CompositorLayer::Type::Subsurface) {
-                const auto* parent = tmgr_.FindToplevelLocked(layer.toplevelId);
-                if (parent && parent->IsFullscreen()) continue;
-            }
-        }
+        // 连带 fullscreen 跳过 (与渲染 blitToplevel/blitSubsurface 同一规则,
+        // 单一实现 ShouldSkipFullscreenCascade): fsOk 时, 非主全屏窗口 (被
+        // 连带标记的旧窗口) 渲染被跳过, 命中同样下放 (防点到看不见的层);
+        // 非全屏弹窗/对话框保留
+        if (DesktopCompositor::ShouldSkipFullscreenCascade(layer, fullscreenId, fsOk, tmgr_)) continue;
 
         if (layer.type == DesktopCompositor::CompositorLayer::Type::Subsurface) {
             // 内部菜单: enter 层自己的 wl_surface, 坐标以层原点为基。层可伸出
