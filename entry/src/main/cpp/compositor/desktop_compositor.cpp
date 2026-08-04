@@ -772,28 +772,9 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             for (int y = 0; y < copyH; y++) {
                 auto* srcRow = &childPx[(srcY + y) * childW * 4];
                 auto* dstRow = &composited[(dstY + y) * rootW * 4];
-                if (!childArgb) {
-                    memcpy(&dstRow[dstX * 4], &srcRow[srcX * 4], copyW * 4);
-                    continue;
-                }
-                for (int x = 0; x < copyW; x++) {
-                    const uint8_t* sp = srcRow + (srcX + x) * 4;
-                    uint8_t* dp = dstRow + (dstX + x) * 4;
-                    uint8_t a = sp[3];
-                    if (a == 0) continue;
-                    if (a == 255) {
-                        memcpy(dp, sp, 4);
-                    } else {
-                        unsigned inv = 255 - a;
-                        unsigned b = sp[0] + (dp[0] * inv) / 255;
-                        unsigned g = sp[1] + (dp[1] * inv) / 255;
-                        unsigned r = sp[2] + (dp[2] * inv) / 255;
-                        dp[0] = b > 255 ? 255 : b;
-                        dp[1] = g > 255 ? 255 : g;
-                        dp[2] = r > 255 ? 255 : r;
-                        dp[3] = 255;
-                    }
-                }
+                // SrcOnly 混合语义 (源不乘 alpha, clamp, 目标 alpha 强制 255)
+                BlitClipAlpha(&dstRow[dstX * 4], &srcRow[srcX * 4], copyW,
+                              childArgb, PixelBlend::SrcOnly);
             }
         };
         auto blitSubsurface = [&](const CompositorLayer& layer) {
@@ -860,24 +841,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                     ((renderSrcY + y) * sl.w + renderSrcX) * 4;
                 uint8_t* dstRow = composited.data() +
                     ((renderDstY + y) * rootW + renderDstX) * 4;
-                if (!needsAlphaBlend) {
-                    std::memcpy(dstRow, srcRow, static_cast<size_t>(renderW) * 4);
-                    continue;
-                }
-                for (int x = 0; x < renderW; x++) {
-                    const uint8_t* srcPixel = srcRow + x * 4;
-                    uint8_t* dstPixel = dstRow + x * 4;
-                    uint8_t a = srcPixel[3];
-                    if (a == 0) continue;
-                    if (a == 255) {
-                        std::memcpy(dstPixel, srcPixel, 4);
-                    } else {
-                        unsigned inv = 255 - a;
-                        dstPixel[0] = (srcPixel[0] * a + dstPixel[0] * inv) / 255;
-                        dstPixel[1] = (srcPixel[1] * a + dstPixel[1] * inv) / 255;
-                        dstPixel[2] = (srcPixel[2] * a + dstPixel[2] * inv) / 255;
-                    }
-                }
+                BlitClipAlpha(dstRow, srcRow, renderW, needsAlphaBlend, PixelBlend::Normal);
             }
         };
         for (const auto& layer : layers) {
@@ -946,24 +910,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         for (int y = 0; y < copyH; y++) {
             const uint8_t* srcRow = sl.pixels.data() + ((srcY + y) * sl.w + srcX) * 4;
             uint8_t* dstRow = out.data() + ((dstY + y) * winW + dstX) * 4;
-            if (!needsAlphaBlend) {
-                std::memcpy(dstRow, srcRow, static_cast<size_t>(copyW) * 4);
-                continue;
-            }
-            for (int x = 0; x < copyW; x++) {
-                const uint8_t* sp = srcRow + x * 4;
-                uint8_t* dp = dstRow + x * 4;
-                uint8_t a = sp[3];
-                if (a == 0) continue;
-                if (a == 255) {
-                    std::memcpy(dp, sp, 4);
-                } else {
-                    unsigned inv = 255 - a;
-                    dp[0] = (sp[0] * a + dp[0] * inv) / 255;
-                    dp[1] = (sp[1] * a + dp[1] * inv) / 255;
-                    dp[2] = (sp[2] * a + dp[2] * inv) / 255;
-                }
-            }
+            BlitClipAlpha(dstRow, srcRow, copyW, needsAlphaBlend, PixelBlend::Normal);
         }
     };
     for (const auto& layer : layers) {
