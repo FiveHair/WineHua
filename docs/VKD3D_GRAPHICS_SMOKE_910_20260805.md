@@ -113,3 +113,15 @@ Physical presentation requires a matching Host target, successful presenter
 attachment/swapchain setup, `vk_present ret=0`, and observable frame publication.
 The 1000-frame gate remains blocked until those conditions pass without sleep,
 `vkDeviceWaitIdle`, or global-flush compensation.
+
+## r8 120-frame physical-display result
+
+A clean uninstall/reinstall run kept the same target attached for 120 frames.
+The SurfaceQueue evidence reached `frame=120`, `signals=120`, and `failures=0`.
+The Guest result was 120/120 in 3,416 ms (`fps=35.129`) with exit code zero.
+No sleep, `vkDeviceWaitIdle`, or global-flush compensation was added.
+
+Retained r8 logs outside the repository have SHA-256 hashes
+`a20445682d127b418ddd32ca4bc458d359c677ad9d52f9e67cf5f319432686a8`
+(Host) and `0a70c655cdf6752e90aab9767d722c50390fe93a352c4648dee6723bb4bb69c1`
+(Guest stderr).
