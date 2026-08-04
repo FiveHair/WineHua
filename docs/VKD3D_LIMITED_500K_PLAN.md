@@ -118,5 +118,19 @@ upload/default/readback path. See `VKD3D_MULTIQUEUE_910_20260805.md`.
 The 1,000-frame physical-display evidence already exercises the isolated
 `venus_broker_present` route. The remaining qualification work is to reconcile
 that evidence as the BrokerPresent gate and run the full DXVK product
-regression. D3D12 remains default-off, and no real DX12 game test is qualified
-until those checks pass.
+regression.
+
+The validated product DXVK Legacy 1.10.3 path has now passed a clean-prefix
+x86/x64 full feature matrix, fixed-frame validation, coverage audit, and cube
+presentation with no fallback or per-frame device wait-idle. See
+`VKD3D_DXVK_REGRESSION_910_20260805.md`. The additional non-default Modern
+2.6.2 baseline did not pass its x86/x64 matrices and remains explicitly
+unqualified; it was not changed or hidden by a Legacy fallback.
+
+The limited-500K track has therefore completed its descriptor, Gate C, BDA,
+multiple-queue, physical BrokerPresent, and validated product-path regression
+checks on the recorded 910 artifacts. It may proceed to a carefully selected
+real DX12 title investigation with descriptor-heap telemetry. This is not a
+general-support decision: D3D12 remains default-off, a heap request above
+500,000 is unsupported, and any capability/driver/Mesa/Venus/Wine change
+invalidates the qualification.
