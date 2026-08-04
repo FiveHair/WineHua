@@ -9,6 +9,13 @@ const DOMAIN = 0x0000;
 const SOCK = '/data/storage/el2/base/files/.wine/wine-wayland';
 const FILES_BASE = '/data/storage/el2/base/files';
 
+// wine 内部系统进程 (broker 已全量登记): 任务列表只显示用户程序,
+// 隐藏 wineserver/services 等服务进程。AddProcess 登记的是 basename。
+const SYSTEM_PROC_BLACKLIST: string[] = [
+  'wineserver', 'services.exe', 'csrss.exe', 'winedevice.exe',
+  'plugplay.exe', 'svchost.exe', 'rpcss.exe', 'wineboot.exe',
+];
+
 // Wine 运行时从 rawfile 解压到 files/
 const WINE_ROOT = `${FILES_BASE}/wine`;
 const WINE_BIN = `${WINE_ROOT}/bin`;
@@ -108,6 +115,10 @@ struct Index {
   @State entries: string[] = [];
   @State dirStack: string[] = [];
   @State processList: ProcessInfo[] = [];
+  // 进程列表刷新节流: wine 内部进程高频进出时会触发大量 process-updated,
+  // 合并到 300ms 内一次刷新, 避免初始化/注册阶段 UI 反复重建列表。
+  private processRefreshPending: boolean = false;
+  private processRefreshTimer: number = -1;
   @State initOverlayVisible: boolean = false;
   @State initOverlayText: string = '';
   private hasRawfileWineData: boolean = false;
@@ -152,6 +163,9 @@ struct Index {
         this.waitForPrefix();
       } else if (stateMsg == 'wine-running') {
         this.setInitStatus('运行中', false);
+        this.refreshProcessList();
+      } else if (stateMsg == 'process-updated') {
+        // wine 内部启动的新程序 (走 broker 登记) 通过此消息刷新任务列表
         this.refreshProcessList();
       } else if (stateMsg == 'exited') {
         this.refreshProcessList();
@@ -327,12 +341,32 @@ struct Index {
     }
   }
 
-  private refreshProcessList = (): void => {
-    try {
-      this.processList = testNapi.getProcessList() as ProcessInfo[];
-    } catch (e) {
-      this.processList = [];
+  private refreshProcessList = (immediate: boolean = false): void => {
+    const doRefresh = (): void => {
+      try {
+        const all = testNapi.getProcessList() as ProcessInfo[];
+        this.processList = all.filter((p: ProcessInfo) => SYSTEM_PROC_BLACKLIST.indexOf(p.name) < 0);
+      } catch (e) {
+        this.processList = [];
+      }
+    };
+    if (immediate) {
+      if (this.processRefreshTimer >= 0) {
+        clearTimeout(this.processRefreshTimer);
+        this.processRefreshTimer = -1;
+        this.processRefreshPending = false;
+      }
+      doRefresh();
+      return;
     }
+    // 节流: 合并高频 tsfn 触发的刷新; 手动点刷新按钮走 immediate 分支
+    if (this.processRefreshPending) return;
+    this.processRefreshPending = true;
+    this.processRefreshTimer = setTimeout(() => {
+      this.processRefreshPending = false;
+      this.processRefreshTimer = -1;
+      doRefresh();
+    }, 300);
   }
 
   private doKillProcess = (pid: number): void => {
@@ -797,7 +831,7 @@ struct Index {
             Text('↻')
           }
           .width(28).height(28).backgroundColor('#333')
-          .onClick(this.refreshProcessList)
+          .onClick(() => this.refreshProcessList(true))
         }
         .width('100%').padding({ top: 12, bottom: 8 })
         .alignItems(VerticalAlign.Center)

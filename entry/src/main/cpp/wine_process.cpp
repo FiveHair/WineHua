@@ -39,7 +39,8 @@ static void EnsureMonitorRunning();
 WineProcessEntry* AddProcess(pid_t pid, const std::string& exeFullPath, int stdoutFd) {
     std::lock_guard<std::mutex> lock(gProcMutex);
     std::string basename = exeFullPath;
-    auto slash = basename.find_last_of('/');
+    // 兼容 Windows 反斜杠路径 (C:\game\game.exe), 否则完整路径会显示为进程名
+    auto slash = basename.find_last_of("/\\");
     if (slash != std::string::npos) basename = basename.substr(slash + 1);
     gProcRegistry.erase(std::remove_if(gProcRegistry.begin(), gProcRegistry.end(),
         [pid](const WineProcessEntry& entry) { return entry.pid == pid; }), gProcRegistry.end());
@@ -64,6 +65,12 @@ WineProcessEntry* AddProcess(pid_t pid, const std::string& exeFullPath, int stdo
     OH_LOG_INFO(LOG_APP, "[ProcReg] add pid=%{public}d name=%{public}s total=%{public}zu",
                 pid, basename.c_str(), gProcRegistry.size());
     EnsureMonitorRunning();
+    // 通知 ArkTS 刷新进程列表: wine 内部自启的子进程 (走 broker 登记) 没有
+    // 调用者发 wine-running, 必须在这里统一发一次, 否则新程序不出现在任务列表。
+    // ArkTS 侧对 process-updated 做了节流, 高频进出的系统进程不会触发大量刷新。
+    if (gStateTsfn) {
+        napi_call_threadsafe_function(gStateTsfn, strdup("0:process-updated"), napi_tsfn_blocking);
+    }
     return &gProcRegistry.back();
 }
 
