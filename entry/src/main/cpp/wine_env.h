@@ -75,6 +75,9 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
                          const std::string& d3dBackend,
                          const std::string& binDir);
 
+// -- 环境变量辅助 --
+void UpsertEnvLine(std::vector<std::string>& env, const std::string& line);
+
 // -- Audio bootstrap --
 int CreateAudioBootstrapFd(const std::string& runtimeDir);
 

@@ -23,6 +23,11 @@ struct ProgramOptions {
 // 返回子进程 pid, <= 0 表示启动失败。
 int SpawnWineProgram(const ProgramOptions& options);
 
+// 经 broker Unix socket 发送 SPAWN 请求, 返回子进程 pid, <= 0 表示失败。
+// 供 wine_exe.cpp 内部与 wine_launch.cpp (explorer 桌面模式) 共用, 避免重复实现。
+pid_t SpawnViaBroker(const std::string& entryParams,
+                     const std::vector<std::string>& environment);
+
 napi_value RunWineExe(napi_env env, napi_callback_info info);
 napi_value RunWineProgram(napi_env env, napi_callback_info info);
 napi_value RunGuestProgram(napi_env env, napi_callback_info info);

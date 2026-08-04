@@ -318,23 +318,23 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
     /* Product sessions retain warnings and errors without formatting DXVK's
      * informational startup stream. Smoke and explicit diagnostics override
      * this through runWineProgram's per-process environment. */
-    env.push_back("DXVK_LOG_LEVEL=warn");
-    env.push_back("DXVK_LOG_PATH=C:\\windows\\temp");
+    UpsertEnvLine(env, "DXVK_LOG_LEVEL=warn");
+    UpsertEnvLine(env, "DXVK_LOG_PATH=C:\\windows\\temp");
 #ifdef __aarch64__
-    env.push_back("BOX64_DYNAREC_WEAKBARRIER=0");
+    UpsertEnvLine(env, "BOX64_DYNAREC_WEAKBARRIER=0");
 #endif
-    env.push_back("WINEHUA_PERF_PROFILE=" + selectedProfile);
-    env.push_back("DXVK_WINEHUA_PRECISE_SHADOW=1");
+    UpsertEnvLine(env, "WINEHUA_PERF_PROFILE=" + selectedProfile);
+    UpsertEnvLine(env, "DXVK_WINEHUA_PRECISE_SHADOW=1");
     if (selectedProfile == "shadow-precise-dirty-ring-inline-upload-descriptor-serialized") {
-        env.push_back("VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=1");
+        UpsertEnvLine(env, "VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=1");
     }
-    env.push_back("VN_WINEHUA_STRONG_RING_BARRIER=1");
+    UpsertEnvLine(env, "VN_WINEHUA_STRONG_RING_BARRIER=1");
     if (guestPerf) {
-        env.push_back("VN_WINEHUA_PERF_SUMMARY=1");
-        env.push_back("VN_WINEHUA_PERF_LOG=/storage/Users/currentUser/Download/app.hackeris.winehua/winehua_guest_ring_perf.log");
+        UpsertEnvLine(env, "VN_WINEHUA_PERF_SUMMARY=1");
+        UpsertEnvLine(env, "VN_WINEHUA_PERF_LOG=/storage/Users/currentUser/Download/app.hackeris.winehua/winehua_guest_ring_perf.log");
         /* vn_log uses MESA_LOG_DEBUG.  Raise only the explicit diagnostic
          * profile so the Guest ring summary survives the OHOS logger filter. */
-        env.push_back("MESA_LOG_LEVEL=debug");
+        UpsertEnvLine(env, "MESA_LOG_LEVEL=debug");
     }
 }
 
@@ -368,37 +368,19 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
     LogGraphicsBackendStateForLaunch("DesktopSession");
 }
 
-static void AppendDesktopD3dEntryEnv(std::string& entryParams, const LaunchParams& params)
-{
-    /* Explorer is launched directly through NCP during desktop bootstrap and
-     * therefore does not pass through the process broker. NCP children do not
-     * inherit the session environment reliably, so carry the same base
-     * Wine/Wayland/VirGL environment that was built for broker launches.
-     * Audio and WINESERVERSOCKET are intentionally filtered by
-     * AppendMissingEntryParamsEnvOverrides; their per-process descriptors are
-     * installed by WineChild after the fd list is applied. */
-    std::vector<std::string> env;
-    /* Refresh the graphics portion immediately before spawning Explorer.
-     * params.envStrs was assembled before wineboot and the VirGL receiver
-     * finished starting, so it may still contain a stale SHM fallback. */
-    winehua::GraphicsBroker::GetInstance().AppendWineEnv(env);
-    AppendD3dBackendEnv(env, params.d3dBackend, params.winehuaBin);
-    AppendStableDesktopDxvkEnv(env, params);
-    AppendMissingEntryParamsEnvOverrides(entryParams, env);
-
-    /* Fill in the remaining stable baseline values (HOME, prefix, loader
-     * paths, etc.) without allowing that early snapshot to replace the fresh
-     * graphics state above. */
-    AppendMissingEntryParamsEnvOverrides(entryParams, params.envStrs);
-}
+// broker SPAWN 请求统一走 wine_exe.h 的 SpawnViaBroker (与手动启动共用),
+// 避免在 wine_launch.cpp 复制第二份 broker 协议实现。
 
 static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
                           const std::string& serializedEnv) {
-    // 通过 fdList 传递 audio bootstrap fd (仅 explorer 需要音频)
-    NativeChildProcess_Fd audioFdNode;
-    audioFdNode.fdName = const_cast<char*>("wine_audio_bootstrap");
-    audioFdNode.fd = audioBootstrapFd;
-    audioFdNode.next = nullptr;
+    // serializedEnv 之前用于 NCP 直启 explorer 时嵌入 entryParams；
+    // explorer 桌面模式已改为走 broker（通过 SpawnViaBroker 传输 env），
+    // 此参数不再使用。
+    (void)serializedEnv;
+
+    // audioFdNode 之前用于 explorer NCP fdList；改为 broker 后,
+    // broker::HandleRequest 自动为每个请求创建 audio bootstrap fd。
+    (void)audioBootstrapFd;
 
     // Prefix registry and user data survive runtime upgrades, while the
     // syswow64 PE files are managed copies. Validate them before wineserver
@@ -575,7 +557,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         OH_LOG_INFO(LOG_APP, "[Launch-Async] automation session ready; Explorer intentionally skipped");
     }
     else if (WaylandServer::GetInstance()->IsDesktopMode())
-    // -- explorer (Desktop 或 Pad 模式均启动) --
+    // -- explorer (Desktop 或 Pad 模式均启动, 走 broker 统一路径) --
     {
         auto* ws = WaylandServer::GetInstance();
         ws->SetDesktopRootRecognitionEnabled(true);
@@ -588,35 +570,39 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
          * 避免最后一个用户应用退出后 wineserver 自动关闭桌面.
          * 仅 Pad 桌面模式需要, Phone 模式走单窗口, 无需此逻辑. */
         snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d|winehua_keep.exe", dw, dh);
+
+        // 构造 env: 基线 + 刷新图形状态 + DXVK overlay + 桌面稳定性配置.
+        // 这相当于之前 AppendDesktopD3dEntryEnv 的逻辑，收敛到 broker env channel。
+        std::vector<std::string> explorerEnv = p->envStrs;
+        {
+            std::vector<std::string> freshGraphics;
+            winehua::GraphicsBroker::GetInstance().AppendWineEnv(freshGraphics);
+            for (const auto& line : freshGraphics) UpsertEnvLine(explorerEnv, line);
+        }
+        AppendD3dBackendEnv(explorerEnv, p->d3dBackend, p->winehuaBin);
+        AppendStableDesktopDxvkEnv(explorerEnv, *p);
+
 #ifdef __aarch64__
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|__winehua_desktop__|explorer|" + desktopArg;
+        std::string exEntry = p->winehuaBin + "|__winehua_desktop__|explorer|" + std::string(desktopArg);
 #else
-        std::string exEntry = p->homeDir + "|" + p->winehuaBin + serializedEnv + "|__winehua_desktop__|wine|explorer|" + desktopArg;
+        std::string exEntry = p->winehuaBin + "|__winehua_desktop__|wine|explorer|" + std::string(desktopArg);
 #endif
-        AppendDesktopD3dEntryEnv(exEntry, *p);
-        NativeChildProcess_Args exArgs = {};
-        exArgs.entryParams = const_cast<char*>(exEntry.c_str());
-        exArgs.fdList.head = (audioBootstrapFd >= 0) ? &audioFdNode : nullptr;
-        NativeChildProcess_Options exOpts = {};
-        exOpts.isolationMode = NCP_ISOLATION_MODE_NORMAL;
-        int32_t exPid = -1;
-        auto exRet = OH_Ability_StartNativeChildProcess(
-            "libwine_child.so:Main", exArgs, exOpts, &exPid);
-        OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d ret=%{public}d",
-                    exPid, (int)exRet);
-        ws->PromotePendingDesktopRoot();
-        /* StartNativeChildProcess returning only means that appspawn accepted
-         * the Explorer request. On a warm prefix the child can still need
-         * several seconds to connect to wineserver and commit its desktop
-         * surface. Do not publish wine-ready until that stable launch boundary
-         * exists, otherwise an automatic game can race Wine's own bootstrap
-         * and die before DXGI initialization. */
-        if (exRet == NCP_NO_ERROR &&
-            !WaitFor("explorer desktop root", [ws]() {
-                return ws->GetDesktopRootToplevelId() != 0;
-            }, 15000, 100)) {
-            OH_LOG_WARN(LOG_APP, "[Launch-Async] explorer desktop root not ready; "
-                        "continuing after bounded readiness wait");
+        // broker 自动添加 homeDir 前缀、序列化 env、创建 audio bootstrap fd
+        int32_t exPid = SpawnViaBroker(exEntry, explorerEnv);
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d (via broker)", exPid);
+        if (exPid > 0) {
+            AddProcess(exPid, "explorer", -1);
+            ws->PromotePendingDesktopRoot();
+            /* broker 返回 pid 只表示 appspawn 接受了 Explorer 请求。
+             * 暖 prefix 下子进程仍需数秒连接 wineserver 并提交 desktop
+             * surface。等待桌面根 toplevel 就绪后再发 wine-ready,
+             * 否则自动化游戏可能抢跑而死于 DXGI 初始化。 */
+            if (!WaitFor("explorer desktop root", [ws]() {
+                    return ws->GetDesktopRootToplevelId() != 0;
+                }, 15000, 100)) {
+                OH_LOG_WARN(LOG_APP, "[Launch-Async] explorer desktop root not ready; "
+                            "continuing after bounded readiness wait");
+            }
         }
     }
     else

@@ -876,6 +876,8 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
             if (FileExists(guestLibDir + "/libEGL.so"))
                 env.push_back("WINEHUA_EGL_LIBRARY_PATH=" + guestLibDir + "/libEGL.so");
 #ifdef __aarch64__
+            // NOTE: 非 DXVK 基线值 (8 个 lib, 不含 libvulkan)。
+            // DXVK 路径下 AppendD3dBackendEnv 会用 14 个 lib (含 libvulkan) 覆盖此值。
             env.push_back("BOX64_EMULATED_LIBS=libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:"
                           "libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:"
                           "libwayland-client.so:libwayland-client.so.0:libwayland-server.so:"
