@@ -220,6 +220,11 @@ bool InputResolver::SurfaceLocalToDesktop(wl_resource* surface, double lx, doubl
     auto lk = tmgr_.Lock();
     const auto* st = tmgr_.FindToplevelLocked(tl);
     if (!st) return false;
+    // NOTE: 此处按 IsFullscreen() 判定, 与 FindInputTargetAt 的 fs-pick
+    // (fsPriority 最大者) 是两套全屏定义 — 显示模式切换时被连带标记的旧
+    // 窗口 IsFullscreen()=true 但非 fs-pick 选中。warp 请求 (SetCursorPos
+    // 回中等) 一般只针对当前前台窗口, 实际不冲突; 若未来观察到连带窗口
+    // warp 错位, 统一为 fs-pick 语义 (PickFullscreenLayerLocked 选中者)。
     if (st->IsFullscreen()) {
         // 与 FindInputTargetAt 全屏分支同一几何 (ComputeFullscreenFitLocked),
         // 保证 warp 锚点与输入逆映射互为正反变换
