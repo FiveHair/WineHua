@@ -1,6 +1,6 @@
 # VKD3D Limited 500K Adaptation Plan
 
-> Updated: 2026-08-03
+> Updated: 2026-08-04
 
 > Status: isolated experimental implementation. No vkd3d-proton DLL is
 > packaged, loaded, or selected by the product runtime.
@@ -93,8 +93,11 @@ cannot be silently truncated by the experimental profile.
 
 ## Current Next Gate
 
-Build the isolated x64 DLLs with the explicit 500K option, record the version
-and hashes, and run a three-times-consistent device microtest. That microtest
-must cover both a 500K shader-visible resource heap and the real root-signature
-layout count; no HAP packaging or default D3D12 activation is permitted before
-it passes.
+The real 500K final-slot GPU descriptor microtest is complete on Maleoon 910:
+three independently reinstalled runs passed with identical build identity,
+post-teardown result records, and process exit status. See
+`VKD3D_DESCRIPTOR_500K_910_20260804.md`.
+
+The next isolated gates are BDA, multiple queues, and BrokerPresent. A physical
+display run must then sustain 1,000 frames before any DX12 game test. D3D12
+remains default-off throughout these gates.
