@@ -46,6 +46,13 @@ DXVK_MODERN_ARTIFACTS := \
 	$(BUILD_DIR)/dxvk/modern-2.6/x86/bin/dxgi.dll
 DXVK_MODERN_STAMP := $(STAMPS)/dxvk-modern-2.6
 DXVK_MODERN_SOURCE_INPUTS := $(shell find $(ROOT)/thirdparty/dxvk-modern/src -type f 2>/dev/null; find $(ROOT)/thirdparty/dxvk-modern -maxdepth 1 -type f 2>/dev/null)
+VKD3D_PROTON_ARTIFACTS := \
+	$(BUILD_DIR)/vkd3d-proton/limited-500k/x64/d3d12.dll \
+	$(BUILD_DIR)/vkd3d-proton/limited-500k/x64/winehua-d3d12-smoke.exe \
+	$(BUILD_DIR)/vkd3d-proton/limited-500k/manifest.json
+VKD3D_PROTON_STAMP := $(STAMPS)/vkd3d-proton-limited-500k
+VKD3D_PROTON_SOURCE_INPUTS := $(shell find $(ROOT)/patches/vkd3d-proton -type f 2>/dev/null; \
+	find $(ROOT)/thirdparty/vkd3d-proton -maxdepth 2 -type f 2>/dev/null)
 
 # 架构列表 (NATIVE_ARCH=all 时展开为两个)
 ifeq ($(NATIVE_ARCH),all)
@@ -105,6 +112,20 @@ $(DXVK_MODERN_ARTIFACTS): $(DXVK_MODERN_STAMP)
 ifeq ($(BUILD_GUEST_VULKAN),1)
 ASSEMBLE_GUEST_INPUTS += $(wildcard $(GUEST_VULKAN_SENTINEL))
 endif
+
+# ============================================================
+# vkd3d-proton — x64-only, explicit, default-off 2.6 limited-500K profile
+# ============================================================
+.PHONY: vkd3d-proton
+vkd3d-proton: $(VKD3D_PROTON_STAMP)
+
+$(VKD3D_PROTON_STAMP): $(SCRIPTS)/build_vkd3d_proton.sh $(VKD3D_PROTON_SOURCE_INPUTS) | $(STAMPS)
+	@echo "=== vkd3d-proton 2.6 limited-500K ==="
+	bash $(SCRIPTS)/build_vkd3d_proton.sh
+	touch $@
+
+$(VKD3D_PROTON_ARTIFACTS): $(VKD3D_PROTON_STAMP)
+	@test -s "$@" || { echo "ERROR: VKD3D-Proton artifact missing after build: $@" >&2; exit 1; }
 
 # ============================================================
 # 默认目标
@@ -340,6 +361,7 @@ define assemble_rule
 assemble-$(1): $$(STAMPS)/$(1)/assemble
 
 $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFACTS) $(DXVK_MODERN_ARTIFACTS) \
+	$(VKD3D_PROTON_ARTIFACTS) \
 	$(ROOT)/smoke/winehua_d3d8_smoke.c \
 	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
 	$(ROOT)/smoke/winehua_gpu_diagnostics.c \

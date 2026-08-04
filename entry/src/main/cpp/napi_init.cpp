@@ -336,7 +336,8 @@ static napi_value LaunchClient(napi_env env, napi_callback_info info) {
     if (argc >= 8) {
         char d3dBackend[64] = {};
         napi_get_value_string_utf8(env, args[7], d3dBackend, sizeof(d3dBackend), nullptr);
-        if (!strcmp(d3dBackend, "wined3d") || !strncmp(d3dBackend, "dxvk_", 5))
+        if (!strcmp(d3dBackend, "wined3d") || !strncmp(d3dBackend, "dxvk_", 5) ||
+            !strcmp(d3dBackend, "vkd3d_limited_500k"))
             p->d3dBackend = d3dBackend;
     }
     // 向后兼容: 旧调用未传 homeDir 时使用默认路径

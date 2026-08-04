@@ -128,6 +128,7 @@ struct Index {
   private gameStarted: boolean = false;
   private experimentMode: boolean = false;
   private experimentStaged: boolean = false;
+  private pendingVkd3dSmoke: boolean = false;
 
   aboutToAppear(): void {
     this.smokeRequest = parseSmokeRequest(this.smokeRequestText);
@@ -136,7 +137,8 @@ struct Index {
     this.gameTestMode = this.smokeRequest.mode === 'game' || this.experimentMode;
     this.experimentStaged = false;
     this.d3dBackend = this.d3dBackendText === 'dxvk_legacy' ||
-      this.d3dBackendText === 'dxvk_modern_2_6' ? this.d3dBackendText : 'wined3d';
+      this.d3dBackendText === 'dxvk_modern_2_6' ||
+      this.d3dBackendText === 'vkd3d_limited_500k' ? this.d3dBackendText : 'wined3d';
     this.prefixMode = this.smokeRequest.prefixMode;
     this.prefixRoot = this.prefixMode === 'clean' ? WINE_SMOKE_PREFIX : `${FILES_BASE}/.wine`;
     this.driveC = `${this.prefixRoot}/drive_c`;
@@ -325,6 +327,7 @@ struct Index {
           this.listDir(this.driveC);
           this.startRequestedSmoke();
           this.startRequestedGame();
+          this.startPendingVkd3dSmoke();
           return;
         }
       } catch (e) { /* prefix 还没初始化完成 */ }
@@ -336,6 +339,7 @@ struct Index {
       this.initOverlayVisible = false;
       this.startRequestedSmoke();
       this.startRequestedGame();
+      this.startPendingVkd3dSmoke();
     } else {
       this.initInProgress = false;
       this.setInitStatus('Wine 前缀初始化超时', false);
@@ -549,8 +553,9 @@ struct Index {
     const environment = this.d3dLaunchEnvironment();
     const requiresExperimentVulkan = this.experimentMode &&
       windowsExePath.indexOf('C:\\smoke\\experiments\\') === 0;
+    const requiresVkd3dRuntime = this.isVkd3dProfile();
     if (!windowsExePath.toLowerCase().endsWith('winehua_dxvk26_requirements.exe') &&
-      !requiresExperimentVulkan) {
+      !requiresExperimentVulkan && !requiresVkd3dRuntime) {
       return environment;
     }
     const guestVulkanRoot = `${WINE_ROOT}/bin/guest_vulkan`;
@@ -589,12 +594,13 @@ struct Index {
       'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
     environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
     environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'precise';
-    if (this.experimentMode &&
-      this.smokeRequest.experimentId.indexOf('vkd3d-500k-') === 0) {
+    if ((this.experimentMode &&
+      this.smokeRequest.experimentId.indexOf('vkd3d-500k-') === 0) ||
+      requiresVkd3dRuntime) {
       // Force the hash-verified DLL staged beside the microtest. Without an
       // explicit override Wine may satisfy LoadLibrary("d3d12.dll") with its
       // builtin module, which would invalidate the VKD3D experiment evidence.
-      environment['WINEDLLOVERRIDES'] = 'd3d12=n,b';
+      environment['WINEDLLOVERRIDES'] = requiresVkd3dRuntime ? 'd3d12=n' : 'd3d12=n,b';
       environment['VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC'] = '1';
       // The Gate C probe intentionally excludes unsupported query meta
       // pipelines. This profile is never selected for ordinary launches.
@@ -609,21 +615,28 @@ struct Index {
       this.smokeRequest.experimentId.indexOf('vkd3d-') === 0;
   }
 
+  private isVkd3dProfile(): boolean {
+    return this.d3dBackend === 'vkd3d_limited_500k';
+  }
+
   private d3dPresentBackend(): string {
     // A staged VKD3D DLL presents through the Vulkan/Venus path even though
-    // D3D11 remains on WineD3D. Keep the override isolated to experiments.
-    return this.d3dBackend.indexOf('dxvk_') === 0 || this.isVkd3dExperiment() ?
+    // D3D11 remains on WineD3D. The product profile is explicit and default off.
+    return this.d3dBackend.indexOf('dxvk_') === 0 || this.isVkd3dExperiment() ||
+      this.isVkd3dProfile() ?
       'venus_broker_present' : 'virgl_compositor';
   }
 
   private selectD3dBackend = (backend: string): void => {
-    const selected = backend === 'dxvk_legacy' || backend === 'dxvk_modern_2_6' ?
-      backend : 'wined3d';
+    const selected = backend === 'dxvk_legacy' || backend === 'dxvk_modern_2_6' ||
+      backend === 'vkd3d_limited_500k' ? backend : 'wined3d';
     this.d3dBackend = selected;
     this.d3dBackendText = selected;
-    this.d3dPreferenceText = selected;
+    // VKD3D is deliberately not persisted as the normal cold-start backend.
+    this.d3dPreferenceText = selected === 'vkd3d_limited_500k' ? 'dxvk_legacy' : selected;
     this.statusText = selected === 'dxvk_legacy' ? 'DXVK Legacy' :
-      (selected === 'dxvk_modern_2_6' ? 'DXVK Modern 2.6' : 'WineD3D');
+      (selected === 'dxvk_modern_2_6' ? 'DXVK Modern 2.6' :
+        (selected === 'vkd3d_limited_500k' ? 'VKD3D 2.6 Limited 500K（实验）' : 'WineD3D'));
     hilog.info(DOMAIN, 'GameTest', 'D3D backend selected=%{public}s', selected);
   }
 
@@ -646,7 +659,7 @@ struct Index {
     // Automation owns an internal HOME and must never open a Picker.
     if (this.automationMode || this.experimentMode) {
       this.zHome = `${WINE_AUTOMATION_HOME}/`;
-    } else if (this.gameTestMode) {
+    } else if (this.gameTestMode || this.pendingVkd3dSmoke) {
       // Game-test mode avoids the picker but keeps the same managed user home
       // used by the normal desktop session, so Z: points at installed games.
       this.zHome = '/storage/Users/currentUser/Download/app.hackeris.winehua/';
@@ -698,10 +711,10 @@ struct Index {
     this.setInitStatus('启动服务...', true);
     /* The renderer process is created while startServer() initializes the
      * broker, before the isolated PE receives capabilityProbeEnvironment().
-     * Make the VKD3D Gate C transport selection here so the already-running
-     * host vtest process uses precise Host-to-Guest invalidation as well.
-     * Keep this strictly scoped to staged VKD3D experiments. */
-    const hostShadowProfile = this.isVkd3dExperiment()
+     * Make the VKD3D transport selection before vtest starts. Manual VKD3D
+     * activation stops and recreates the graphics broker first, while normal
+     * launches retain the validated DXVK/WineD3D host profile. */
+    const hostShadowProfile = this.isVkd3dExperiment() || this.isVkd3dProfile()
       ? 'shadow-precise-direct-fence' : this.perfProfileText;
     testNapi.setHostShadowProfile(hostShadowProfile);
     hilog.info(DOMAIN, 'Experiment', 'host shadow profile=%{public}s experiment=%{public}s',
@@ -870,6 +883,54 @@ struct Index {
     hilog.error(DOMAIN, 'Experiment', 'result timeout id=%{public}s path=%{public}s', experimentId, path);
   }
 
+  private startPendingVkd3dSmoke = (): void => {
+    if (!this.pendingVkd3dSmoke || !this.prefixReady) return;
+    this.pendingVkd3dSmoke = false;
+    const exePath = 'C:\\smoke\\x64\\winehua_d3d12_smoke.exe';
+    const result = testNapi.runWineProgram({
+      windowsExePath: exePath,
+      argv: ['--frames', '1000', '--width', '640', '--height', '480', '--sync-interval', '0'],
+      environment: this.capabilityProbeEnvironment(exePath),
+      workingDirectory: 'C:\\smoke\\x64',
+      prefixMode: 'reuse',
+      d3dBackend: 'vkd3d_limited_500k',
+      presentBackend: 'venus_broker_present',
+      automationMode: false
+    }) as ProcessInfo;
+    this.statusText = result.pid > 0 ? 'DX12 示例运行中（1000 帧）' : 'DX12 示例启动失败';
+    hilog.info(DOMAIN, 'VKD3D',
+      'manual smoke path=%{public}s pid=%{public}d status=%{public}s',
+      exePath, result.pid, result.state);
+  }
+
+  private startVkd3dSmoke = (): void => {
+    if (this.initInProgress) return;
+    this.selectD3dBackend('vkd3d_limited_500k');
+    this.pendingVkd3dSmoke = true;
+    this.gameTestMode = true;
+    this.statusText = '正在切换到隔离 VKD3D 测试会话...';
+    this.initInProgress = true;
+    this.initOverlayVisible = true;
+    this.initOverlayText = '正在重启图形运行时（不清除 Wine 前缀）';
+    try {
+      // A running VirGL host deliberately refuses live profile mutation.
+      // Stop only the managed Wine/graphics processes, keep the prefix, then
+      // let doInit() recreate vtest with the VKD3D direct-fence profile.
+      testNapi.setHostShadowProfile('shadow-precise-direct-fence');
+      testNapi.stopClient();
+      this.processList = [];
+      this.state = 'idle';
+      this.prefixReady = false;
+      this.initInProgress = false;
+      setTimeout(() => this.doInit(), 250);
+    } catch (e) {
+      this.pendingVkd3dSmoke = false;
+      this.initInProgress = false;
+      this.setInitStatus('VKD3D 测试会话切换失败', false);
+      hilog.error(DOMAIN, 'VKD3D', 'manual session restart failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
   private startDeveloperSmoke = (): void => {
     this.smokeRequest = {
       mode: 'smoke', runId: `developer-${Date.now()}`, suite: 'core',
@@ -930,6 +991,23 @@ struct Index {
             .onClick(() => this.selectD3dBackend('dxvk_legacy'))
         }
         .width('100%').margin({ bottom: 8 })
+
+        Button('VKD3D 2.6（500K 实验）')
+          .width('100%').height(34)
+          .backgroundColor(this.d3dBackend === 'vkd3d_limited_500k' ? '#854' : '#333')
+          .onClick(() => this.selectD3dBackend('vkd3d_limited_500k'))
+          .margin({ bottom: 6 })
+
+        if (this.d3dBackend === 'vkd3d_limited_500k') {
+          Text('仅 x64；资源描述符堆上限 500,000；查询 Meta 暂不可用。普通启动仍使用 DXVK Legacy。')
+            .fontSize(11).fontColor('#d9a').maxLines(3)
+            .width('100%').margin({ bottom: 6 })
+          Button('运行 DX12 1000 帧示例')
+            .width('100%').height(36).backgroundColor('#764')
+            .enabled(!this.initInProgress)
+            .onClick(this.startVkd3dSmoke)
+            .margin({ bottom: 8 })
+        }
 
         // -- 快速操作 --
         Text('快速操作')

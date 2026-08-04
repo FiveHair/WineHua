@@ -289,6 +289,12 @@ static std::string FindLaunchEnvironmentValue(const LaunchParams& params,
     return {};
 }
 
+static bool UsesVulkanD3dBackend(const std::string& backend)
+{
+    return backend.rfind("dxvk_", 0) == 0 ||
+           backend == "vkd3d_limited_500k";
+}
+
 static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
                                        const LaunchParams& params)
 {
@@ -376,7 +382,7 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
     auto& gb = winehua::GraphicsBroker::GetInstance();
     gb.SetWineRuntimeBinaryDir(params.winehuaBin);
     gb.SetRequestedBackend(winehua::GraphicsBackend::Virgl);
-    gb.SetVulkanPresentMode(params.d3dBackend.rfind("dxvk_", 0) == 0);
+    gb.SetVulkanPresentMode(UsesVulkanD3dBackend(params.d3dBackend));
     gb.EnsureStarted(params.sockDir);
 
     winehua::GraphicsBackendState state = gb.GetState();
@@ -719,7 +725,7 @@ void LaunchThreadFunc(LaunchParams* p) {
 
     auto& graphicsBroker = winehua::GraphicsBroker::GetInstance();
     graphicsBroker.SetWineRuntimeBinaryDir(p->winehuaBin);
-    graphicsBroker.SetVulkanPresentMode(p->d3dBackend.rfind("dxvk_", 0) == 0);
+    graphicsBroker.SetVulkanPresentMode(UsesVulkanD3dBackend(p->d3dBackend));
     graphicsBroker.EnsureStarted(p->sockDir);
 
     int audioBootstrapFd = CreateAudioBootstrapFd(p->sockDir);

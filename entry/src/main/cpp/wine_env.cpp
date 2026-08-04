@@ -124,6 +124,59 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
                          const std::string& d3dBackend,
                          const std::string& binDir)
 {
+    if (d3dBackend == "vkd3d_limited_500k")
+    {
+        const std::string overlayRoot = std::string(WINE_RUNTIME_ROOT) +
+            "/vkd3d/limited-500k";
+        const std::string overlay64 = overlayRoot + "/x64";
+        const std::string guestVulkanRoot = binDir + "/guest_vulkan";
+        const std::string guestVulkanLib = guestVulkanRoot + "/lib";
+        const std::string guestVulkanIcd = guestVulkanRoot +
+            "/share/vulkan/icd.d/venus_icd.x86_64.json";
+        const std::string box64LibraryPath = guestVulkanLib + ":" +
+            binDir + "/guest_gfx/lib:" + binDir + ":" +
+            binDir + "/x86_64-unix:" + std::string(WINE_RUNTIME_ROOT) +
+            "/lib/x86_64";
+        const std::string wineDllPath = overlay64 + ":" +
+            binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir;
+        const std::vector<std::string> managed = {
+            "WINEHUA_D3D_BACKEND=" + d3dBackend,
+            "WINEHUA_VKD3D_ROOT=" + overlayRoot,
+            "WINEHUA_VKD3D_PROFILE=limited-500k",
+            "WINEHUA_VKD3D_VERSION=2.6",
+            "WINEHUA_VULKAN_RUNTIME=1",
+            "WINEHUA_VULKAN_LOADER_ARCH=x86_64",
+            "WINEHUA_VENUS_ICD_ARCH=x86_64",
+#ifdef __aarch64__
+            "USE_LIBBOX64=1",
+            "BOX64_LD_LIBRARY_PATH=" + box64LibraryPath,
+            "BOX64_EMULATED_LIBS=libvulkan.so:libvulkan.so.1:"
+                "libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:"
+                "libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:"
+                "libwayland-client.so:libwayland-client.so.0:libwayland-server.so:"
+                "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
+                "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8",
+            "BOX64_DYNAREC_WEAKBARRIER=0",
+#endif
+            "VK_DRIVER_FILES=" + guestVulkanIcd,
+            "VK_ICD_FILENAMES=" + guestVulkanIcd,
+            "VN_DEBUG=vtest",
+            "VN_PERF=no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring",
+            "VN_WINEHUA_STRONG_RING_BARRIER=1",
+            "VN_WINEHUA_REMOTE_MEMORY_SYNC=1",
+            "VN_WINEHUA_DIRECT_FENCE_WAIT=1",
+            "VKR_WINEHUA_SHADOW_FROM_HOST=precise",
+            "VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC=1",
+            "VKD3D_WINEHUA_DISABLE_QUERY_META=1",
+            /* Native-only prevents Wine's builtin d3d12 from silently
+             * masking a missing or wrong-architecture managed payload. */
+            "WINEDLLOVERRIDES=d3d12=n",
+            "WINEDLLPATH=" + wineDllPath,
+            "WINEDLLDIR0=" + overlay64,
+        };
+        for (const std::string& line : managed) UpsertEnvLine(env, line);
+        return;
+    }
     if (d3dBackend.rfind("dxvk_", 0) != 0) return;
 
     std::string profile = d3dBackend.substr(strlen("dxvk_"));

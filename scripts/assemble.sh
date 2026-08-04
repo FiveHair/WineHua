@@ -316,6 +316,16 @@ assemble_pad() {
     cp "$dxvk_modern_root/x64/bin/dxgi.dll" "$wine_data/dxvk/modern-2.6/x64/dxgi.dll"
     cp "$dxvk_modern_root/x86/bin/d3d11.dll" "$wine_data/dxvk/modern-2.6/x86/d3d11.dll"
     cp "$dxvk_modern_root/x86/bin/dxgi.dll" "$wine_data/dxvk/modern-2.6/x86/dxgi.dll"
+    local vkd3d_root="$VKD3D_PROTON_BUILD_ROOT/limited-500k"
+    [ -f "$vkd3d_root/x64/d3d12.dll" ] || err "VKD3D-Proton x64 d3d12.dll missing: $vkd3d_root/x64/d3d12.dll"
+    [ -f "$vkd3d_root/x64/winehua-d3d12-smoke.exe" ] || \
+        err "VKD3D-Proton x64 graphics smoke missing: $vkd3d_root/x64/winehua-d3d12-smoke.exe"
+    [ -f "$vkd3d_root/manifest.json" ] || err "VKD3D-Proton manifest missing: $vkd3d_root/manifest.json"
+    mkdir -p "$wine_data/vkd3d/limited-500k/x64"
+    cp "$vkd3d_root/x64/d3d12.dll" "$wine_data/vkd3d/limited-500k/x64/d3d12.dll"
+    cp "$vkd3d_root/manifest.json" "$wine_data/vkd3d/manifest.json"
+    cp "$vkd3d_root/x64/winehua-d3d12-smoke.exe" \
+        "$smoke_dir/x64/winehua_d3d12_smoke.exe"
     # The DXVK binaries are runtime-owned overlays.  Do not place them next
     # to the smoke executables: that would make the test layout look like a
     # game distribution and would force real games to carry WineHua-specific
@@ -336,6 +346,7 @@ assemble_pad() {
     local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha d3d864_sha cube64_sha diagnostics64_sha driver64_sha requirements64_sha
     local audio32_sha graphics32_sha vulkan32_sha d3d1132_sha d3d832_sha cube32_sha diagnostics32_sha driver32_sha requirements32_sha
     local storage_write_sha storage_read_sha image_fetch_sha combined_sample_sha separated_sample_sha
+    local vkd3d64_d3d12_sha vkd3d64_smoke_sha
     audio64_sha="$(sha256sum "$smoke_dir/x64/winehua_audio_smoke.exe" | awk '{print $1}')"
     graphics64_sha="$(sha256sum "$smoke_dir/x64/winehua_graphics_smoke.exe" | awk '{print $1}')"
     vulkan64_sha="$(sha256sum "$smoke_dir/x64/winehua_vulkan_smoke.exe" | awk '{print $1}')"
@@ -354,12 +365,14 @@ assemble_pad() {
     diagnostics32_sha="$(sha256sum "$smoke_dir/x86/winehua_gpu_diagnostics.exe" | awk '{print $1}')"
     driver32_sha="$(sha256sum "$smoke_dir/x86/winehua_win32_driver.exe" | awk '{print $1}')"
     requirements32_sha="$(sha256sum "$smoke_dir/x86/winehua_dxvk26_requirements.exe" | awk '{print $1}')"
+    vkd3d64_d3d12_sha="$(sha256sum "$wine_data/vkd3d/limited-500k/x64/d3d12.dll" | awk '{print $1}')"
+    vkd3d64_smoke_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d12_smoke.exe" | awk '{print $1}')"
     storage_write_sha="$(sha256sum "$smoke_dir/assets/venus_storage_write.spv" | awk '{print $1}')"
     storage_read_sha="$(sha256sum "$smoke_dir/assets/venus_storage_read.spv" | awk '{print $1}')"
     image_fetch_sha="$(sha256sum "$smoke_dir/assets/venus_image_fetch.spv" | awk '{print $1}')"
     combined_sample_sha="$(sha256sum "$smoke_dir/assets/venus_combined_sample.spv" | awk '{print $1}')"
     separated_sample_sha="$(sha256sum "$smoke_dir/assets/venus_separated_sample.spv" | awk '{print $1}')"
-    local smoke_suite_version="phase2-vulkan-dxvk-v9-modern-baseline"
+    local smoke_suite_version="phase2-vulkan-dxvk-v10-vkd3d-default-off"
     local dxvk_commit dxvk_modern_commit mesa_commit virglrenderer_commit
     local guest_venus_icd_sha host_virglrenderer_sha venus_runtime_id
     dxvk_commit="$(git -c safe.directory="$DXVK_SRC" -C "$DXVK_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -436,6 +449,7 @@ EOF
     "x64/winehua_gpu_diagnostics.exe": "$diagnostics64_sha",
     "x64/winehua_win32_driver.exe": "$driver64_sha",
     "x64/winehua_dxvk26_requirements.exe": "$requirements64_sha",
+    "x64/winehua_d3d12_smoke.exe": "$vkd3d64_smoke_sha",
     "x86/winehua_audio_smoke.exe": "$audio32_sha",
     "x86/winehua_graphics_smoke.exe": "$graphics32_sha",
     "x86/winehua_vulkan_smoke.exe": "$vulkan32_sha",
@@ -454,6 +468,7 @@ EOF
 }
 EOF
     log "  managed smoke payload → smoke/{x64,x86}"
+    log "  VKD3D-Proton 2.6 limited-500K (default off) → vkd3d/limited-500k/x64 (sha256=$vkd3d64_d3d12_sha)"
 
     # fonts
     cp "$WINE_SRC/fonts/"*.ttf "$wine_data/share/wine/fonts/"

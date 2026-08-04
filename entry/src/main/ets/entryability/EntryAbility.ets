@@ -30,11 +30,16 @@ export default class EntryAbility extends UIAbility {
     const suite = value('winehua.suite', 'core');
     const explicitD3d = !!parameters && parameters['winehua.d3d_backend'] !== undefined &&
       parameters['winehua.d3d_backend'] !== null;
-    const persistedD3d = AppStorage.get<string>('winehua.d3d.preference') || 'dxvk_legacy';
+    const persistedD3dRaw = AppStorage.get<string>('winehua.d3d.preference') || 'dxvk_legacy';
+    // VKD3D is a per-session opt-in. A normal cold launch always returns to
+    // the qualified DXVK Legacy product path.
+    const persistedD3d = persistedD3dRaw === 'vkd3d_limited_500k' ?
+      'dxvk_legacy' : persistedD3dRaw;
     const requestedD3d = explicitD3d ? value('winehua.d3d_backend', 'wined3d') :
       (mode === '' ? persistedD3d : 'wined3d');
     const d3dBackend = requestedD3d === 'dxvk_legacy' ||
-      requestedD3d === 'dxvk_modern_2_6' ? requestedD3d : 'wined3d';
+      requestedD3d === 'dxvk_modern_2_6' || requestedD3d === 'vkd3d_limited_500k' ?
+      requestedD3d : 'wined3d';
     let gamePath = value('winehua.game_path', '');
     const experimentId = value('winehua.experiment_id', '');
     const experimentExecutable = value('winehua.experiment_executable', '');
@@ -163,8 +168,9 @@ export default class EntryAbility extends UIAbility {
     const clickClientYPermille = Math.max(-1,
       Math.min(1000, Math.floor(requestedClickClientYPermille)));
     const requestedPerfProfile = value('winehua.perf_profile',
-      mode === '' || d3dBackend === 'dxvk_legacy' ?
-        'shadow-precise-dirty-ring-inline-upload-coverage-sort' : 'baseline');
+      d3dBackend === 'vkd3d_limited_500k' ? 'shadow-precise-direct-fence' :
+        (mode === '' || d3dBackend === 'dxvk_legacy' ?
+          'shadow-precise-dirty-ring-inline-upload-coverage-sort' : 'baseline'));
     const perfProfile = ['direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback',
       'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise',
       'shadow-precise-no-semaphore-feedback',

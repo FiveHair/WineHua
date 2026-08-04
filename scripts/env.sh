@@ -90,6 +90,7 @@ WINE_SRC="$ROOT/thirdparty/wine"
 BOX64_SRC="$ROOT/thirdparty/box64"
 DXVK_SRC="$ROOT/thirdparty/dxvk"
 DXVK_MODERN_SRC="$ROOT/thirdparty/dxvk-modern"
+VKD3D_PROTON_SRC="$ROOT/thirdparty/vkd3d-proton"
 
 # 产物路径
 BUILD_DIR="$ROOT/build"          # 源码构建中间产物
@@ -97,6 +98,7 @@ SYSROOT_EXT="$BUILD_DIR/sysroot-ext"  # 交叉编译扩展 (不污染 SDK)
 STAGING_DIR="$BUILD_DIR/staging"   # 打包临时目录
 DXVK_BUILD_ROOT="$BUILD_DIR/dxvk/legacy"
 DXVK_MODERN_BUILD_ROOT="$BUILD_DIR/dxvk/modern-2.6"
+VKD3D_PROTON_BUILD_ROOT="$BUILD_DIR/vkd3d-proton"
 
 # sysroot-ext 目录结构
 SYSROOT_EXT_INC="$SYSROOT_EXT/usr/include"

@@ -51,3 +51,6 @@
 	path = thirdparty/dxvk-modern
 	url = https://github.com/winehua/dxvk.git
 	branch = dxvk-modern-2.6
+[submodule "thirdparty/vkd3d-proton"]
+	path = thirdparty/vkd3d-proton
+	url = https://github.com/HansKristian-Work/vkd3d-proton.git
