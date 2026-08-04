@@ -1004,10 +1004,8 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
     save_device_file(hdc, device_id, f"{DEVICE_SANDBOX}/temp/winehua_vtest_frontbuffer.log",
                      run_directory / "vtest-frontbuffer.log")
     if run_suite == "host-vulkan":
-        save_device_file(hdc, device_id, remote_host_results, run_directory / "device-results")
         save_probe_results(hdc, device_id, run_directory, remote_host_results, summary)
     else:
-        save_device_file(hdc, device_id, remote_results, run_directory / "device-results")
         save_probe_results(hdc, device_id, run_directory, remote_results, summary)
 
     custom_border_selections = []
