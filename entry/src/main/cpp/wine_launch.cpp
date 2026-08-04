@@ -591,7 +591,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         int32_t exPid = SpawnViaBroker(exEntry, explorerEnv);
         OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d (via broker)", exPid);
         if (exPid > 0) {
-            AddProcess(exPid, "explorer", -1);
+            AddProcess(exPid, "desktop", -1);
             ws->PromotePendingDesktopRoot();
             /* broker 返回 pid 只表示 appspawn 接受了 Explorer 请求。
              * 暖 prefix 下子进程仍需数秒连接 wineserver 并提交 desktop
