@@ -37,112 +37,101 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
     uint32_t rootId = desktopRootToplevelId_;
 
     // 层序单一数据源 (阶段 1): 与渲染侧 (TakeToplevelFrame) 遍历同一个按
-    // zIndex 升序的 Layer 列表; fs-pick 提前命中保留 (性能优化, 语义不变)
+    // zIndex 升序的 Layer 列表。方案 B: 命中也是单一 zIndex 逆序遍历 —
+    // 全屏窗口作为普通层参与 Z 序, 命中几何用 fit (与渲染 blitToplevel/
+    // blitSubsurface 同一变换); "盖在游戏之上的层优先命中"由逆序天然
+    // 保证, 不再有独立的前置命中循环。
     const auto* rootSt = tmgr_.FindToplevelLocked(rootId);
     const int rootW = (rootSt && rootSt->Width() > 0) ? rootSt->Width() : outputW_;
     const int rootH = (rootSt && rootSt->Height() > 0) ? rootSt->Height() : outputH_;
     const auto layers = compositor_.BuildLayerListLocked(rootW, rootH);
 
+    // 全屏目标选取 + fit 几何 — 与渲染侧 (TakeToplevelFrame) 共用单一实现:
+    // PickFullscreenLayerLocked: 可见全屏窗口中取 fsPriority 最大者 (多窗口
+    // 可同时 fullscreen, 显示模式切换时 Wine 会连带标记旧窗口 — 2026-07 实测
+    // notepad 被连带标记并压在游戏上), 规则原因/局限见 ToplevelState::fsPriority
+    // 注释; ComputeFullscreenFitLocked: ZC 游戏用全屏前尺寸 (游戏分辨率),
+    // SHM 游戏用 buffer 尺寸 (见该函数注释)
+    const uint32_t fullscreenId = compositor_.PickFullscreenLayerLocked(layers);
+    const ToplevelManager::ToplevelState* zst =
+        fullscreenId ? tmgr_.FindToplevelLocked(fullscreenId) : nullptr;
+    FitRect transform;
+    const bool fsOk = zst &&
+        compositor_.ComputeFullscreenFitLocked(fullscreenId, rootW, rootH, transform);
+    if (fsOk) {
+        // 诊断: 全屏输入目标选取 (仅目标变化时输出 — 多窗口同时全屏时
+        // 选错窗口的点击路由问题靠它定位, 例如旧窗口被连带标记压在游戏上)
+        static uint32_t sLastPicked = 0;
+        if (fullscreenId != sLastPicked) {
+            sLastPicked = fullscreenId;
+            OH_LOG_INFO(LOG_APP,
+                "[Input] fs-pick tl=#%{public}u pri=%{public}llu zc=%{public}d"
+                " preFs=%{public}dx%{public}d buf=%{public}dx%{public}d → content=%{public}dx%{public}d",
+                fullscreenId, static_cast<unsigned long long>(zst->FsPriority()),
+                compositor_.HasZeroCopyLayerForToplevelLocked(fullscreenId) ? 1 : 0,
+                zst->PreFsW(), zst->PreFsH(), zst->Width(), zst->Height(),
+                transform.srcW, transform.srcH);
+        }
+    }
+    const int fsWinX = zst ? zst->X() : 0;
+    const int fsWinY = zst ? zst->Y() : 0;
+
     /*
-     * 全屏窗口独占输入: 命中判定走与渲染相同的保比例缩放几何
-     * (ComputeFitRect, 见 TakeToplevelFrame), 只有该窗口及其
-     * subsurface 层可交互; 黑边事件归属全屏窗口并标 swallow
-     * (调用方只吞 PRESS, MOVE/RELEASE 照常透传)
+     * 单一 Z 序命中循环 (方案 B): 从最高 zIndex 向下遍历 Layer 列表, 与
+     * 渲染侧 TakeToplevelFrame 单一合成循环同源 (同列表, 每层同几何)。
+     * - 全屏窗口 (fs-pick 选中) 作为普通层参与: 命中用 fit 变换后的屏幕
+     *   几何 (内容区命中 / 黑边命中标 swallow), 与其 subsurface 一起在
+     *   循环里各自的 zIndex 位置处理。更高 zIndex 的窗口 (对话框等) 渲染
+     *   在游戏上方, 逆序先到 → 命中优先, 修复"全屏时弹出新窗口显示在上方、
+     *   点击却回到游戏"。
+     * - 连带 fullscreen 旧窗口 (显示模式切换时被 winewayland 批量标记)
+     *   渲染时被跳过 (blitToplevel 705 / blitSubsurface 793), 命中也跳过
+     *   (防点到看不见的层)。
+     * - zero-copy GL 层不参与置顶命中 (ShouldSkipCpu: zcActive) — 渲染时
+     *   被遮挡重绘压回, 命中同样下放给下方 z-order; GPU→CPU fallback 时
+     *   key 移出 zeroCopySurfaceKeys_, 该层自动恢复为普通 subsurface
+     *   (CPU 合成置顶, 命中也置顶), 无需特判。
+     * - 黑边命中: 归属仍是全屏窗口但标 swallow — 调用方只吞 PRESS (防幻影
+     *   点击/焦点切换), MOVE/RELEASE 照常透传: 坐标越界由 winewayland 的
+     *   motion clamp 夹回窗口边缘; 若连 RELEASE 一起吞, 内容区按下拖到黑边
+     *   松手会丢失 release, pressedButtons_ 按键状态永久卡死。
      */
-    {
-        // 全屏目标选取与渲染侧 (TakeToplevelFrame) 同规则 — 阶段 4 起共用
-        // PickFullscreenLayerLocked 单一实现 (S3 收敛): 可见全屏窗口中取
-        // fsPriority 最大者 (多窗口可同时 fullscreen, 显示模式切换时 Wine
-        // 会连带标记旧窗口 — 2026-07 实测 notepad 被连带标记并压在游戏上),
-        // 规则原因/局限见 ToplevelState::fsPriority 注释
-        const uint32_t fullscreenId = compositor_.PickFullscreenLayerLocked(layers);
-        const ToplevelManager::ToplevelState* zst =
-            fullscreenId ? tmgr_.FindToplevelLocked(fullscreenId) : nullptr;
-        // fit 几何与渲染侧 (TakeToplevelFrame) 共用 ComputeFullscreenFitLocked
-        // 单一实现: ZC 游戏用全屏前尺寸 (游戏分辨率), SHM 游戏用 buffer 尺寸
-        FitRect transform;
-        bool fsGeometryOk = zst &&
-            compositor_.ComputeFullscreenFitLocked(fullscreenId, rootW, rootH, transform);
-        if (fsGeometryOk) {
-            // 诊断: 全屏输入目标选取 (仅目标变化时输出 — 多窗口同时全屏时
-            // 选错窗口的点击路由问题靠它定位, 例如旧窗口被连带标记压在游戏上)
-            static uint32_t sLastPicked = 0;
-            if (fullscreenId != sLastPicked) {
-                sLastPicked = fullscreenId;
-                OH_LOG_INFO(LOG_APP,
-                    "[Input] fs-pick tl=#%{public}u pri=%{public}llu zc=%{public}d"
-                    " preFs=%{public}dx%{public}d buf=%{public}dx%{public}d → content=%{public}dx%{public}d",
-                    fullscreenId, static_cast<unsigned long long>(zst->FsPriority()),
-                    compositor_.HasZeroCopyLayerForToplevelLocked(fullscreenId) ? 1 : 0,
-                    zst->PreFsW(), zst->PreFsH(), zst->Width(), zst->Height(),
-                    transform.srcW, transform.srcH);
+    for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
+        const auto& layer = *it;
+        if (layer.ShouldSkipCpu()) continue;
+
+        // 连带 fullscreen 跳过 (与渲染 blitToplevel 705 / blitSubsurface 793
+        // 同一规则): fsOk 时, 非主全屏窗口 (被连带标记的旧窗口) 渲染被跳过,
+        // 命中同样下放 (防点到看不见的层); 非全屏弹窗/对话框保留
+        if (fsOk && layer.toplevelId != fullscreenId) {
+            if (layer.type == DesktopCompositor::CompositorLayer::Type::Toplevel) {
+                if (layer.fullscreen) continue;
+            } else if (layer.type == DesktopCompositor::CompositorLayer::Type::Subsurface) {
+                const auto* parent = tmgr_.FindToplevelLocked(layer.toplevelId);
+                if (parent && parent->IsFullscreen()) continue;
             }
-            // 前置命中: 盖在游戏之上的层优先 — 修复"全屏时弹出新窗口显示在上方、
-            // 点击却回到游戏"。渲染在游戏上方 (zIndex 更高) 的窗口在 Layer 列表
-            // (与渲染同源) 里排在游戏层之后, 先参与坐标命中, 命中即返回; 游戏自身
-            // 及其 subsurface 由下方 fit 分支处理。无更高层窗口时范围为空, 等价旧行为。
-            size_t fsIdx = layers.size();
-            for (size_t li = 0; li < layers.size(); ++li) {
-                if (layers[li].type == DesktopCompositor::CompositorLayer::Type::Toplevel &&
-                    layers[li].toplevelId == fullscreenId) { fsIdx = li; break; }
-            }
-            for (size_t li = layers.size(); li-- > fsIdx + 1;) {
-                const auto& layer = layers[li];
-                if (layer.ShouldSkipCpu()) continue;
-                if (layer.toplevelId == fullscreenId) continue;  // 游戏及其 subsurface 走 fit 分支
-                if (layer.type == DesktopCompositor::CompositorLayer::Type::Subsurface) {
-                    // 与渲染侧 blitSubsurface 对齐: 连带 fullscreen 旧窗口的
-                    // subsurface 渲染时被跳过, 命中同样下放 (防点到看不见的层)
-                    const auto* parent = tmgr_.FindToplevelLocked(layer.toplevelId);
-                    if (parent && parent->IsFullscreen()) continue;
-                    if (layer.w <= 0 || layer.h <= 0) continue;
-                    const auto& sl = *layer.sub;
-                    if (x >= layer.x && x < layer.x + layer.w && y >= layer.y && y < layer.y + layer.h) {
-                        if (sl.isExternal) {
-                            out.toplevelId = rootId;
-                            out.surface = tmgr_.GetSurfaceForToplevel(rootId);
-                            out.originX = 0;
-                            out.originY = 0;
-                        } else {
-                            out.toplevelId = layer.toplevelId;
-                            out.surface = sl.surface;
-                            out.originX = layer.x;
-                            out.originY = layer.y;
-                        }
-                        return out.surface != nullptr;
-                    }
-                } else if (layer.type == DesktopCompositor::CompositorLayer::Type::Toplevel) {
-                    // 与渲染侧 blitToplevel 对齐: 连带 fullscreen 的非主窗口
-                    // 渲染时被跳过, 命中同样下放 (防点到看不见的窗口)
-                    if (layer.fullscreen) continue;
-                    if (x >= layer.x && x < layer.x + layer.w && y >= layer.y && y < layer.y + layer.h) {
-                        wl_resource* surf = tmgr_.GetSurfaceForToplevel(layer.toplevelId);
-                        if (surf) {
-                            auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
-                            if (sd && sd->inputRegionEmpty) continue;
-                        }
-                        out.toplevelId = layer.toplevelId;
-                        out.surface = surf;
-                        out.originX = layer.x;
-                        out.originY = layer.y;
-                        out.scale = 1.0f;
-                        return out.surface != nullptr;
-                    }
-                }
-            }
-            // 该窗口的 subsurface 层绘制在窗口内容之上, 先命中 (同一变换)
-            for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
-                if (it->type != DesktopCompositor::CompositorLayer::Type::Subsurface) continue;
-                if (it->ShouldSkipCpu()) continue;
-                if (it->toplevelId != fullscreenId || it->w <= 0 || it->h <= 0) continue;
-                const auto& sl = *it->sub;
+        }
+
+        if (layer.type == DesktopCompositor::CompositorLayer::Type::Subsurface) {
+            // 内部菜单: enter 层自己的 wl_surface, 坐标以层原点为基。层可伸出
+            // 父窗口边界 — 若改走父窗口 surface, 伸出部分产生越界的窗口相对
+            // 坐标, 会被 winewayland 的 motion clamp (wayland_pointer.c
+            // "bring them within bounds") 夹回窗口内, 菜单项永远收不到该区域
+            // 的点击。外部菜单 (isExternal): 任务栏弹出等, subsurface offset
+            // 是 Wine 虚拟屏幕坐标 → 走 root, Wine explorer 内部处理点击分发
+            if (layer.w <= 0 || layer.h <= 0) continue;
+            const auto& sl = *layer.sub;
+            if (fsOk && layer.toplevelId == fullscreenId) {
+                // 主全屏窗口的 subsurface 绘制在窗口内容之上, 先命中 (同一
+                // fit 变换, 与渲染 blitSubsurface 全屏分支同几何)
                 const int layerDispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
                 const int layerDispH = sl.vpDstH > 0 ? std::min(sl.vpDstH, sl.h) : sl.h;
-                const int layerScrX = static_cast<int>(lround(FitMapX(transform, it->x - zst->X())));
-                const int layerScrY = static_cast<int>(lround(FitMapY(transform, it->y - zst->Y())));
+                const int layerScrX = static_cast<int>(lround(FitMapX(transform, layer.x - fsWinX)));
+                const int layerScrY = static_cast<int>(lround(FitMapY(transform, layer.y - fsWinY)));
                 const int layerScrW = std::max(1, static_cast<int>(lround(layerDispW * transform.scale)));
                 const int layerScrH = std::max(1, static_cast<int>(lround(layerDispH * transform.scale)));
-                if (x >= layerScrX && x < layerScrX + layerScrW && y >= layerScrY && y < layerScrY + layerScrH) {
+                if (x >= layerScrX && x < layerScrX + layerScrW &&
+                    y >= layerScrY && y < layerScrY + layerScrH) {
                     out.toplevelId = fullscreenId;
                     out.surface = sl.surface;
                     out.originX = layerScrX;
@@ -150,77 +139,54 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
                     out.scale = static_cast<float>(transform.scale);
                     return out.surface != nullptr;
                 }
-            }
-            if (x >= transform.offX && x < transform.offX + transform.dstW &&
-                y >= transform.offY && y < transform.offY + transform.dstH) {
-                out.toplevelId = fullscreenId;
-                out.surface = tmgr_.GetSurfaceForToplevel(fullscreenId);
-                out.originX = transform.offX;
-                out.originY = transform.offY;
-                out.scale = static_cast<float>(transform.scale);
-                return out.surface != nullptr;
-            }
-            // 黑边: 事件归属仍是全屏窗口 (返回其 surface/原点/缩放),
-            // 但标记 swallow — 调用方吞掉 PRESS (防幻影点击/焦点切换),
-            // MOVE/RELEASE 必须照常透传: 坐标越界由 winewayland 的 motion
-            // clamp 夹回窗口边缘; 若连 RELEASE 一起吞, 内容区按下拖到黑边
-            // 松手会丢失 release, pressedButtons_ 按键状态永久卡死
-            out.toplevelId = fullscreenId;
-            out.surface = tmgr_.GetSurfaceForToplevel(fullscreenId);
-            out.originX = transform.offX;
-            out.originY = transform.offY;
-            out.scale = static_cast<float>(transform.scale);
-            out.swallow = true;
-            return out.surface != nullptr;
-        }
-    }
-
-    /*
-     * subsurface 命中优先于 toplevel (渲染在上层, Layer zIndex 保证顺序):
-     * - 内部菜单: enter 层自己的 wl_surface, 坐标以层原点为基。
-     *   层可伸出父窗口边界 — 若改走父窗口 surface, 伸出部分产生越界的
-     *   窗口相对坐标, 会被 winewayland 的 motion clamp
-     *   (wayland_pointer.c "bring them within bounds") 夹回窗口内,
-     *   菜单项永远收不到该区域的点击
-     * - 外部菜单 (isExternal): 任务栏弹出等, subsurface offset 是 Wine
-     *   虚拟屏幕坐标 → 走 root, Wine explorer 内部处理点击分发
-     */
-    for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
-        if (it->type == DesktopCompositor::CompositorLayer::Type::Subsurface) {
-            // 跳过 GPU 自绘/不可见层: zero-copy GL 层不参与置顶命中 (渲染时
-            // 它按窗口 z 位被遮挡重绘压回, 命中同样交给下方 toplevel z-order,
-            // 否则被挡住的 GL 窗口仍会收到点击); zcActive 由实时集合
-            // zeroCopySurfaceKeys_ 派生: GPU→CPU fallback 时 key 被移出,
-            // 该层自动恢复为普通 subsurface (CPU 合成置顶, 命中也置顶), 无需特判
-            if (it->ShouldSkipCpu()) continue;
-            if (it->w <= 0 || it->h <= 0) continue;
-            const auto& sl = *it->sub;
-            if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
+            } else if (x >= layer.x && x < layer.x + layer.w &&
+                       y >= layer.y && y < layer.y + layer.h) {
                 if (sl.isExternal) {
                     out.toplevelId = rootId;
                     out.surface = tmgr_.GetSurfaceForToplevel(rootId);
                     out.originX = 0;
                     out.originY = 0;
                 } else {
-                    out.toplevelId = it->toplevelId;
+                    out.toplevelId = layer.toplevelId;
                     out.surface = sl.surface;
-                    out.originX = it->x;
-                    out.originY = it->y;
+                    out.originX = layer.x;
+                    out.originY = layer.y;
                 }
                 return out.surface != nullptr;
             }
-        } else if (it->type == DesktopCompositor::CompositorLayer::Type::Toplevel) {
-            if (it->ShouldSkipCpu()) continue;
-            if (x >= it->x && x < it->x + it->w && y >= it->y && y < it->y + it->h) {
-                wl_resource* surf = tmgr_.GetSurfaceForToplevel(it->toplevelId);
+        } else if (layer.type == DesktopCompositor::CompositorLayer::Type::Toplevel) {
+            if (fsOk && layer.toplevelId == fullscreenId) {
+                // 主全屏窗口: 内容区 (fit 矩形) 命中
+                if (x >= transform.offX && x < transform.offX + transform.dstW &&
+                    y >= transform.offY && y < transform.offY + transform.dstH) {
+                    out.toplevelId = fullscreenId;
+                    out.surface = tmgr_.GetSurfaceForToplevel(fullscreenId);
+                    out.originX = transform.offX;
+                    out.originY = transform.offY;
+                    out.scale = static_cast<float>(transform.scale);
+                    return out.surface != nullptr;
+                }
+                // 黑边: 更高层已检查未命中, 黑边归属全屏窗口 (渲染时填黑),
+                // 标 swallow — 调用方只吞 PRESS, MOVE/RELEASE 照常透传
+                out.toplevelId = fullscreenId;
+                out.surface = tmgr_.GetSurfaceForToplevel(fullscreenId);
+                out.originX = transform.offX;
+                out.originY = transform.offY;
+                out.scale = static_cast<float>(transform.scale);
+                out.swallow = true;
+                return out.surface != nullptr;
+            }
+            if (x >= layer.x && x < layer.x + layer.w && y >= layer.y && y < layer.y + layer.h) {
+                wl_resource* surf = tmgr_.GetSurfaceForToplevel(layer.toplevelId);
                 if (surf) {
                     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surf));
                     if (sd && sd->inputRegionEmpty) continue;
                 }
-                out.toplevelId = it->toplevelId;
+                out.toplevelId = layer.toplevelId;
                 out.surface = surf;
-                out.originX = it->x;
-                out.originY = it->y;
+                out.originX = layer.x;
+                out.originY = layer.y;
+                out.scale = 1.0f;
                 return out.surface != nullptr;
             }
         }
