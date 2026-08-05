@@ -829,6 +829,8 @@ struct Index {
       // builtin module, which would invalidate the VKD3D experiment evidence.
       environment['WINEDLLOVERRIDES'] = requiresVkd3dRuntime ? 'd3d12=n' : 'd3d12=n,b';
       environment['VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC'] = '1';
+      environment['VN_WINEHUA_PERSISTENT_MAP_SYNC'] = '1';
+      environment['VN_WINEHUA_PERSISTENT_MAP_SYNC_TRACE'] = '1';
       /* A frame emits several ring submissions inside the normal 1 ms
        * notification-coalescing interval. If the Host becomes idle between
        * them, the final seqno wait has no wake-up. Keep the uncoalesced mode
