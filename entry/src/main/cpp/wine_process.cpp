@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
+#include <climits>
 #include <algorithm>
 #include <atomic>
 #include <string>
@@ -34,6 +35,94 @@ static uint64_t TimestampMs() {
 
 // 前向声明
 static void EnsureMonitorRunning();
+
+/* NativeChildProcess children are not all entered in gProcRegistry.  The
+ * wineserver, wineboot, Explorer bootstrap, and processes created through the
+ * Wine process broker are app-owned descendants, but the old KillAllProcesses
+ * implementation only signalled the small registry of user-launched PE
+ * wrappers.  A session switch could therefore tear down VirGL while those
+ * descendants still held the old vtest socket and broker connection.
+ *
+ * Keep this bounded and scoped to our own process tree.  It is a session
+ * teardown barrier, not a rendering wait or a completion workaround.
+ */
+static bool ReadProcessParent(pid_t pid, pid_t* parent)
+{
+    char path[64];
+    char buffer[512];
+    char* rightParen;
+    FILE* file;
+    size_t length;
+    int parsedParent;
+
+    if (!parent || pid <= 0) return false;
+    snprintf(path, sizeof(path), "/proc/%d/stat", static_cast<int>(pid));
+    file = fopen(path, "r");
+    if (!file) return false;
+    length = fread(buffer, 1, sizeof(buffer) - 1, file);
+    fclose(file);
+    if (!length) return false;
+    buffer[length] = '\0';
+    rightParen = strrchr(buffer, ')');
+    if (!rightParen || sscanf(rightParen + 2, "%*c %d", &parsedParent) != 1)
+        return false;
+    *parent = static_cast<pid_t>(parsedParent);
+    return true;
+}
+
+static bool IsProcessAliveNotZombie(pid_t pid)
+{
+    char path[64];
+    char buffer[512];
+    char* rightParen;
+    FILE* file;
+    size_t length;
+
+    if (pid <= 0) return false;
+    snprintf(path, sizeof(path), "/proc/%d/stat", static_cast<int>(pid));
+    file = fopen(path, "r");
+    if (!file) return false;
+    length = fread(buffer, 1, sizeof(buffer) - 1, file);
+    fclose(file);
+    if (!length) return false;
+    buffer[length] = '\0';
+    rightParen = strrchr(buffer, ')');
+    return !(rightParen && rightParen[2] == 'Z');
+}
+
+static std::vector<pid_t> SnapshotProcessDescendants(pid_t root)
+{
+    std::vector<pid_t> roots;
+    std::vector<pid_t> descendants;
+    DIR* proc;
+
+    if (root <= 0) return descendants;
+    roots.push_back(root);
+    for (size_t index = 0; index < roots.size(); ++index)
+    {
+        proc = opendir("/proc");
+        if (!proc) break;
+        while (dirent* entry = readdir(proc))
+        {
+            char* end;
+            long value;
+            pid_t parent;
+            pid_t pid;
+
+            if (entry->d_name[0] < '1' || entry->d_name[0] > '9') continue;
+            value = strtol(entry->d_name, &end, 10);
+            if (*end || value <= 0 || value > INT_MAX) continue;
+            pid = static_cast<pid_t>(value);
+            if (!ReadProcessParent(pid, &parent) || parent != roots[index]) continue;
+            if (std::find(descendants.begin(), descendants.end(), pid) != descendants.end())
+                continue;
+            descendants.push_back(pid);
+            roots.push_back(pid);
+        }
+        closedir(proc);
+    }
+    return descendants;
+}
 
 // -- 注册表辅助函数 --
 WineProcessEntry* AddProcess(pid_t pid, const std::string& exeFullPath, int stdoutFd) {
@@ -85,15 +174,44 @@ void RemoveProcess(pid_t pid, int exitCode, const std::string& exitCodeSource) {
 }
 
 void KillAllProcesses() {
-    std::lock_guard<std::mutex> lock(gProcMutex);
-    for (auto& entry : gProcRegistry) {
-        if (entry.running) {
+    std::vector<pid_t> trackedPids;
+    {
+        std::lock_guard<std::mutex> lock(gProcMutex);
+        for (auto& entry : gProcRegistry) {
+            if (!entry.running) continue;
             OH_LOG_INFO(LOG_APP, "[ProcReg] killAll pid=%{public}d name=%{public}s",
                         entry.pid, entry.exeBasename.c_str());
             *(entry.readerActive) = false;
-            kill(entry.pid, SIGKILL);
+            trackedPids.push_back(entry.pid);
             if (entry.stdoutFd >= 0) { close(entry.stdoutFd); entry.stdoutFd = -1; }
         }
+    }
+
+    const pid_t self = getpid();
+    std::vector<pid_t> descendants = SnapshotProcessDescendants(self);
+    OH_LOG_INFO(LOG_APP,
+                "[ProcReg] killAll session descendants=%{public}zu tracked=%{public}zu",
+                descendants.size(), trackedPids.size());
+    for (pid_t pid : trackedPids)
+        if (pid != self) kill(pid, SIGKILL);
+    for (pid_t pid : descendants)
+        if (pid != self) kill(pid, SIGKILL);
+
+    /* AppSpawn children are not waitable by the main process.  Give the
+     * kernel a short, bounded opportunity to reap them and repeat the scan in
+     * case a broker child was forked while the first signal pass was running.
+     */
+    for (unsigned int pass = 0; pass < 20; ++pass)
+    {
+        bool anyAlive = false;
+        descendants = SnapshotProcessDescendants(self);
+        for (pid_t pid : descendants) {
+            if (!IsProcessAliveNotZombie(pid)) continue;
+            anyAlive = true;
+            kill(pid, SIGKILL);
+        }
+        if (!anyAlive) break;
+        usleep(100000);
     }
 }
 
