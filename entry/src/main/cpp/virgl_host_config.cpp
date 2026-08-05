@@ -97,7 +97,11 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     const bool precise = config.shadowMode == "precise" || preciseDirty;
     const bool frameAssocTrace =
         config.shadowTrace == "inline-gpu-upload-frame-assoc-trace";
-    const bool presentImageTrace = config.shadowTrace == "present-image-trace";
+    /* Gate C is an isolated diagnostic profile. Keep its mapped-memory and
+     * direct-fence semantics while tracing the exact private swapchain image
+     * across the guest, vtest and Host presenter boundary. */
+    const bool presentImageTrace = config.shadowTrace == "present-image-trace" ||
+        config.shadowTrace == "vkd3d-gate-c";
     const bool gpuFrameProfile = config.shadowTrace == "gpu-frame-profile";
     const bool frameTimeline = config.shadowTrace == "frame-timeline";
     const bool sampledPerf =
@@ -152,6 +156,10 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     AppendEnv(params, "WINEHUA_VKR_TRACE_UBO_IDENTITY",
               frameAssocTrace ? "focused" : (captureTrace ? "1" : "0"));
     AppendEnv(params, "WINEHUA_VKR_TRACE_PRESENT_IMAGE", presentImageTrace ? "1" : "0");
+    AppendEnv(params, "WINEHUA_VK_PRESENT_TRACE", presentImageTrace ? "1" : "0");
+    /* Keep Host source replacement disabled while Gate C validates that the
+     * Guest VKD3D submit itself writes the private swapchain image. */
+    AppendEnv(params, "WINEHUA_VENUS_FORCE_SOURCE_CLEAR", "0");
     AppendEnv(params, "WINEHUA_VKR_TRACE_PIPELINE",
               (captureTrace || gateCTrace) ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_SHADOW_FROM_HOST", fromHostMode);
@@ -182,7 +190,8 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
               (legacyHostSync || noGpuUploadFast) ? "0" : "1");
     AppendEnv(params, "VKR_WINEHUA_SHADOW_MERGE_RANGES", config.shadowMergeRanges);
     AppendEnv(params, "VKR_WINEHUA_SHADOW_COVER_UPLOAD", aliasCover ? "1" : "0");
-    AppendEnv(params, "WINEHUA_VKR_PRESENT_STAGE_TRACE", captureTrace ? "1" : "0");
+    AppendEnv(params, "WINEHUA_VKR_PRESENT_STAGE_TRACE",
+              (captureTrace || presentImageTrace) ? "1" : "0");
     AppendEnv(params, "WINEHUA_VENUS_PRESENT_MODE", config.presentMode);
     AppendEnv(params, "EGL_PLATFORM", "surfaceless");
     if (config.syncMode == "egl-thread")

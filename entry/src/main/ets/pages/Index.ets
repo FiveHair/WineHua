@@ -91,12 +91,43 @@ interface Vkd3dManualResult {
   stage: string;
   frames: number;
   target_frames: number;
+  startup_ms: number;
   elapsed_ms: number;
   fps: number;
   width: number;
   height: number;
   sync_interval: number;
   hold_ms: number;
+  frame_verified: boolean;
+  animation_verified: boolean;
+  buffer_copy_verified: boolean;
+  fence_verified: boolean;
+  readback_checks: number;
+  non_clear_pixels: number;
+  first_frame_hash: string;
+  last_frame_hash: string;
+  feature_query_verified: boolean;
+  advanced_feature_query_verified: boolean;
+  max_feature_level: number;
+  shader_model: number;
+  root_signature_version: number;
+  resource_binding_tier: number;
+  resource_heap_tier: number;
+  tiled_resources_tier: number;
+  conservative_rasterization_tier: number;
+  render_pass_tier: number;
+  raytracing_tier: number;
+  variable_shading_rate_tier: number;
+  mesh_shader_tier: number;
+  sampler_feedback_tier: number;
+  typed_uav_load_additional_formats: boolean;
+  rovs_supported: boolean;
+  wave_ops: boolean;
+  int64_shader_ops: boolean;
+  wave_lane_count_min: number;
+  wave_lane_count_max: number;
+  gpu_va_bits_per_resource: number;
+  gpu_va_bits_per_process: number;
   exit_reason: string;
   exit_message: number;
 }
@@ -105,6 +136,9 @@ interface Vkd3dManualCheckpoint {
   state: string;
   stage: string;
   frames: number;
+  target_frames: number;
+  elapsed_ms: number;
+  fps: number;
 }
 
 @Entry
@@ -153,7 +187,7 @@ struct Index {
   private pendingVkd3dSmoke: boolean = false;
   @State vkd3dSmokePhase: string = 'idle';
   @State vkd3dSmokeStatus: string = '尚未运行';
-  @State vkd3dSmokeDetail: string = '点击下方按钮后，将在独立 .wine-smoke 中验证物理显示 1000 帧。';
+  @State vkd3dSmokeDetail: string = '在独立 .wine-smoke 中验证能力查询、Buffer 逐字节回读、Fence 与动态渲染 1000 帧；物理窗口内容需单独确认。';
   private manualVkd3dSmokePid: number = -1;
   private manualVkd3dSmokeExited: boolean = false;
 
@@ -298,6 +332,70 @@ struct Index {
     hilog.info(DOMAIN, 'VKD3D', 'manual isolated session stopped; normal prefix restored');
   }
 
+  private vkd3dFeatureLevelText(value: number): string {
+    switch (value) {
+      case 0xc100: return '12_1';
+      case 0xc000: return '12_0';
+      case 0xb100: return '11_1';
+      case 0xb000: return '11_0';
+      default: return `0x${value.toString(16)}`;
+    }
+  }
+
+  private vkd3dShaderModelText(value: number): string {
+    return `${(value >> 4).toString()}.${(value & 0xf).toString()}`;
+  }
+
+  private vkd3dRootSignatureText(value: number): string {
+    return value >= 2 ? '1.1' : (value === 1 ? '1.0' : '未报告');
+  }
+
+  private vkd3dFlagText(value: boolean): string {
+    return value ? 'OK' : '不支持';
+  }
+
+  private vkd3dTierText(value: number): string {
+    return value > 0 ? `Tier ${value}` : '不支持';
+  }
+
+  private vkd3dRaytracingText(value: number): string {
+    return value === 11 ? 'Tier 1.1' : (value === 10 ? 'Tier 1.0' : '不支持');
+  }
+
+  private vkd3dMeshText(value: number): string {
+    return value === 10 ? 'Tier 1' : '不支持';
+  }
+
+  private vkd3dSamplerFeedbackText(value: number): string {
+    return value === 100 ? 'Tier 1.0' : (value === 90 ? 'Tier 0.9' : '不支持');
+  }
+
+  private vkd3dResultDetail(result: Vkd3dManualResult): string {
+    return `${result.frames}/${result.target_frames} 帧｜${(result.elapsed_ms / 1000).toFixed(3)} 秒｜` +
+      `${result.fps.toFixed(3)} FPS｜${result.width}×${result.height}｜启动 ` +
+      `${(result.startup_ms / 1000).toFixed(3)} 秒\n` +
+      `[真实执行] D3D12 渲染目标回读 ${this.vkd3dFlagText(result.frame_verified)}｜` +
+      `动态双 Hash ${this.vkd3dFlagText(result.animation_verified)}｜Fence ` +
+      `${this.vkd3dFlagText(result.fence_verified)}｜Upload→Default→Readback ` +
+      `${this.vkd3dFlagText(result.buffer_copy_verified)}\n` +
+      `[显示边界] DXGI Present 已完成 ${result.frames} 次；物理窗口内容仍需确认是否为旋转彩色色块\n` +
+      `[仅能力查询，不等同执行] FL ${this.vkd3dFeatureLevelText(result.max_feature_level)}｜SM ` +
+      `${this.vkd3dShaderModelText(result.shader_model)}｜Root ` +
+      `${this.vkd3dRootSignatureText(result.root_signature_version)}｜Binding ` +
+      `${this.vkd3dTierText(result.resource_binding_tier)}｜Heap ` +
+      `${this.vkd3dTierText(result.resource_heap_tier)}｜GPU VA ` +
+      `${result.gpu_va_bits_per_resource}/${result.gpu_va_bits_per_process}\n` +
+      `[仅能力查询] Wave ${this.vkd3dFlagText(result.wave_ops)}｜Int64 ` +
+      `${this.vkd3dFlagText(result.int64_shader_ops)}｜Typed UAV ` +
+      `${this.vkd3dFlagText(result.typed_uav_load_additional_formats)}｜ROV ` +
+      `${this.vkd3dFlagText(result.rovs_supported)}\n` +
+      `[仅能力查询] RenderPass ${this.vkd3dTierText(result.render_pass_tier)}｜RT ` +
+      `${this.vkd3dRaytracingText(result.raytracing_tier)}｜VRS ` +
+      `${this.vkd3dTierText(result.variable_shading_rate_tier)}｜Mesh ` +
+      `${this.vkd3dMeshText(result.mesh_shader_tier)}｜Sampler Feedback ` +
+      `${this.vkd3dSamplerFeedbackText(result.sampler_feedback_tier)}`;
+  }
+
   private vkd3dStageText(stage: string): string {
     switch (stage) {
       case 'startup': return '程序启动';
@@ -309,6 +407,12 @@ struct Index {
       case 'd3d12_root_signature_export': return '解析根签名接口';
       case 'dxgi_export': return '解析 DXGI 工厂接口';
       case 'device': return '创建 D3D12 设备';
+      case 'feature_levels': return '查询 D3D feature level';
+      case 'feature_options': return '查询 D3D12 核心能力';
+      case 'feature_root_signature': return '查询根签名版本';
+      case 'feature_shader_model': return '查询 shader model';
+      case 'feature_gpu_va': return '查询 GPU 虚拟地址能力';
+      case 'feature_options1': return '查询 Wave/Int64 能力';
       case 'command_queue': return '创建命令队列';
       case 'swapchain': return '创建交换链';
       case 'command_allocator': return '创建命令分配器';
@@ -325,6 +429,17 @@ struct Index {
       case 'swapchain_buffer': return '获取交换链缓冲';
       case 'fence': return '创建 Fence';
       case 'fence_event': return '创建 Fence 事件';
+      case 'buffer_upload_create': return '创建 Upload 缓冲';
+      case 'buffer_default_create': return '创建 Default 缓冲';
+      case 'buffer_readback_create': return '创建 Readback 缓冲';
+      case 'buffer_upload_map': return '写入 Upload 测试数据';
+      case 'buffer_copy_record':
+      case 'buffer_copy_allocator_reset':
+      case 'buffer_copy_list_reset':
+      case 'buffer_copy_list_close': return '提交 Buffer 复制链';
+      case 'buffer_readback_compare':
+      case 'buffer_readback_map':
+      case 'buffer_readback_mismatch': return '逐字节校验 Buffer 回读';
       case 'assets_complete': return '图形资源准备完成';
       case 'render_loop': return '物理显示循环';
       case 'fence_signal': return '提交 Fence 信号';
@@ -334,6 +449,10 @@ struct Index {
       case 'command_list_reset': return '重置命令列表';
       case 'command_list_close_frame': return '关闭逐帧命令列表';
       case 'present': return '物理显示 Present';
+      case 'frame_readback_map': return '映射画面回读';
+      case 'frame_readback_no_geometry': return '画面中未检测到几何图形';
+      case 'frame_readback_missing_animation_check': return '动态画面回读次数不足';
+      case 'frame_readback_static_animation': return '前后画面 Hash 相同';
       case 'complete': return '完整 1000 帧';
       default: return stage.length > 0 ? stage : '未知阶段';
     }
@@ -1010,19 +1129,22 @@ struct Index {
         try {
           const result = JSON.parse(resultText) as Vkd3dManualResult;
           const passed = result.status === 'PASS' && result.stage === 'complete' &&
-            result.frames === result.target_frames && result.target_frames === 1000;
-          this.vkd3dSmokePhase = passed ? 'pass' : 'fail';
+            result.frames === result.target_frames && result.target_frames === 1000 &&
+            result.feature_query_verified && result.buffer_copy_verified &&
+            result.fence_verified && result.frame_verified && result.animation_verified &&
+            result.readback_checks >= 2 && result.first_frame_hash !== result.last_frame_hash;
+          this.vkd3dSmokePhase = passed ? 'core-pass' : 'fail';
           this.vkd3dSmokeStatus = passed ?
-            `PASS：${result.frames}/${result.target_frames} 帧` :
+            `核心 PASS：${result.frames}/${result.target_frames} 帧｜${result.fps.toFixed(3)} FPS` :
             `FAIL：${this.vkd3dStageText(result.stage)}`;
           this.vkd3dSmokeDetail = passed ?
-            `耗时 ${(result.elapsed_ms / 1000).toFixed(3)} 秒｜${result.fps.toFixed(3)} FPS｜` +
-              `${result.width}×${result.height}｜阶段 ${result.stage}` :
+            this.vkd3dResultDetail(result) :
             `未通过阶段：${this.vkd3dStageText(result.stage)}（${result.stage}）；` +
               `已完成 ${result.frames}/${result.target_frames} 帧；窗口退出原因 ` +
-              `${result.exit_reason ?? 'unknown'}（0x${(result.exit_message ?? 0).toString(16)}）。`;
+              `${result.exit_reason ?? 'unknown'}（0x${(result.exit_message ?? 0).toString(16)}）。\n` +
+              this.vkd3dResultDetail(result);
           this.statusText = passed ?
-            `DX12 示例 PASS：${result.frames} 帧，${result.fps.toFixed(3)} FPS` :
+            `DX12 核心 PASS：物理显示待确认｜${result.fps.toFixed(3)} FPS` :
             `DX12 示例 FAIL：${this.vkd3dStageText(result.stage)}`;
           hilog.info(DOMAIN, 'VKD3D',
             'manual smoke authoritative result=%{public}s path=%{public}s', resultText, resultPath);
@@ -1039,9 +1161,11 @@ struct Index {
         lastCheckpoint = checkpointText;
         try {
           const checkpoint = JSON.parse(checkpointText) as Vkd3dManualCheckpoint;
+          const liveFps = checkpoint.elapsed_ms > 0 ? `${checkpoint.fps.toFixed(3)} FPS` : '等待渲染计时';
           this.vkd3dSmokeStatus = `运行中：${this.vkd3dStageText(checkpoint.stage)}`;
-          this.vkd3dSmokeDetail = `当前阶段 ${checkpoint.stage}｜已显示 ${checkpoint.frames}/1000 帧`;
-          this.statusText = `DX12 示例运行中：${checkpoint.frames}/1000 帧`;
+          this.vkd3dSmokeDetail = `当前阶段 ${checkpoint.stage}｜` +
+            `已显示 ${checkpoint.frames}/${checkpoint.target_frames} 帧｜${liveFps}`;
+          this.statusText = `DX12 示例运行中：${checkpoint.frames}/${checkpoint.target_frames} 帧｜${liveFps}`;
           hilog.info(DOMAIN, 'VKD3D', 'manual smoke checkpoint=%{public}s', checkpointText);
         } catch (error) {
           hilog.warn(DOMAIN, 'VKD3D', 'manual checkpoint parse skipped error=%{public}s',
@@ -1119,13 +1243,16 @@ struct Index {
     this.vkd3dSmokeDetail = '等待 D3D12 设备、交换链与首帧检查点。';
     this.manualVkd3dSmokePid = -1;
     this.manualVkd3dSmokeExited = false;
+    const smokeEnvironment = this.capabilityProbeEnvironment(exePath);
+    smokeEnvironment['WINEHUA_DXVK_TRACE_PRESENT_IMAGE'] = '1';
+    smokeEnvironment['VN_WINEHUA_PRESENT_TRACE'] = '1';
     const result = testNapi.runWineProgram({
       windowsExePath: exePath,
       argv: ['--frames', '1000', '--width', '640', '--height', '480', '--sync-interval', '0',
         '--hold-ms', '30000',
         '--result', 'C:\\smoke\\results\\vkd3d-manual.json',
         '--checkpoint', 'C:\\smoke\\results\\vkd3d-manual.checkpoint.json'],
-      environment: this.capabilityProbeEnvironment(exePath),
+      environment: smokeEnvironment,
       workingDirectory: 'C:\\smoke\\x64',
       prefixMode: 'clean',
       d3dBackend: 'vkd3d_limited_500k',
@@ -1277,13 +1404,14 @@ struct Index {
           Text(this.vkd3dSmokeStatus)
             .fontSize(13).fontWeight(FontWeight.Bold)
             .fontColor(this.vkd3dSmokePhase === 'pass' ? '#5f8' :
-              (this.vkd3dSmokePhase === 'fail' ? '#f77' :
-                (this.vkd3dSmokePhase === 'running' || this.vkd3dSmokePhase === 'preparing' ? '#fc6' : '#aaa')))
+              (this.vkd3dSmokePhase === 'core-pass' ? '#fc6' :
+                (this.vkd3dSmokePhase === 'fail' ? '#f77' :
+                  (this.vkd3dSmokePhase === 'running' || this.vkd3dSmokePhase === 'preparing' ? '#fc6' : '#aaa'))))
             .width('100%').margin({ bottom: 3 })
           Text(this.vkd3dSmokeDetail)
-            .fontSize(11).fontColor('#bbb').maxLines(4)
+            .fontSize(11).fontColor('#bbb').maxLines(6)
             .width('100%').margin({ bottom: 6 })
-          Button('运行 DX12 1000 帧示例')
+          Button('运行 DX12 准确 Smoke（1000 帧）')
             .width('100%').height(36).backgroundColor('#764')
             .enabled(!this.initInProgress && this.vkd3dSmokePhase !== 'preparing' &&
               this.vkd3dSmokePhase !== 'running')

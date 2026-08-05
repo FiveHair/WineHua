@@ -279,6 +279,8 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "WINEHUA_RESOURCE_TRACE" ||
            key == "WINEHUA_VKR_TRACE_UBO_IDENTITY" ||
            key == "WINEHUA_VKR_TRACE_PRESENT_IMAGE" ||
+           key == "WINEHUA_VK_PRESENT_TRACE" ||
+           key == "WINEHUA_VENUS_FORCE_SOURCE_CLEAR" ||
            key == "VKR_WINEHUA_SHADOW_FROM_HOST" ||
            key == "VKR_WINEHUA_SHADOW_TRACE" ||
            key == "WINEHUA_VKR_PRESENT_STAGE_TRACE" ||
