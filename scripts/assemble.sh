@@ -472,6 +472,23 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
         log "  guest_gfx: SKIP (build/guest_gfx/$guest_arch/lib not found)"
     fi
 
+    # x86_64: guest Mesa 库必须可被系统 dlopen (el1 bundle libs); el2 数据区 dlopen 被拒 (ENOENT).
+    # 仅复制 host libs 中不存在的 guest 专用库, 共享依赖 (libwayland-*/libffi/libz/libc++_shared)
+    # 直接复用 el1 中已有的 host 版本.
+    if [ "$NATIVE_ARCH" = "x86_64" ] && [ -d "$BUILD_DIR/guest_gfx/$guest_arch/lib" ]; then
+        log "  guest_gfx -> entry/libs/x86_64 (el1 dlopen for x86_64)"
+        mkdir -p "$ROOT/entry/libs/x86_64"
+        for pattern in libEGL.so libGLESv2.so libGLESv1_CM.so libgallium-*.so libdrm.so; do
+            for f in "$BUILD_DIR/guest_gfx/$guest_arch/lib"/$pattern*; do
+                [ -f "$f" ] && cp -a "$f" "$ROOT/entry/libs/x86_64/"
+            done
+        done
+        for f in "$BUILD_DIR/guest_gfx/$guest_arch/lib"/dri/*.so; do
+            [ -f "$f" ] && cp -a "$f" "$ROOT/entry/libs/x86_64/"
+        done
+        log "  guest_gfx el1: $(ls "$ROOT/entry/libs/x86_64"/libEGL.so* "$ROOT/entry/libs/x86_64"/libgallium-*.so 2>/dev/null | wc -l) libs + $(ls "$ROOT/entry/libs/x86_64"/*_dri.so 2>/dev/null | wc -l) dri drivers"
+    fi
+
     # Guest Linux Vulkan runtime is intentionally outside C:\\smoke: it is an
     # x86_64 OHOS ELF/Loader/ICD stack launched through Box64 for the B1 gate.
     if [ -f "$BUILD_DIR/guest_vulkan/$guest_arch/manifest.json" ]; then

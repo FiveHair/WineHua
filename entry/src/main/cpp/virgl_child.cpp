@@ -502,7 +502,12 @@ extern "C" __attribute__((visibility("default"))) OHIPCRemoteStub* NativeChildPr
 extern "C" __attribute__((visibility("default"))) void NativeChildProcess_MainProc()
 {
     ClearGuestGraphicsEnv();
+#ifdef __x86_64__
+    // Emulator express GPU: surfaceless EGL crashes it; use default display
+    setenv("EGL_PLATFORM", "default", 1);
+#else
     setenv("EGL_PLATFORM", "surfaceless", 1);
+#endif
     // 手机适配层：启动 socket dispatch 线程，替代 Binder 驱动回调
     {
         const char* fdEnv = getenv("WINEHUA_PHONE_CFG_FD");
@@ -659,12 +664,20 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     char arg0[] = "virgl_test_server";
     char arg1[] = "--no-fork";
     char arg2[] = "--multi-clients";
+#ifdef __x86_64__
+    // Emulator express GPU: surfaceless EGL crashes it; use default display + GLES
+    char arg3[] = "--use-gles";
+    char* argv[] = {arg0, arg1, arg2, arg3, "--socket-path", socketPath, nullptr};
+#else
     char arg3[] = "--use-egl-surfaceless";
     char arg4[] = "--use-gles";
-    char arg5[] = "--venus";
-    char arg6[] = "--socket-path";
-    char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, socketPath, nullptr};
+    char* argv[] = {arg0, arg1, arg2, arg3, arg4, "--venus", "--socket-path", socketPath, nullptr};
+#endif
+#ifdef __x86_64__
+    int rc = vtestMain(6, argv);
+#else
     int rc = vtestMain(8, argv);
+#endif
 
     OH_LOG_WARN(LOG_APP, "[virgl-child] vtest exited rc=%{public}d", rc);
     if (setVulkanDeviceReleaseCallback)

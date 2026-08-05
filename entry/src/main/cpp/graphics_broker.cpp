@@ -874,7 +874,11 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
             std::string guestLibDir = state.guestReceiverRuntimeDir + "/lib";
             env.push_back("EGL_PLATFORM=wayland");
             if (FileExists(guestLibDir + "/libEGL.so"))
+#ifdef __x86_64__
+                env.push_back("WINEHUA_EGL_LIBRARY_PATH=/data/storage/el1/bundle/libs/x86_64/libEGL.so");
+#else
                 env.push_back("WINEHUA_EGL_LIBRARY_PATH=" + guestLibDir + "/libEGL.so");
+#endif
 #ifdef __aarch64__
             // NOTE: 非 DXVK 基线值 (8 个 lib, 不含 libvulkan)。
             // DXVK 路径下 AppendD3dBackendEnv 会用 14 个 lib (含 libvulkan) 覆盖此值。
@@ -884,7 +888,12 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
                           "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
                           "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8");
 #endif
-            if (DirExists(guestLibDir + "/dri")) env.push_back("LIBGL_DRIVERS_PATH=" + guestLibDir + "/dri");
+            if (DirExists(guestLibDir + "/dri"))
+#ifdef __x86_64__
+                env.push_back("LIBGL_DRIVERS_PATH=/data/storage/el1/bundle/libs/x86_64");
+#else
+                env.push_back("LIBGL_DRIVERS_PATH=" + guestLibDir + "/dri");
+#endif
             if (DirExists(guestLibDir + "/egl")) env.push_back("EGL_DRIVERS_PATH=" + guestLibDir + "/egl");
         }
         env.push_back("WINEHUA_WAYLAND_READBACK=1");
@@ -894,7 +903,17 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
         env.push_back("WINEHUA_VTEST_PRESENT=surface-queue");
         env.push_back(std::string("WINEHUA_ZERO_COPY_READY_DIR=") + ZERO_COPY_READY_DIR);
         for (const std::string& extra : guestEnv) env.push_back(extra);
+#ifdef __x86_64__
+        // HarmonyOS PC emulator express GPU cannot host GL: eglCreateContext
+        // with a NULL share context and glTexImage2D with NULL pixels crash
+        // Emulator.exe. Route the x86_64 guest to software rendering
+        // (softpipe) instead of virpipe, and do not advertise the vtest
+        // socket. arm64 real-device virgl path is unchanged.
+        env.push_back("GALLIUM_DRIVER=softpipe");
+        env.push_back("LIBGL_DRIVERS_PATH=/data/storage/el1/bundle/libs/x86_64");
+#else
         if (!state.virglSocketPath.empty()) env.push_back("VTEST_SOCKET_NAME=" + state.virglSocketPath);
+#endif
     }
 }
 
