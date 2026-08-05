@@ -565,6 +565,9 @@ extern "C" void Main(NativeChildProcess_Args args)
 
     int errPipe[2];
     pipe(errPipe);
+    const char* automation = getenv("WINEHUA_AUTOMATION");
+    if (automation && !strcmp(automation, "1"))
+        dup2(errPipe[1], STDOUT_FILENO);
     dup2(errPipe[1], STDERR_FILENO);
     close(errPipe[1]);
     mkdir(WINE_LOG_DIR, 0755);

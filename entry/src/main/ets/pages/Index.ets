@@ -627,8 +627,20 @@ struct Index {
     return separator > 2 ? path.substring(0, separator) : 'C:\\';
   }
 
+  private applyD3dEnvironmentOverrides(environment: Record<string, string>): Record<string, string> {
+    const overrideCount = Math.min(this.d3dEnvKeys.length, this.d3dEnvValues.length);
+    for (let index = 0; index < overrideCount; ++index) {
+      environment[this.d3dEnvKeys[index]] = this.d3dEnvValues[index];
+    }
+    return environment;
+  }
+
   private d3dLaunchEnvironment(): Record<string, string> {
-    if (this.d3dBackend.indexOf('dxvk_') !== 0) return {};
+    /* Caller-supplied diagnostics are backend-independent. In particular,
+     * VKD3D's test filter must reach the D3D12 test process even though the
+     * product defaults below are intentionally scoped to DXVK. */
+    if (this.d3dBackend.indexOf('dxvk_') !== 0)
+      return this.applyD3dEnvironmentOverrides({});
     ensureDirectory(`${this.driveC}/smoke/results/desktop-dxvk`);
     const environment: Record<string, string> = {
       'DXVK_LOG_LEVEL': 'warn',
@@ -649,11 +661,7 @@ struct Index {
       environment['DXVK_WINEHUA_TRACE_SAMPLED'] = '0';
       environment['DXVK_WINEHUA_TRACE_FLOW'] = '0';
       environment['DXVK_WINEHUA_TRACE_API'] = '0';
-      const overrideCount = Math.min(this.d3dEnvKeys.length, this.d3dEnvValues.length);
-      for (let index = 0; index < overrideCount; ++index) {
-        environment[this.d3dEnvKeys[index]] = this.d3dEnvValues[index];
-      }
-      return environment;
+      return this.applyD3dEnvironmentOverrides(environment);
     }
     if (this.perfProfileText === 'shadow-precise-strong-ring-trace')
       environment['VN_WINEHUA_PRESENT_TRACE'] = '1';
@@ -766,11 +774,7 @@ struct Index {
       if (this.perfProfileText === 'shadow-precise-cpu-upload')
         environment['VKR_WINEHUA_GPU_UPLOAD'] = '0';
     }
-    const overrideCount = Math.min(this.d3dEnvKeys.length, this.d3dEnvValues.length);
-    for (let index = 0; index < overrideCount; ++index) {
-      environment[this.d3dEnvKeys[index]] = this.d3dEnvValues[index];
-    }
-    return environment;
+    return this.applyD3dEnvironmentOverrides(environment);
   }
 
   /* The requirements executable is a Windows Vulkan probe, not a DXVK DLL

@@ -118,7 +118,7 @@ export default class EntryAbility extends UIAbility {
         'BOX64_DYNAREC_STRONGMEM',
         'BOX64_AVX'
       ];
-      const allowedKey = /^(WINEDEBUG|DXVK_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$/.test(key) ||
+      const allowedKey = /^(WINEDEBUG|DXVK_|VKD3D_TEST_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$/.test(key) ||
         allowedBox64Keys.indexOf(key) >= 0;
       if (!allowedKey ||
         envValue.length > 1024 || d3dEnvKeys.length >= 32) {
