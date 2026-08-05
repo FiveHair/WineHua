@@ -265,7 +265,9 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
     setenv("BOX64_LD_LIBRARY_PATH", libDir.c_str(), 1);
 #else
     // x86_64: 系统 linker 直接加载 x86_64 OHOS .so
-    setenv("LD_LIBRARY_PATH", libDir.c_str(), 1);
+    // guest_gfx 库已打包进 bundle libs (el1, 系统 dlopen 允许), 依赖也从该目录解析
+    setenv("LD_LIBRARY_PATH",
+           (libDir + ":/data/storage/el1/bundle/libs/x86_64").c_str(), 1);
 #endif
 
     if (homeDir && homeDir[0])

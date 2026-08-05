@@ -54,3 +54,10 @@ entry/src/main/resources/rawfile/wine-data.zip
 entry/src/main/resources/rawfile/wine-runtime-manifest.json
 tmp/
 prebuilt/
+
+# Local signing material (never commit)
+/sign/
+
+# Python caches
+__pycache__/
+*.pyc
