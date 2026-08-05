@@ -96,6 +96,9 @@ interface Vkd3dManualResult {
   width: number;
   height: number;
   sync_interval: number;
+  hold_ms: number;
+  exit_reason: string;
+  exit_message: number;
 }
 
 interface Vkd3dManualCheckpoint {
@@ -268,6 +271,31 @@ struct Index {
 
   private keepManualVkd3dStatus(): boolean {
     return this.d3dBackend === 'vkd3d_limited_500k' && this.vkd3dSmokePhase !== 'idle';
+  }
+
+  private finishManualVkd3dSession(): void {
+    WineWindowManager.getInstance().setManagedToplevelTitleFilter('');
+    try {
+      testNapi.stopAll();
+    } catch (error) {
+      hilog.warn(DOMAIN, 'VKD3D', 'manual session stop failed error=%{public}s', JSON.stringify(error));
+    }
+    this.processList = [];
+    this.state = 'idle';
+    this.prefixReady = false;
+    this.initInProgress = false;
+    this.pendingVkd3dSmoke = false;
+    this.manualVkd3dSmokePid = -1;
+    this.manualVkd3dSmokeExited = false;
+    this.gameTestMode = false;
+    this.automationMode = false;
+    WineWindowManager.getInstance().setAutomationMode(false);
+    this.prefixMode = 'reuse';
+    this.prefixRoot = `${FILES_BASE}/.wine`;
+    this.driveC = `${this.prefixRoot}/drive_c`;
+    this.sockPath = `${this.prefixRoot}/wine-wayland`;
+    this.cleanPrefixPrepared = false;
+    hilog.info(DOMAIN, 'VKD3D', 'manual isolated session stopped; normal prefix restored');
   }
 
   private vkd3dStageText(stage: string): string {
@@ -985,12 +1013,14 @@ struct Index {
             `耗时 ${(result.elapsed_ms / 1000).toFixed(3)} 秒｜${result.fps.toFixed(3)} FPS｜` +
               `${result.width}×${result.height}｜阶段 ${result.stage}` :
             `未通过阶段：${this.vkd3dStageText(result.stage)}（${result.stage}）；` +
-              `已完成 ${result.frames}/${result.target_frames} 帧。`;
+              `已完成 ${result.frames}/${result.target_frames} 帧；窗口退出原因 ` +
+              `${result.exit_reason ?? 'unknown'}（0x${(result.exit_message ?? 0).toString(16)}）。`;
           this.statusText = passed ?
             `DX12 示例 PASS：${result.frames} 帧，${result.fps.toFixed(3)} FPS` :
             `DX12 示例 FAIL：${this.vkd3dStageText(result.stage)}`;
           hilog.info(DOMAIN, 'VKD3D',
             'manual smoke authoritative result=%{public}s path=%{public}s', resultText, resultPath);
+          this.finishManualVkd3dSession();
           return;
         } catch (error) {
           hilog.warn(DOMAIN, 'VKD3D', 'manual result parse pending error=%{public}s text=%{public}s',
@@ -1024,6 +1054,7 @@ struct Index {
           hilog.error(DOMAIN, 'VKD3D',
             'manual smoke exited without result path=%{public}s checkpoint=%{public}s',
             resultPath, lastCheckpoint);
+          this.finishManualVkd3dSession();
           return;
         }
       }
@@ -1037,6 +1068,7 @@ struct Index {
     this.statusText = 'DX12 示例 FAIL：结果超时';
     hilog.error(DOMAIN, 'VKD3D',
       'manual smoke result timeout path=%{public}s checkpoint=%{public}s', resultPath, lastCheckpoint);
+    this.finishManualVkd3dSession();
   }
 
   private startPendingVkd3dSmoke = (): void => {
@@ -1050,6 +1082,7 @@ struct Index {
       this.vkd3dSmokeStatus = 'FAIL：无法创建结果目录';
       this.vkd3dSmokeDetail = resultPath;
       this.statusText = 'DX12 示例启动失败（结果目录不可用）';
+      this.finishManualVkd3dSession();
       return;
     }
     for (const stalePath of [resultPath, checkpointPath]) {
@@ -1062,6 +1095,7 @@ struct Index {
         this.statusText = 'DX12 示例启动失败（旧结果清理失败）';
         hilog.error(DOMAIN, 'VKD3D', 'manual stale result cleanup failed error=%{public}s path=%{public}s',
           JSON.stringify(error), stalePath);
+        this.finishManualVkd3dSession();
         return;
       }
     }
@@ -1071,6 +1105,7 @@ struct Index {
       this.vkd3dSmokeDetail = '实验 DLL 未能按隔离规则复制到 C:\\smoke\\x64。';
       this.statusText = 'DX12 示例启动失败（VKD3D DLL 校验失败）';
       hilog.error(DOMAIN, 'VKD3D', 'manual smoke runtime staging failed');
+      this.finishManualVkd3dSession();
       return;
     }
     this.vkd3dSmokePhase = 'running';
@@ -1081,6 +1116,7 @@ struct Index {
     const result = testNapi.runWineProgram({
       windowsExePath: exePath,
       argv: ['--frames', '1000', '--width', '640', '--height', '480', '--sync-interval', '0',
+        '--hold-ms', '30000',
         '--result', 'C:\\smoke\\results\\vkd3d-manual.json',
         '--checkpoint', 'C:\\smoke\\results\\vkd3d-manual.checkpoint.json'],
       environment: this.capabilityProbeEnvironment(exePath),
@@ -1099,12 +1135,14 @@ struct Index {
         this.vkd3dSmokeDetail = JSON.stringify(error);
         this.statusText = 'DX12 示例 FAIL：结果监控异常';
         hilog.error(DOMAIN, 'VKD3D', 'manual result monitor failed error=%{public}s', JSON.stringify(error));
+        this.finishManualVkd3dSession();
       });
     } else {
       this.vkd3dSmokePhase = 'fail';
       this.vkd3dSmokeStatus = 'FAIL：测试进程未启动';
       this.vkd3dSmokeDetail = `启动状态：${result.state}`;
       this.statusText = 'DX12 示例启动失败';
+      this.finishManualVkd3dSession();
     }
     hilog.info(DOMAIN, 'VKD3D',
       'manual smoke path=%{public}s pid=%{public}d status=%{public}s',
@@ -1124,6 +1162,7 @@ struct Index {
     // the qualified Gate C experiments. This keeps the user's normal prefix
     // and desktop/DXVK session untouched by the test payload.
     this.automationMode = true;
+    WineWindowManager.getInstance().setManagedToplevelTitleFilter('VKD3D Graphics Smoke');
     WineWindowManager.getInstance().setAutomationMode(true);
     this.prefixMode = 'clean';
     this.prefixRoot = WINE_SMOKE_PREFIX;
@@ -1153,6 +1192,7 @@ struct Index {
       this.vkd3dSmokeStatus = 'FAIL：测试会话切换失败';
       this.vkd3dSmokeDetail = JSON.stringify(e);
       this.setInitStatus('VKD3D 测试会话切换失败', false);
+      WineWindowManager.getInstance().setManagedToplevelTitleFilter('');
       hilog.error(DOMAIN, 'VKD3D', 'manual session restart failed: %{public}s', JSON.stringify(e));
     }
   }

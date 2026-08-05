@@ -50,6 +50,10 @@ export class WineWindowManager {
   private desktopRootId: number = 0;
   private desktopAbilityRunning: boolean = false;
   private desktopAbilityCtx: common.UIAbilityContext | null = null;
+  // Optional exact-title gate for an explicitly requested visible managed
+  // window. Clean-prefix bootstrap helpers must stay headless so they cannot
+  // steal the foreground from EntryAbility before the requested program starts.
+  private managedToplevelTitleFilter: string = '';
   // 主窗口 windowStage (ARGB 异型子窗口/popup 回退宿主)
   private mainWindowStage: window.WindowStage | null = null;
 
@@ -95,6 +99,12 @@ export class WineWindowManager {
     hilog.info(DOMAIN, TAG,
       '[MW] automation mode=%{public}s desktop mode=%{public}s',
       enabled ? 'true' : 'false', this.isDesktopMode ? 'true' : 'false');
+  }
+
+  setManagedToplevelTitleFilter(title: string): void {
+    this.managedToplevelTitleFilter = title;
+    hilog.info(DOMAIN, TAG, '[MW] managed toplevel title filter=%{public}s',
+      title.length > 0 ? title : '<disabled>');
   }
 
   async init(windowStage: window.WindowStage, abilityContext: common.UIAbilityContext): Promise<void> {
@@ -303,6 +313,12 @@ export class WineWindowManager {
       return;
     }
     const e = this.ensureEntry(id);
+    if (event === 'title') {
+      try {
+        const obj: Record<string, string | number> = JSON.parse(data) as Record<string, string | number>;
+        if (obj.title) e.title = obj.title as string;
+      } catch (_) { /* applyEvent will report malformed title data if a window is created */ }
+    }
     e.events.push([event, data]);
     hilog.info(DOMAIN, TAG, '[MW] -> queue pending #%{public}d %{public}s (window not ready, queue=%{public}d)',
       id, event, e.events.length);
@@ -317,6 +333,11 @@ export class WineWindowManager {
       case 'created':
         if (this.isDesktopMode) {
           hilog.info(DOMAIN, TAG, '[MW] Desktop mode: toplevel #%{public}d created, skipping Ability', id);
+        } else if (this.managedToplevelTitleFilter.length > 0 &&
+          this.entries.get(id)?.title !== this.managedToplevelTitleFilter) {
+          hilog.info(DOMAIN, TAG,
+            '[MW] managed toplevel #%{public}d title="%{public}s" suppressed; waiting for "%{public}s"',
+            id, this.entries.get(id)?.title ?? '', this.managedToplevelTitleFilter);
         } else {
           hilog.info(DOMAIN, TAG, '[MW] -> startWineWindowAbility(#%{public}d)', id);
           this.startWineWindowAbility(id, data);

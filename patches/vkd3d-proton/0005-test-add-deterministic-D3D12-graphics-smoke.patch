@@ -1,12 +1,12 @@
-From 06d250d52a0b6052ec5db85cf419eb77733364a5 Mon Sep 17 00:00:00 2001
+From bf7bedcf6914e4efabdb2ad8a07afc381ece8643 Mon Sep 17 00:00:00 2001
 From: yifengling0 <yifengling0@users.noreply.github.com>
-Date: Wed, 5 Aug 2026 03:40:47 +0800
-Subject: [PATCH 5/5] test: add deterministic D3D12 graphics smoke
+Date: Wed, 5 Aug 2026 12:31:01 +0800
+Subject: [PATCH] test: verify D3D12 graphics smoke pixels
 
 ---
  tests/meson.build                |  14 +
- tests/vkd3d_graphics_smoketest.c | 689 +++++++++++++++++++++++++++++++
- 2 files changed, 703 insertions(+)
+ tests/vkd3d_graphics_smoketest.c | 932 +++++++++++++++++++++++++++++++
+ 2 files changed, 946 insertions(+)
  create mode 100644 tests/vkd3d_graphics_smoketest.c
 
 diff --git a/tests/meson.build b/tests/meson.build
@@ -33,10 +33,10 @@ index dc79727e..51054754 100644
 +endif
 diff --git a/tests/vkd3d_graphics_smoketest.c b/tests/vkd3d_graphics_smoketest.c
 new file mode 100644
-index 00000000..240fdd98
+index 00000000..8471f6f9
 --- /dev/null
 +++ b/tests/vkd3d_graphics_smoketest.c
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,932 @@
 +/*
 + * SPDX-License-Identifier: LGPL-2.1-or-later
 + *
@@ -63,12 +63,15 @@ index 00000000..240fdd98
 +#define VKD3D_GRAPHICS_SMOKE_DEFAULT_WIDTH 640u
 +#define VKD3D_GRAPHICS_SMOKE_DEFAULT_HEIGHT 480u
 +#define VKD3D_GRAPHICS_SMOKE_DEFAULT_SYNC_INTERVAL 0u
++#define VKD3D_GRAPHICS_SMOKE_DEFAULT_HOLD_MS 0u
 +#define VKD3D_GRAPHICS_SMOKE_MAX_FRAMES 100000u
++#define VKD3D_GRAPHICS_SMOKE_MAX_HOLD_MS 300000u
++#define VKD3D_GRAPHICS_SMOKE_PIXEL_TOLERANCE 8u
++#define VKD3D_GRAPHICS_SMOKE_MIN_GEOMETRY_PERCENT 1u
 +
 +typedef HRESULT (WINAPI *graphics_smoke_serialize_root_signature)(
 +        const D3D12_ROOT_SIGNATURE_DESC *desc, D3D_ROOT_SIGNATURE_VERSION version,
 +        ID3DBlob **blob, ID3DBlob **error_blob);
-+
 +struct graphics_smoke
 +{
 +    struct demo demo;
@@ -86,6 +89,7 @@ index 00000000..240fdd98
 +    unsigned int sync_interval;
 +    unsigned int target_frames;
 +    unsigned int rendered_frames;
++    unsigned int hold_ms;
 +    uint64_t start_ms;
 +    uint64_t elapsed_ms;
 +
@@ -101,6 +105,11 @@ index 00000000..240fdd98
 +    ID3D12GraphicsCommandList *command_list;
 +    ID3D12Resource *vertex_buffer;
 +    D3D12_VERTEX_BUFFER_VIEW vertex_buffer_view;
++    ID3D12Resource *frame_readback;
++    D3D12_PLACED_SUBRESOURCE_FOOTPRINT frame_footprint;
++    UINT64 frame_readback_size;
++    unsigned int non_clear_pixels;
++    bool frame_verified;
 +    ID3D12Fence *fence;
 +    HANDLE fence_event;
 +    UINT64 fence_value;
@@ -110,6 +119,10 @@ index 00000000..240fdd98
 +    const char *stage;
 +    HRESULT failure_hr;
 +    unsigned int frame_index;
++    const char *exit_reason;
++    UINT exit_message;
++    WPARAM exit_wparam;
++    LPARAM exit_lparam;
 +};
 +
 +static uint64_t graphics_smoke_now_ms(void)
@@ -181,9 +194,13 @@ index 00000000..240fdd98
 +        fprintf(stderr,
 +                "VKD3D_GRAPHICS_SMOKE RESULT: {\"status\":\"%s\",\"stage\":\"%s\","
 +                "\"frames\":%u,\"target_frames\":%u,\"elapsed_ms\":%" PRIu64 ","
-+                "\"fps\":%.3f,\"width\":%u,\"height\":%u}\n",
++                "\"fps\":%.3f,\"width\":%u,\"height\":%u,\"hold_ms\":%u,"
++                "\"frame_verified\":%s,\"non_clear_pixels\":%u,"
++                "\"exit_reason\":\"%s\",\"exit_message\":%u}\n",
 +                passed ? "PASS" : "FAIL", smoke->stage, smoke->rendered_frames,
-+                smoke->target_frames, smoke->elapsed_ms, fps, smoke->width, smoke->height);
++                smoke->target_frames, smoke->elapsed_ms, fps, smoke->width, smoke->height,
++                smoke->hold_ms, smoke->frame_verified ? "true" : "false",
++                smoke->non_clear_pixels, smoke->exit_reason, smoke->exit_message);
 +        return true;
 +    }
 +    if (!(file = fopen(smoke->result_path, "wb")))
@@ -192,10 +209,14 @@ index 00000000..240fdd98
 +    fprintf(file,
 +            "{\"status\":\"%s\",\"stage\":\"%s\",\"frames\":%u,"
 +            "\"target_frames\":%u,\"elapsed_ms\":%" PRIu64 ",\"fps\":%.3f,"
-+            "\"width\":%u,\"height\":%u,\"sync_interval\":%u}\n",
++            "\"width\":%u,\"height\":%u,\"sync_interval\":%u,\"hold_ms\":%u,"
++            "\"frame_verified\":%s,\"non_clear_pixels\":%u,"
++            "\"exit_reason\":\"%s\",\"exit_message\":%u}\n",
 +            passed ? "PASS" : "FAIL", smoke->stage, smoke->rendered_frames,
 +            smoke->target_frames, smoke->elapsed_ms, fps, smoke->width, smoke->height,
-+            smoke->sync_interval);
++            smoke->sync_interval, smoke->hold_ms,
++            smoke->frame_verified ? "true" : "false", smoke->non_clear_pixels,
++            smoke->exit_reason, smoke->exit_message);
 +    return fclose(file) == 0;
 +}
 +
@@ -206,6 +227,44 @@ index 00000000..240fdd98
 +    fprintf(stderr, "VKD3D_GRAPHICS_SMOKE FAIL: stage=%s hr=%#lx.\n", stage, hr);
 +    graphics_smoke_checkpoint(smoke, "FAILED", stage);
 +    return false;
++}
++
++static const char *graphics_smoke_message_name(UINT message)
++{
++    switch (message)
++    {
++        case WM_CLOSE:
++            return "WM_CLOSE";
++        case WM_DESTROY:
++            return "WM_DESTROY";
++        case WM_NCDESTROY:
++            return "WM_NCDESTROY";
++        case WM_QUIT:
++            return "WM_QUIT";
++        default:
++            return NULL;
++    }
++}
++
++static void graphics_smoke_record_message(struct graphics_smoke *smoke, const MSG *msg)
++{
++    const char *name;
++
++    if (!(name = graphics_smoke_message_name(msg->message)))
++        return;
++
++    if (!strcmp(smoke->exit_reason, "none"))
++    {
++        smoke->exit_reason = name;
++        smoke->exit_message = msg->message;
++        smoke->exit_wparam = msg->wParam;
++        smoke->exit_lparam = msg->lParam;
++    }
++    fprintf(stderr,
++            "VKD3D_GRAPHICS_SMOKE MESSAGE: name=%s id=%#x wparam=%" PRIuPTR
++            " lparam=%" PRIdPTR " frames=%u.\n",
++            name, msg->message, (uintptr_t)msg->wParam, (intptr_t)msg->lParam,
++            smoke->rendered_frames);
 +}
 +
 +static void graphics_smoke_close_window(struct graphics_smoke *smoke)
@@ -239,14 +298,16 @@ index 00000000..240fdd98
 +    };
 +    D3D12_ROOT_SIGNATURE_DESC root_signature_desc;
 +    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc;
++    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc;
 +    D3D12_RESOURCE_DESC resource_desc;
 +    D3D12_HEAP_PROPERTIES heap_properties;
 +    D3D12_RANGE read_range = {0, 0};
-+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc;
++    D3D12_HEAP_PROPERTIES readback_heap_desc;
++    D3D12_RESOURCE_DESC readback_resource_desc;
 +    D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle;
 +    ID3DBlob *root_signature_blob;
-+    HRESULT hr;
 +    void *mapped_data;
++    HRESULT hr;
 +    unsigned int i;
 +
 +    memset(&root_signature_desc, 0, sizeof(root_signature_desc));
@@ -274,6 +335,7 @@ index 00000000..240fdd98
 +    pipeline_desc.PS.pShaderBytecode = g_ps_main;
 +    pipeline_desc.PS.BytecodeLength = sizeof(g_ps_main);
 +    demo_rasterizer_desc_init_default(&pipeline_desc.RasterizerState);
++    pipeline_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
 +    demo_blend_desc_init_default(&pipeline_desc.BlendState);
 +    pipeline_desc.DepthStencilState.DepthEnable = FALSE;
 +    pipeline_desc.DepthStencilState.StencilEnable = FALSE;
@@ -318,7 +380,8 @@ index 00000000..240fdd98
 +        return graphics_smoke_fail(smoke, "vertex_map", hr);
 +    memcpy(mapped_data, vertices, sizeof(vertices));
 +    ID3D12Resource_Unmap(smoke->vertex_buffer, 0, NULL);
-+    smoke->vertex_buffer_view.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(smoke->vertex_buffer);
++    smoke->vertex_buffer_view.BufferLocation =
++            ID3D12Resource_GetGPUVirtualAddress(smoke->vertex_buffer);
 +    smoke->vertex_buffer_view.StrideInBytes = sizeof(*vertices);
 +    smoke->vertex_buffer_view.SizeInBytes = sizeof(vertices);
 +
@@ -340,6 +403,36 @@ index 00000000..240fdd98
 +        ID3D12Device_CreateRenderTargetView(smoke->device, smoke->render_targets[i], NULL, rtv_handle);
 +        rtv_handle.ptr += smoke->rtv_descriptor_size;
 +    }
++
++    graphics_smoke_set_stage(smoke, "frame_readback");
++    memset(&smoke->frame_footprint, 0, sizeof(smoke->frame_footprint));
++    smoke->frame_footprint.Footprint.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++    smoke->frame_footprint.Footprint.Width = smoke->width;
++    smoke->frame_footprint.Footprint.Height = smoke->height;
++    smoke->frame_footprint.Footprint.Depth = 1;
++    smoke->frame_footprint.Footprint.RowPitch =
++            (smoke->width * 4u + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) &
++            ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
++    smoke->frame_readback_size =
++            (UINT64)smoke->frame_footprint.Footprint.RowPitch * smoke->height;
++    memset(&readback_heap_desc, 0, sizeof(readback_heap_desc));
++    readback_heap_desc.Type = D3D12_HEAP_TYPE_READBACK;
++    readback_heap_desc.CreationNodeMask = 1;
++    readback_heap_desc.VisibleNodeMask = 1;
++    memset(&readback_resource_desc, 0, sizeof(readback_resource_desc));
++    readback_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++    readback_resource_desc.Width = smoke->frame_readback_size;
++    readback_resource_desc.Height = 1;
++    readback_resource_desc.DepthOrArraySize = 1;
++    readback_resource_desc.MipLevels = 1;
++    readback_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
++    readback_resource_desc.SampleDesc.Count = 1;
++    readback_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++    if (FAILED(hr = ID3D12Device_CreateCommittedResource(smoke->device,
++            &readback_heap_desc, D3D12_HEAP_FLAG_NONE, &readback_resource_desc,
++            D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource,
++            (void **)&smoke->frame_readback)))
++        return graphics_smoke_fail(smoke, "frame_readback", hr);
 +
 +    graphics_smoke_set_stage(smoke, "fence");
 +    if (FAILED(hr = ID3D12Device_CreateFence(smoke->device, 0, D3D12_FENCE_FLAG_NONE,
@@ -371,6 +464,67 @@ index 00000000..240fdd98
 +    return true;
 +}
 +
++static unsigned int graphics_smoke_channel_delta(uint8_t a, uint8_t b)
++{
++    return a > b ? a - b : b - a;
++}
++
++static bool graphics_smoke_verify_frame(struct graphics_smoke *smoke)
++{
++    D3D12_RANGE read_range;
++    D3D12_RANGE written_range = {0, 0};
++    const uint8_t *pixels;
++    const uint8_t *clear_pixel;
++    const uint8_t *center_pixel;
++    void *mapped_data;
++    unsigned int minimum_pixels;
++    unsigned int x, y;
++    HRESULT hr;
++
++    read_range.Begin = 0;
++    read_range.End = (SIZE_T)smoke->frame_readback_size;
++    if (FAILED(hr = ID3D12Resource_Map(smoke->frame_readback, 0, &read_range, &mapped_data)))
++        return graphics_smoke_fail(smoke, "frame_readback_map", hr);
++
++    pixels = mapped_data;
++    clear_pixel = pixels;
++    center_pixel = pixels + (size_t)(smoke->height / 2u) *
++            smoke->frame_footprint.Footprint.RowPitch + (size_t)(smoke->width / 2u) * 4u;
++    smoke->non_clear_pixels = 0;
++    for (y = 0; y < smoke->height; ++y)
++    {
++        const uint8_t *row = pixels + (size_t)y * smoke->frame_footprint.Footprint.RowPitch;
++        for (x = 0; x < smoke->width; ++x)
++        {
++            const uint8_t *pixel = row + (size_t)x * 4u;
++            if (graphics_smoke_channel_delta(pixel[0], clear_pixel[0]) >
++                        VKD3D_GRAPHICS_SMOKE_PIXEL_TOLERANCE ||
++                    graphics_smoke_channel_delta(pixel[1], clear_pixel[1]) >
++                        VKD3D_GRAPHICS_SMOKE_PIXEL_TOLERANCE ||
++                    graphics_smoke_channel_delta(pixel[2], clear_pixel[2]) >
++                        VKD3D_GRAPHICS_SMOKE_PIXEL_TOLERANCE)
++                ++smoke->non_clear_pixels;
++        }
++    }
++    fprintf(stderr,
++            "VKD3D_GRAPHICS_SMOKE READBACK: clear_bgra=%u,%u,%u,%u "
++            "center_bgra=%u,%u,%u,%u non_clear_pixels=%u/%u.\n",
++            clear_pixel[0], clear_pixel[1], clear_pixel[2], clear_pixel[3],
++            center_pixel[0], center_pixel[1], center_pixel[2], center_pixel[3],
++            smoke->non_clear_pixels, smoke->width * smoke->height);
++    ID3D12Resource_Unmap(smoke->frame_readback, 0, &written_range);
++
++    minimum_pixels = smoke->width * smoke->height *
++            VKD3D_GRAPHICS_SMOKE_MIN_GEOMETRY_PERCENT / 100u;
++    if (!minimum_pixels)
++        minimum_pixels = 1;
++    if (smoke->non_clear_pixels < minimum_pixels)
++        return graphics_smoke_fail(smoke, "frame_readback_no_geometry", E_FAIL);
++
++    smoke->frame_verified = true;
++    return true;
++}
++
 +static void graphics_smoke_render_frame(struct demo_window *window, void *user_data)
 +{
 +    struct graphics_smoke *smoke = user_data;
@@ -378,11 +532,15 @@ index 00000000..240fdd98
 +    D3D12_RESOURCE_BARRIER barrier;
 +    D3D12_VIEWPORT viewport;
 +    D3D12_RECT scissor;
++    D3D12_TEXTURE_COPY_LOCATION copy_destination;
++    D3D12_TEXTURE_COPY_LOCATION copy_source;
 +    float clear_colour[4];
++    bool verify_frame;
 +    HRESULT hr;
 +
 +    if (smoke->rendered_frames >= smoke->target_frames)
 +        return;
++    verify_frame = smoke->rendered_frames + 1u == smoke->target_frames;
 +
 +    if (FAILED(hr = ID3D12CommandAllocator_Reset(smoke->command_allocator)))
 +    {
@@ -397,6 +555,7 @@ index 00000000..240fdd98
 +    }
 +
 +    ID3D12GraphicsCommandList_SetGraphicsRootSignature(smoke->command_list, smoke->root_signature);
++    ID3D12GraphicsCommandList_SetPipelineState(smoke->command_list, smoke->pipeline_state);
 +    viewport.TopLeftX = 0.0f;
 +    viewport.TopLeftY = 0.0f;
 +    viewport.Width = (float)smoke->width;
@@ -434,8 +593,25 @@ index 00000000..240fdd98
 +    ID3D12GraphicsCommandList_DrawInstanced(smoke->command_list, 3, 1, 0, 0);
 +
 +    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
++    barrier.Transition.StateAfter = verify_frame ? D3D12_RESOURCE_STATE_COPY_SOURCE :
++            D3D12_RESOURCE_STATE_PRESENT;
 +    ID3D12GraphicsCommandList_ResourceBarrier(smoke->command_list, 1, &barrier);
++    if (verify_frame)
++    {
++        memset(&copy_destination, 0, sizeof(copy_destination));
++        copy_destination.pResource = smoke->frame_readback;
++        copy_destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++        copy_destination.PlacedFootprint = smoke->frame_footprint;
++        memset(&copy_source, 0, sizeof(copy_source));
++        copy_source.pResource = smoke->render_targets[smoke->frame_index];
++        copy_source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++        copy_source.SubresourceIndex = 0;
++        ID3D12GraphicsCommandList_CopyTextureRegion(smoke->command_list,
++                &copy_destination, 0, 0, 0, &copy_source, NULL);
++        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
++        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
++        ID3D12GraphicsCommandList_ResourceBarrier(smoke->command_list, 1, &barrier);
++    }
 +    if (FAILED(hr = ID3D12GraphicsCommandList_Close(smoke->command_list)))
 +    {
 +        graphics_smoke_fail(smoke, "command_list_close_frame", hr);
@@ -451,6 +627,8 @@ index 00000000..240fdd98
 +    }
 +    if (!graphics_smoke_wait_frame(smoke))
 +        goto done;
++    if (verify_frame && !graphics_smoke_verify_frame(smoke))
++        goto done;
 +
 +    smoke->rendered_frames++;
 +    smoke->frame_index = demo_swapchain_get_current_back_buffer_index(smoke->swapchain);
@@ -462,7 +640,9 @@ index 00000000..240fdd98
 +    {
 +        smoke->elapsed_ms = graphics_smoke_now_ms() - smoke->start_ms;
 +        smoke->stage = "complete";
-+        graphics_smoke_close_window(smoke);
++        graphics_smoke_checkpoint(smoke, "PASSED", "complete");
++        if (!smoke->hold_ms)
++            graphics_smoke_close_window(smoke);
 +    }
 +    return;
 +
@@ -477,6 +657,7 @@ index 00000000..240fdd98
 +
 +    while (count++ < 64 && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
 +    {
++        graphics_smoke_record_message(smoke, &msg);
 +        if (msg.message == WM_QUIT)
 +        {
 +            smoke->window_alive = false;
@@ -485,7 +666,19 @@ index 00000000..240fdd98
 +        TranslateMessage(&msg);
 +        DispatchMessageW(&msg);
 +        if (smoke->demo.quit)
++        {
++            if (!strcmp(smoke->exit_reason, "none"))
++            {
++                smoke->exit_reason = "demo_quit";
++                smoke->exit_message = msg.message;
++                smoke->exit_wparam = msg.wParam;
++                smoke->exit_lparam = msg.lParam;
++            }
++            fprintf(stderr,
++                    "VKD3D_GRAPHICS_SMOKE MESSAGE: demo_quit after=%#x frames=%u.\n",
++                    msg.message, smoke->rendered_frames);
 +            PostQuitMessage(0);
++        }
 +    }
 +    return smoke->window_alive;
 +}
@@ -500,6 +693,37 @@ index 00000000..240fdd98
 +            break;
 +        graphics_smoke_render_frame(smoke->window, smoke);
 +    }
++}
++
++static void graphics_smoke_hold_frame(struct graphics_smoke *smoke)
++{
++    uint64_t start_ms;
++
++    if (!smoke->hold_ms || !smoke->window_alive)
++        return;
++
++    start_ms = graphics_smoke_now_ms();
++    fprintf(stderr, "VKD3D_GRAPHICS_SMOKE HOLD: begin duration_ms=%u.\n", smoke->hold_ms);
++    graphics_smoke_checkpoint(smoke, "HOLDING", "complete");
++    while (smoke->window_alive)
++    {
++        uint64_t elapsed_ms = graphics_smoke_now_ms() - start_ms;
++        DWORD wait_ms;
++
++        if (elapsed_ms >= smoke->hold_ms)
++            break;
++        if (!graphics_smoke_pump_messages(smoke))
++            break;
++        wait_ms = (DWORD)(smoke->hold_ms - elapsed_ms);
++        if (wait_ms > 50)
++            wait_ms = 50;
++        MsgWaitForMultipleObjects(0, NULL, FALSE, wait_ms, QS_ALLINPUT);
++    }
++    fprintf(stderr,
++            "VKD3D_GRAPHICS_SMOKE HOLD: end elapsed_ms=%" PRIu64
++            " window_alive=%u exit_reason=%s.\n",
++            graphics_smoke_now_ms() - start_ms, smoke->window_alive ? 1 : 0,
++            smoke->exit_reason);
 +}
 +
 +static bool graphics_smoke_load_modules(struct graphics_smoke *smoke)
@@ -609,6 +833,8 @@ index 00000000..240fdd98
 +        demo_destroy_event(smoke->fence_event);
 +    if (smoke->fence)
 +        ID3D12Fence_Release(smoke->fence);
++    if (smoke->frame_readback)
++        ID3D12Resource_Release(smoke->frame_readback);
 +    if (smoke->vertex_buffer)
 +        ID3D12Resource_Release(smoke->vertex_buffer);
 +    if (smoke->command_list)
@@ -652,7 +878,9 @@ index 00000000..240fdd98
 +    smoke.height = VKD3D_GRAPHICS_SMOKE_DEFAULT_HEIGHT;
 +    smoke.sync_interval = VKD3D_GRAPHICS_SMOKE_DEFAULT_SYNC_INTERVAL;
 +    smoke.target_frames = VKD3D_GRAPHICS_SMOKE_DEFAULT_FRAMES;
++    smoke.hold_ms = VKD3D_GRAPHICS_SMOKE_DEFAULT_HOLD_MS;
 +    smoke.stage = "startup";
++    smoke.exit_reason = "none";
 +    smoke.result_path = graphics_smoke_argument(argc, argv, "--result");
 +    smoke.checkpoint_path = graphics_smoke_argument(argc, argv, "--checkpoint");
 +
@@ -684,9 +912,18 @@ index 00000000..240fdd98
 +        fprintf(stderr, "VKD3D_GRAPHICS_SMOKE FAIL: --sync-interval must be 0 or 1.\n");
 +        return EXIT_FAILURE;
 +    }
++    if ((value = graphics_smoke_argument(argc, argv, "--hold-ms")) &&
++            (!graphics_smoke_parse_uint(value, 0, VKD3D_GRAPHICS_SMOKE_MAX_HOLD_MS,
++            &smoke.hold_ms)))
++    {
++        fprintf(stderr, "VKD3D_GRAPHICS_SMOKE FAIL: --hold-ms must be 0 through %u.\n",
++                VKD3D_GRAPHICS_SMOKE_MAX_HOLD_MS);
++        return EXIT_FAILURE;
++    }
 +
-+    fprintf(stderr, "VKD3D_GRAPHICS_SMOKE CONFIG: frames=%u size=%ux%u sync_interval=%u.\n",
-+            smoke.target_frames, smoke.width, smoke.height, smoke.sync_interval);
++    fprintf(stderr,
++            "VKD3D_GRAPHICS_SMOKE CONFIG: frames=%u size=%ux%u sync_interval=%u hold_ms=%u.\n",
++            smoke.target_frames, smoke.width, smoke.height, smoke.sync_interval, smoke.hold_ms);
 +    graphics_smoke_checkpoint(&smoke, "RUNNING", "startup");
 +
 +    if (!demo_init(&smoke.demo, &smoke))
@@ -708,7 +945,10 @@ index 00000000..240fdd98
 +
 +    fprintf(stderr, "VKD3D_GRAPHICS_SMOKE DEVICE: initialized.\n");
 +    graphics_smoke_run_loop(&smoke);
-+    passed = smoke.rendered_frames == smoke.target_frames && !smoke.failure_hr;
++    passed = smoke.rendered_frames == smoke.target_frames && !smoke.failure_hr &&
++            smoke.frame_verified;
++    if (passed)
++        graphics_smoke_hold_frame(&smoke);
 +
 +cleanup_window:
 +    graphics_smoke_close_window(&smoke);
@@ -721,8 +961,11 @@ index 00000000..240fdd98
 +    if (passed)
 +        smoke.stage = "complete";
 +    result_written = graphics_smoke_result(&smoke, passed);
-+    fprintf(stderr, "VKD3D_GRAPHICS_SMOKE FINAL: status=%s stage=%s frames=%u/%u result_written=%u.\n",
++    fprintf(stderr,
++            "VKD3D_GRAPHICS_SMOKE FINAL: status=%s stage=%s frames=%u/%u result_written=%u "
++            "exit_reason=%s exit_message=%#x.\n",
 +            passed && result_written ? "PASS" : "FAIL", smoke.stage,
-+            smoke.rendered_frames, smoke.target_frames, result_written ? 1 : 0);
++            smoke.rendered_frames, smoke.target_frames, result_written ? 1 : 0,
++            smoke.exit_reason, smoke.exit_message);
 +    return passed && result_written ? EXIT_SUCCESS : EXIT_FAILURE;
 +}

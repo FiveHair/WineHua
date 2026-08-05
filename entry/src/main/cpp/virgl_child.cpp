@@ -35,6 +35,8 @@
 namespace {
 
 using WinehuaVtestMain = int (*)(int argc, char** argv);
+using WinehuaVtestResetStopRequest = void (*)();
+using WinehuaVtestRequestStop = int (*)();
 using WinehuaVtestPresentCallback = int (*)(
     uint32_t texId, uint32_t width, uint32_t height, uint32_t format,
     uint32_t resourceFlags, uint64_t drawable, uint32_t serial,
@@ -70,6 +72,11 @@ std::condition_variable g_ipcChildCondition;
 IpcChildMode g_ipcChildMode = IpcChildMode::None;
 VtestIpcConfig g_vtestIpcConfig;
 OHIPCRemoteStub* g_virglIpcStub = nullptr;
+
+std::mutex g_vtestLifecycleMutex;
+WinehuaVtestRequestStop g_vtestRequestStop = nullptr;
+bool g_vtestRunActive = false;
+bool g_vtestStopPending = false;
 
 void ForwardPerfSummary(const std::string& path, std::atomic<bool>& stop)
 {
@@ -473,6 +480,18 @@ static int RunConfiguredVtestServer(const winehua::VirglHostConfig& config)
 
     NativeChildProcess_Args args = {};
     args.entryParams = launch.entryParams.data();
+    {
+        std::lock_guard<std::mutex> lock(g_vtestLifecycleMutex);
+        if (g_vtestRunActive)
+        {
+            OH_LOG_ERROR(LOG_APP,
+                         "[virgl-child] refusing concurrent in-process vtest run");
+            return -EBUSY;
+        }
+        g_vtestRunActive = true;
+        g_vtestStopPending = false;
+        g_vtestRequestStop = nullptr;
+    }
     OH_LOG_INFO(LOG_APP,
                 "[virgl-child] starting configured vtest server config=0x%{public}llx "
                 "shadow=%{public}s selector=%{public}s present=%{public}s",
@@ -485,6 +504,12 @@ static int RunConfiguredVtestServer(const winehua::VirglHostConfig& config)
         perfLogThread = std::thread(ForwardPerfSummary, config.logPath,
                                     std::ref(perfLogStop));
     Main(args);
+    {
+        std::lock_guard<std::mutex> lock(g_vtestLifecycleMutex);
+        g_vtestRequestStop = nullptr;
+        g_vtestRunActive = false;
+        g_vtestStopPending = false;
+    }
     perfLogStop.store(true, std::memory_order_relaxed);
     if (perfLogThread.joinable()) perfLogThread.join();
     winehua::ResetVirglSurfaces();
@@ -564,6 +589,21 @@ extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_RunConfigured
     return RunConfiguredVtestServer(config);
 }
 
+extern "C" __attribute__((visibility("default"))) int WinehuaVirgl_RequestStop()
+{
+    std::lock_guard<std::mutex> lock(g_vtestLifecycleMutex);
+    if (!g_vtestRunActive)
+        return 0;
+
+    g_vtestStopPending = true;
+    if (g_vtestRequestStop)
+        g_vtestRequestStop();
+    OH_LOG_INFO(LOG_APP,
+                "[virgl-child] in-process vtest stop %{public}s",
+                g_vtestRequestStop ? "delivered" : "queued");
+    return 1;
+}
+
 extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_Args args)
 {
     const char* entryParams = args.entryParams ? args.entryParams : "";
@@ -573,6 +613,8 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     char* socketPath;
     void* handle;
     WinehuaVtestMain vtestMain;
+    WinehuaVtestResetStopRequest resetStopRequest;
+    WinehuaVtestRequestStop requestStop;
     WinehuaVtestSetPresentCallback setPresentCallback;
     WinehuaVtestSetVulkanPresentCallback setVulkanPresentCallback;
     WinehuaVtestSetVulkanDeviceReleaseCallback setVulkanDeviceReleaseCallback;
@@ -629,6 +671,27 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
         return;
     }
 
+    resetStopRequest = reinterpret_cast<WinehuaVtestResetStopRequest>(
+        dlsym(handle, "winehua_vtest_reset_stop_request"));
+    requestStop = reinterpret_cast<WinehuaVtestRequestStop>(
+        dlsym(handle, "winehua_vtest_request_stop"));
+    if (!resetStopRequest || !requestStop)
+    {
+        OH_LOG_ERROR(LOG_APP,
+                     "[virgl-child] vtest lifecycle exports missing: %{public}s",
+                     dlerror());
+        dlclose(handle);
+        free(buffer);
+        return;
+    }
+    resetStopRequest();
+    {
+        std::lock_guard<std::mutex> lock(g_vtestLifecycleMutex);
+        g_vtestRequestStop = requestStop;
+        if (g_vtestStopPending)
+            g_vtestRequestStop();
+    }
+
     setPresentCallback = reinterpret_cast<WinehuaVtestSetPresentCallback>(
         dlsym(handle, "winehua_vtest_set_present_callback"));
     if (setPresentCallback)
@@ -666,6 +729,11 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     char arg6[] = "--socket-path";
     char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, socketPath, nullptr};
     int rc = vtestMain(8, argv);
+
+    {
+        std::lock_guard<std::mutex> lock(g_vtestLifecycleMutex);
+        g_vtestRequestStop = nullptr;
+    }
 
     OH_LOG_WARN(LOG_APP, "[virgl-child] vtest exited rc=%{public}d", rc);
     if (setVulkanDeviceReleaseCallback)
