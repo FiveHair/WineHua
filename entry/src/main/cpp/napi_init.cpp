@@ -546,16 +546,20 @@ static napi_value StopHostVulkanProbeNapi(napi_env env, napi_callback_info) {
 
 // -- NAPI: stopClient — 杀掉所有 Wine 进程 --
 static napi_value StopClient(napi_env, napi_callback_info) {
+    /* Stop the VirGL renderer before reaping its Wine descendants.  The
+     * renderer is itself an app-owned NCP child; killing the whole process
+     * tree first can bypass its bounded shutdown and leave a stale Venus ring
+     * across the next isolated session. */
+    winehua::GraphicsBroker::GetInstance().Stop();
     KillAllProcesses();
     WaylandServer::GetInstance()->ResetFirstFrame();
-    winehua::GraphicsBroker::GetInstance().Stop();
     return nullptr;
 }
 
 // -- NAPI: stopAll — 杀掉所有 Wine 进程 + 停 Wayland server --
 static napi_value StopAll(napi_env, napi_callback_info) {
-    KillAllProcesses();
     winehua::GraphicsBroker::GetInstance().Stop();
+    KillAllProcesses();
     WaylandServer::GetInstance()->Stop();
     return nullptr;
 }
