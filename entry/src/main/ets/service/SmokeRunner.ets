@@ -234,6 +234,7 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     'x64/winehua_gpu_diagnostics.exe',
     'x64/winehua_win32_driver.exe', 'x64/winehua_dxvk26_requirements.exe',
     'x64/winehua_d3d12_smoke.exe',
+    'x64/triangle.exe', 'x64/gears.exe',
     'x86/winehua_audio_smoke.exe', 'x86/winehua_graphics_smoke.exe',
     'x86/winehua_vulkan_smoke.exe', 'x86/winehua_d3d11_smoke.exe',
     'x86/winehua_d3d8_smoke.exe', 'x86/winehua_d3d_switch_cube.exe',

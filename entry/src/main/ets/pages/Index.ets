@@ -145,8 +145,8 @@ interface Vkd3dManualCheckpoint {
 @Component
 struct Index {
   @StorageLink('winehua.smoke.request') smokeRequestText: string = '';
-  @StorageLink('winehua.d3d.backend') d3dBackendText: string = 'dxvk_legacy';
-  @StorageLink('winehua.d3d.preference') d3dPreferenceText: string = 'dxvk_legacy';
+  @StorageLink('winehua.d3d.backend') d3dBackendText: string = 'vkd3d_limited_500k';
+  @StorageLink('winehua.d3d.preference') d3dPreferenceText: string = 'vkd3d_limited_500k';
   @StorageLink('winehua.game.path') gamePathText: string = '';
   @StorageLink('winehua.game.args') gameArguments: string[] = [];
   @StorageLink('winehua.experiment.names') experimentNames: string[] = [];
@@ -179,7 +179,7 @@ struct Index {
   private smokeRequest: SmokeLaunchRequest = defaultSmokeRequest();
   private smokeStarted: boolean = false;
   private cleanPrefixPrepared: boolean = false;
-  @State d3dBackend: string = 'dxvk_legacy';
+  @State d3dBackend: string = 'vkd3d_limited_500k';
   private gameTestMode: boolean = false;
   private gameStarted: boolean = false;
   private experimentMode: boolean = false;
@@ -859,8 +859,8 @@ struct Index {
   }
 
   private d3dPresentBackend(): string {
-    // A staged VKD3D DLL presents through the Vulkan/Venus path even though
-    // D3D11 remains on WineD3D. The product profile is explicit and default off.
+    // D3D12 uses VKD3D/Venus; D3D11 and DXGI use the validated DXVK Legacy
+    // overlays in the same default mixed session.
     return this.d3dBackend.indexOf('dxvk_') === 0 || this.isVkd3dExperiment() ||
       this.isVkd3dProfile() ?
       'venus_broker_present' : 'virgl_compositor';
@@ -871,11 +871,11 @@ struct Index {
       backend === 'vkd3d_limited_500k' ? backend : 'wined3d';
     this.d3dBackend = selected;
     this.d3dBackendText = selected;
-    // VKD3D is deliberately not persisted as the normal cold-start backend.
-    this.d3dPreferenceText = selected === 'vkd3d_limited_500k' ? 'dxvk_legacy' : selected;
+    // Persist an explicit choice; a fresh install defaults to the qualified VKD3D profile.
+    this.d3dPreferenceText = selected;
     this.statusText = selected === 'dxvk_legacy' ? 'DXVK Legacy' :
       (selected === 'dxvk_modern_2_6' ? 'DXVK Modern 2.6' :
-        (selected === 'vkd3d_limited_500k' ? 'VKD3D 2.6 Limited 500K（实验）' : 'WineD3D'));
+        (selected === 'vkd3d_limited_500k' ? 'VKD3D 2.6 Limited 500K (supported)' : 'WineD3D'));
     hilog.info(DOMAIN, 'GameTest', 'D3D backend selected=%{public}s', selected);
   }
 
@@ -1397,14 +1397,14 @@ struct Index {
         }
         .width('100%').margin({ bottom: 8 })
 
-        Button('VKD3D 2.6（500K 实验）')
+        Button('VKD3D 2.6 (supported, 500K)')
           .width('100%').height(34)
           .backgroundColor(this.d3dBackend === 'vkd3d_limited_500k' ? '#854' : '#333')
           .onClick(() => this.selectD3dBackend('vkd3d_limited_500k'))
           .margin({ bottom: 6 })
 
         if (this.d3dBackend === 'vkd3d_limited_500k') {
-          Text('仅 x64；资源描述符堆上限 500,000；查询 Meta 暂不可用。普通启动仍使用 DXVK Legacy。')
+          Text('Default mixed route: D3D12 -> VKD3D, D3D11/DXGI -> DXVK Legacy; x64 only, 500,000 descriptor limit, Query Meta unsupported.')
             .fontSize(11).fontColor('#d9a').maxLines(3)
             .width('100%').margin({ bottom: 6 })
           Text(this.vkd3dSmokeStatus)

@@ -321,6 +321,18 @@ assemble_pad() {
     [ -f "$vkd3d_root/x64/winehua-d3d12-smoke.exe" ] || \
         err "VKD3D-Proton x64 graphics smoke missing: $vkd3d_root/x64/winehua-d3d12-smoke.exe"
     [ -f "$vkd3d_root/manifest.json" ] || err "VKD3D-Proton manifest missing: $vkd3d_root/manifest.json"
+    # Keep the upstream VKD3D-Proton demos available as ordinary managed
+    # C:\\smoke programs. They are test assets, not runtime DLLs.
+    local vkd3d_upstream_demos="$WINEHUA/.temp/vkd3d-upstream-demos-20260806-payload"
+    [ -f "$vkd3d_upstream_demos/triangle.exe" ] || \
+        err "VKD3D-Proton upstream triangle demo missing: $vkd3d_upstream_demos/triangle.exe"
+    [ -f "$vkd3d_upstream_demos/gears.exe" ] || \
+        err "VKD3D-Proton upstream gears demo missing: $vkd3d_upstream_demos/gears.exe"
+    cp "$vkd3d_upstream_demos/triangle.exe" "$smoke_dir/x64/triangle.exe"
+    cp "$vkd3d_upstream_demos/gears.exe" "$smoke_dir/x64/gears.exe"
+    local vkd3d_upstream_triangle_sha vkd3d_upstream_gears_sha
+    vkd3d_upstream_triangle_sha="$(sha256sum "$smoke_dir/x64/triangle.exe" | awk '{print $1}')"
+    vkd3d_upstream_gears_sha="$(sha256sum "$smoke_dir/x64/gears.exe" | awk '{print $1}')"
     mkdir -p "$wine_data/vkd3d/limited-500k/x64"
     cp "$vkd3d_root/x64/d3d12.dll" "$wine_data/vkd3d/limited-500k/x64/d3d12.dll"
     cp "$vkd3d_root/manifest.json" "$wine_data/vkd3d/manifest.json"
@@ -330,7 +342,7 @@ assemble_pad() {
     # to the smoke executables: that would make the test layout look like a
     # game distribution and would force real games to carry WineHua-specific
     # DLLs.  SpawnWineProgram exposes this versioned directory through
-    # WINEDLLPATH only for a selected dxvk_* backend.
+    # WINEDLLPATH for the selected DXVK or mixed VKD3D backend.
     local smoke_program
     for smoke_program in winehua_audio_smoke winehua_graphics_smoke winehua_vulkan_smoke winehua_d3d11_smoke; do
         local smoke64="$BUILD_DIR/wine-ohos/programs/$smoke_program/x86_64-windows/$smoke_program.exe"
@@ -372,7 +384,7 @@ assemble_pad() {
     image_fetch_sha="$(sha256sum "$smoke_dir/assets/venus_image_fetch.spv" | awk '{print $1}')"
     combined_sample_sha="$(sha256sum "$smoke_dir/assets/venus_combined_sample.spv" | awk '{print $1}')"
     separated_sample_sha="$(sha256sum "$smoke_dir/assets/venus_separated_sample.spv" | awk '{print $1}')"
-    local smoke_suite_version="phase2-vulkan-dxvk-v10-vkd3d-default-off"
+    local smoke_suite_version="phase2-vulkan-dxvk-v10-vkd3d-default"
     local dxvk_commit dxvk_modern_commit mesa_commit virglrenderer_commit
     local guest_venus_icd_sha host_virglrenderer_sha venus_runtime_id
     dxvk_commit="$(git -c safe.directory="$DXVK_SRC" -C "$DXVK_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -450,6 +462,8 @@ EOF
     "x64/winehua_win32_driver.exe": "$driver64_sha",
     "x64/winehua_dxvk26_requirements.exe": "$requirements64_sha",
     "x64/winehua_d3d12_smoke.exe": "$vkd3d64_smoke_sha",
+    "x64/triangle.exe": "$vkd3d_upstream_triangle_sha",
+    "x64/gears.exe": "$vkd3d_upstream_gears_sha",
     "x86/winehua_audio_smoke.exe": "$audio32_sha",
     "x86/winehua_graphics_smoke.exe": "$graphics32_sha",
     "x86/winehua_vulkan_smoke.exe": "$vulkan32_sha",
@@ -468,7 +482,7 @@ EOF
 }
 EOF
     log "  managed smoke payload → smoke/{x64,x86}"
-    log "  VKD3D-Proton 2.6 limited-500K (default off) → vkd3d/limited-500k/x64 (sha256=$vkd3d64_d3d12_sha)"
+    log "  VKD3D-Proton 2.6 limited-500K (default mixed D3D12 profile) → vkd3d/limited-500k/x64 (sha256=$vkd3d64_d3d12_sha)"
 
     # fonts
     cp "$WINE_SRC/fonts/"*.ttf "$wine_data/share/wine/fonts/"

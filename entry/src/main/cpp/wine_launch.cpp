@@ -295,10 +295,16 @@ static bool UsesVulkanD3dBackend(const std::string& backend)
            backend == "vkd3d_limited_500k";
 }
 
+static bool UsesDxvkOverlay(const std::string& backend)
+{
+    return backend.rfind("dxvk_", 0) == 0 ||
+           backend == "vkd3d_limited_500k";
+}
+
 static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
                                        const LaunchParams& params)
 {
-    if (params.d3dBackend.rfind("dxvk_", 0) != 0) return;
+    if (!UsesDxvkOverlay(params.d3dBackend)) return;
 
     /* SetHostShadowProfile carries the selected diagnostic profile through
      * the host-side broker environment before Explorer is launched.  Keep

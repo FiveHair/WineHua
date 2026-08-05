@@ -313,7 +313,8 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
     if (WaylandServer::GetInstance()->IsDesktopMode())
         UpsertEnv(&envStrs, "WINEHUA_DESKTOP=shell");
     /* DXVK is a managed WineHua runtime overlay, never a game-provided DLL. */
-    if (options.d3dBackend.rfind("dxvk_", 0) == 0)
+    if (options.d3dBackend.rfind("dxvk_", 0) == 0 ||
+        options.d3dBackend == "vkd3d_limited_500k")
         OH_LOG_INFO(LOG_APP, "[WineProgram] managed D3D backend=%{public}s",
                     options.d3dBackend.c_str());
     UpsertEnv(&envStrs, "WINEHUA_WINE_UNIX_ARCH=x86_64");
@@ -504,7 +505,7 @@ napi_value RunWineProgram(napi_env env, napi_callback_info info)
     options.windowsExePath = GetString(env, args[0], "windowsExePath");
     options.workingDirectory = GetString(env, args[0], "workingDirectory");
     options.prefixMode = GetString(env, args[0], "prefixMode", "reuse");
-    options.d3dBackend = GetString(env, args[0], "d3dBackend", "dxvk_legacy");
+    options.d3dBackend = GetString(env, args[0], "d3dBackend", "vkd3d_limited_500k");
     options.presentBackend = GetString(env, args[0], "presentBackend", "virgl_compositor");
     options.automationMode = GetBool(env, args[0], "automationMode", false);
     ReadStringArray(env, args[0], "argv", &options.argv);

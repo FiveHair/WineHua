@@ -2,18 +2,18 @@
 
 > Updated: 2026-08-05
 
-> Status: isolated experimental implementation. No vkd3d-proton DLL is
-> packaged, loaded, or selected by the product runtime.
+> Status: qualified limited-support product profile. VKD3D-Proton 2.6 is
+> packaged and selected for default D3D12 launches after the recorded 910 gates.
 
 ## Objective
 
-Investigate a default-off vkd3d-proton 2.6 profile for devices whose Vulkan
+Document the qualified vkd3d-proton 2.6 limited-500K profile for devices whose Vulkan
 driver supports a 500,000-entry bindless resource view array, without claiming
 upstream vkd3d-proton compatibility or changing the validated DXVK paths.
 
 The upstream-compatible profile remains unchanged: resource-view descriptor
-arrays need 1,000,000 entries. The experimental profile must never fabricate a
-Vulkan feature or limit, and it must never make a device eligible for Gate B.
+arrays need 1,000,000 entries. The limited profile never fabricates a Vulkan feature or limit. It is a real
+x64 product profile with an explicit 500,000 descriptor-heap ceiling.
 
 ## Current 920 Evidence
 
@@ -47,7 +47,7 @@ runtime integration claim.
 | Profile | Resource view limits | Sampler limits | Input attachments | Gate status |
 | --- | --- | --- | --- | --- |
 | Upstream 2.6 / 2.8 / 2.9 | >= 1,000,000 per-stage and per-set | >= 2,048 | Informational | May qualify for Gate B only after all normal gates pass. |
-| Experimental 2.6 limited 500K | >= 500,000 per-stage and per-set | >= 2,048 | Informational | Default off; evidence candidate only; never directly qualifies Gate B. |
+| Product 2.6 limited 500K | >= 500,000 per-stage and per-set | >= 2,048 | Informational | Qualified limited support on the recorded 910 capability hash; requests above 500,000 remain unsupported. |
 
 The resource limits are Sampled Images, Storage Images, and Storage Buffers.
 The vkd3d 2.6 bindless path creates a 1,000,000-entry resource layout and a
@@ -62,7 +62,7 @@ cannot be silently truncated by the experimental profile.
 2. Create `feature/vkd3d-capability-probe` in an isolated vkd3d-proton checkout
    from v2.6 commit `3e5aab6fb3e18f81a71b339be4cb5cdf55140980`. Do not add a
    product submodule or alter a main-repository gitlink.
-3. Add a separately named, default-off 500K build profile. Reduce every
+3. Add a separately named 500K build profile and expose it as the qualified D3D12 default. Reduce every
    descriptor-layout, variable-count allocation, descriptor-heap maximum,
    host mapping, and reported D3D12 view-heap limit coherently. Keep sampler
    heaps at 2,048.
@@ -86,8 +86,8 @@ cannot be silently truncated by the experimental profile.
   enabled features than they expose.
 - Do not change `master`, the validated DXVK Legacy path, or the Modern 2.6
   profile.
-- Do not enable D3D12 by default and do not treat a built DLL as a functional
-  integration result.
+- Keep the default D3D12 route limited to the qualified x64 VKD3D profile; a built
+  DLL alone is never sufficient evidence.
 - Capability hash, Host driver, Mesa/Venus, or Wine Vulkan changes invalidate
   the audit and require Gate A again.
 
@@ -130,7 +130,7 @@ unqualified; it was not changed or hidden by a Legacy fallback.
 The limited-500K track has therefore completed its descriptor, Gate C, BDA,
 multiple-queue, physical BrokerPresent, and validated product-path regression
 checks on the recorded 910 artifacts. It may proceed to a carefully selected
-real DX12 title investigation with descriptor-heap telemetry. This is not a
-general-support decision: D3D12 remains default-off, a heap request above
-500,000 is unsupported, and any capability/driver/Mesa/Venus/Wine change
-invalidates the qualification.
+real DX12 title investigation with descriptor-heap telemetry. This is formal limited support rather than unrestricted upstream support: default
+D3D12 launches use VKD3D 2.6 on x64, D3D11/DXGI remain on DXVK Legacy, a heap
+request above 500,000 is rejected, Query Meta remains unsupported, and any
+capability/driver/Mesa/Venus/Wine change invalidates the qualification.

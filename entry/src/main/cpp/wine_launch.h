@@ -13,7 +13,7 @@ struct LaunchParams {
     std::string sockName;
     std::string winehuaBin;
     std::string prefixDir;
-    std::string d3dBackend = "dxvk_legacy";
+    std::string d3dBackend = "vkd3d_limited_500k";
     bool automationMode = false;
     std::vector<std::string> envStrs;
     std::vector<char*> envp;

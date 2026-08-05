@@ -132,3 +132,18 @@ make NATIVE_ARCH=x86_64
 - [PHASE2_DXVK_STATUS_MEMO.md](./PHASE2_DXVK_STATUS_MEMO.md) — DXVK 活文档
 - [BUILD_GUIDE.md](./BUILD_GUIDE.md) — 构建指南
 - [.claude/rules/submodule-workflow.md](../.claude/rules/submodule-workflow.md) — Submodule 管理方案
+
+
+### 10. VKD3D-Proton 2.6 limited-500K official D3D12 profile
+
+The recorded Maleoon 910 qualification is now integrated as the product D3D12
+default. The mixed session loads VKD3D-Proton 2.6 for d3d12.dll and the
+validated DXVK Legacy 1.10.3 overlays for d3d11.dll and dxgi.dll. The
+profile is x64-only, caps shader-visible resource descriptors at 500,000, and
+does not advertise Query Meta support. The official VKD3D triangle and gears
+demos rendered successfully on 910, alongside the descriptor, Gate C, BDA,
+multi-queue, physical-present, and DXVK regression evidence.
+
+A capability, host-driver, Mesa/Venus, or Wine runtime change requires the
+capability audit and real-device gates to be repeated before shipping a new
+runtime payload.
