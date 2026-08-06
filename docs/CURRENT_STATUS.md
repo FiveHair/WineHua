@@ -153,3 +153,15 @@ required.
 A capability, host-driver, Mesa/Venus, or Wine runtime change requires the
 capability audit and real-device gates to be repeated before shipping a new
 runtime payload.
+
+### Revalidation checkpoint (2026-08-06)
+
+The persistent-map synchronization change requires a fresh Gate C validation
+before real game testing. Two clean uninstall/reinstall runs on Maleoon 910
+reached the readback compare stage but failed with
+`buffer_readback_mismatch` (`offset=0 expected=11 actual=0`); no frame count was
+credited. The VKD3D `triangle.exe` and `gears.exe` demos still rendered, and the
+clean-prefix DXVK Legacy x86/x64 plus cube regression remained passing. The
+readback synchronization direction is therefore still under investigation,
+and the product must remain on the isolated branch with no game qualification
+or remote push until accurate smoke passes again.
