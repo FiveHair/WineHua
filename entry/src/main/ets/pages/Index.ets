@@ -844,8 +844,12 @@ struct Index {
        * keeps uncoalesced notification but disables its per-submit trace. */
       environment['VN_WINEHUA_ALWAYS_NOTIFY_RING'] = '1';
       environment['VN_WINEHUA_RING_NOTIFY_TRACE'] = diagnosticVkd3d ? '1' : '0';
-      // Query Meta is outside the qualified 2.6 limited-500K product profile.
-      environment['VKD3D_WINEHUA_DISABLE_QUERY_META'] = '1';
+      // Keep the original Gate C experiment isolated from query paths it does
+      // not exercise. Product/game launches must initialize Query Meta because
+      // D3D12 predication and query resolve use its descriptor set layouts.
+      if (this.isVkd3dExperiment()) {
+        environment['VKD3D_WINEHUA_DISABLE_QUERY_META'] = '1';
+      }
     }
     if (diagnosticVkd3d) environment['WINEDEBUG'] = '+loaddll,+module';
     return environment;
@@ -1409,7 +1413,7 @@ struct Index {
           .margin({ bottom: 6 })
 
         if (this.d3dBackend === 'vkd3d_limited_500k') {
-          Text('Default mixed route: D3D12 -> VKD3D, D3D11/DXGI -> DXVK Legacy; x64 only, 500,000 descriptor limit, Query Meta unsupported.')
+          Text('Default mixed route: D3D12 -> VKD3D, D3D11/DXGI -> DXVK Legacy; x64 only, 500,000 descriptor limit, Query Meta compatibility enabled.')
             .fontSize(11).fontColor('#d9a').maxLines(3)
             .width('100%').margin({ bottom: 6 })
           Text(this.vkd3dSmokeStatus)
