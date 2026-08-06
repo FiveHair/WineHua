@@ -101,7 +101,26 @@ index 72fbb39c..be3d475f 100644
      return true;
  }
 
-@@ -5857,6 +5881,17 @@ HRESULT d3d12_descriptor_heap_create(struct d3d12_device *device,
+@@ -1627,6 +1651,18 @@ static HRESULT STDMETHODCALLTYPE d3d12_resource_Map(d3d12_resource_iface *iface,
+         TRACE("Returning pointer %p.\n", *data);
+     }
+
++    /* Mark upload allocations as CPU-written even when an application keeps
++     * the D3D12 resource persistently mapped and never calls Unmap. Venus uses
++     * this explicit flush as write intent and publishes the current contents
++     * immediately before queue submission. Readback heaps are deliberately
++     * excluded so stale Guest shadow data cannot overwrite Host GPU writes. */
++    if (vkd3d_winehua_force_coherent_map_sync()
++            && resource->heap_properties.Type == D3D12_HEAP_TYPE_UPLOAD)
++    {
++        const D3D12_RANGE write_intent_range = {0, 1};
++        d3d12_resource_flush_range(resource, sub_resource, &write_intent_range);
++    }
++
+     d3d12_resource_invalidate_range(resource, sub_resource, read_range);
+     return S_OK;
+ }
+@@ -5857,6 +5893,17 @@ HRESULT d3d12_descriptor_heap_create(struct d3d12_device *device,
          return E_INVALIDARG;
      }
 
