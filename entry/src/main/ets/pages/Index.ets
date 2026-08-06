@@ -86,6 +86,16 @@ interface ProcessInfo {
   state: string;
 }
 
+interface WineProcessHandle {
+  found: boolean;
+  pid: number;
+  status: string;
+  startTimestamp: number;
+  endTimestamp: number;
+  exitCode: number | null;
+  exitCodeSource: string;
+}
+
 interface Vkd3dManualResult {
   status: string;
   stage: string;
@@ -159,6 +169,8 @@ struct Index {
   @StorageLink('winehua.game.click_client_x_permille') gameClickClientXPermille: number = -1;
   @StorageLink('winehua.game.click_client_y_permille') gameClickClientYPermille: number = -1;
   @StorageLink('winehua.perf.profile') perfProfileText: string = 'baseline';
+  @StorageLink('winehua.launch.generation') @Watch('onLaunchGenerationChanged')
+  launchGeneration: number = 0;
   @State state: string = 'idle';
   @State prefixReady: boolean = false;
   @State statusText: string = '检测中...';
@@ -181,7 +193,8 @@ struct Index {
   private cleanPrefixPrepared: boolean = false;
   @State d3dBackend: string = 'vkd3d_limited_500k';
   private gameTestMode: boolean = false;
-  private gameStarted: boolean = false;
+  private launchSnapshotReady: boolean = false;
+  private lastStartedGameGeneration: number = -1;
   private experimentMode: boolean = false;
   private experimentStaged: boolean = false;
   private pendingVkd3dSmoke: boolean = false;
@@ -191,7 +204,7 @@ struct Index {
   private manualVkd3dSmokePid: number = -1;
   private manualVkd3dSmokeExited: boolean = false;
 
-  aboutToAppear(): void {
+  private applyLaunchSnapshot(): void {
     this.smokeRequest = parseSmokeRequest(this.smokeRequestText);
     this.automationMode = this.smokeRequest.mode === 'smoke';
     this.experimentMode = this.smokeRequest.mode === 'experiment';
@@ -206,6 +219,35 @@ struct Index {
     this.sockPath = `${this.prefixRoot}/wine-wayland`;
     this.curDir = this.driveC;
     this.hasRawfileWineData = this.detectRawfileWineData();
+  }
+
+  private onLaunchGenerationChanged(propertyName: string): void {
+    if (!this.launchSnapshotReady) return;
+    const request = parseSmokeRequest(this.smokeRequestText);
+    hilog.info(DOMAIN, 'GameTest',
+      'warm launch property=%{public}s generation=%{public}d mode=%{public}s path=%{public}s',
+      propertyName, this.launchGeneration, request.mode, this.gamePathText);
+    const reusableDesktopSession = !this.automationMode && !this.experimentMode &&
+      this.prefixMode === 'reuse';
+    // Smoke and experiment requests own isolated session/page lifecycle and
+    // continue to require a cold Ability start. A normal game request can be
+    // dispatched into the already-running reusable desktop session.
+    if (request.mode !== 'game' || request.prefixMode !== 'reuse' || !reusableDesktopSession) {
+      hilog.warn(DOMAIN, 'GameTest',
+        'warm launch ignored; reusable desktop session and cold isolation boundaries preserved');
+      return;
+    }
+    this.applyLaunchSnapshot();
+    if (this.prefixReady && !this.initInProgress) {
+      this.startRequestedGame();
+    } else if (!this.initInProgress && this.state === 'idle') {
+      setTimeout(() => this.doInit(), 0);
+    }
+  }
+
+  aboutToAppear(): void {
+    this.applyLaunchSnapshot();
+    this.launchSnapshotReady = true;
 
     testNapi.setStateCallback((s: string) => {
       hilog.info(DOMAIN, 'wine', 'state: %{public}s', s);
@@ -1030,8 +1072,10 @@ struct Index {
   }
 
   private startRequestedGame = (): void => {
-    if (!this.gameTestMode || this.gameStarted || this.gamePathText.length === 0) return;
-    this.gameStarted = true;
+    if (!this.gameTestMode ||
+      this.lastStartedGameGeneration === this.launchGeneration ||
+      this.gamePathText.length === 0) return;
+    this.lastStartedGameGeneration = this.launchGeneration;
     let gamePath = this.gamePathText;
     const gameArguments = this.gameArguments.slice();
     if (this.experimentMode) {
@@ -1064,13 +1108,13 @@ struct Index {
       d3dBackend: this.d3dBackend,
       presentBackend: this.d3dPresentBackend(),
       automationMode: this.experimentMode
-    }) as ProcessInfo;
+    }) as WineProcessHandle;
     hilog.info(DOMAIN, 'GameTest',
       'game launch path=%{public}s argc=%{public}d env=%{public}d backend=%{public}s perf=%{public}s '
         + 'pid=%{public}d status=%{public}s',
       gamePath, this.gameArguments.length, this.d3dEnvKeys.length,
       this.d3dBackend, this.perfProfileText,
-      result.pid, result.state);
+      result.pid, result.status);
     if (this.experimentMode && this.experimentStaged &&
       this.smokeRequest.experimentResultName.length > 0) {
       this.monitorExperimentResult(this.smokeRequest.experimentId,
@@ -1098,12 +1142,12 @@ struct Index {
           d3dBackend: this.d3dBackend,
           presentBackend: this.d3dPresentBackend(),
           automationMode: false
-        }) as ProcessInfo;
+        }) as WineProcessHandle;
         hilog.info(DOMAIN, 'GameTest',
           'click driver title=%{public}s button=%{public}s relative=%{public}d,%{public}d '
             + 'pid=%{public}d status=%{public}s',
           titlePrefix, buttonText, clickXPermille, clickYPermille,
-          driverResult.pid, driverResult.state);
+          driverResult.pid, driverResult.status);
       }, delayMs);
     }
   }
@@ -1272,7 +1316,7 @@ struct Index {
       d3dBackend: 'vkd3d_limited_500k',
       presentBackend: 'venus_broker_present',
       automationMode: true
-    }) as ProcessInfo;
+    }) as WineProcessHandle;
     this.manualVkd3dSmokePid = result.pid;
     if (result.pid > 0) {
       this.statusText = 'DX12 示例运行中（1000 帧）';
@@ -1287,13 +1331,13 @@ struct Index {
     } else {
       this.vkd3dSmokePhase = 'fail';
       this.vkd3dSmokeStatus = 'FAIL：测试进程未启动';
-      this.vkd3dSmokeDetail = `启动状态：${result.state}`;
+      this.vkd3dSmokeDetail = `启动状态：${result.status}`;
       this.statusText = 'DX12 示例启动失败';
       this.finishManualVkd3dSession();
     }
     hilog.info(DOMAIN, 'VKD3D',
       'manual smoke path=%{public}s pid=%{public}d status=%{public}s',
-      exePath, result.pid, result.state);
+      exePath, result.pid, result.status);
   }
 
   private startVkd3dSmoke = (): void => {

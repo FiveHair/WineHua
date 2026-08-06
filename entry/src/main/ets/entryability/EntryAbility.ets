@@ -243,7 +243,14 @@ export default class EntryAbility extends UIAbility {
     AppStorage.set<number>('winehua.game.click_client_y_permille', clickClientYPermille);
     AppStorage.setOrCreate<string>('winehua.perf.profile', perfProfile);
     AppStorage.set<string>('winehua.perf.profile', perfProfile);
-    hilog.info(DOMAIN, 'SmokeRunner', 'launch mode=%{public}s request=%{public}s', mode, request);
+    // Publish this commit marker only after every field in the launch snapshot
+    // has been updated. Index watches it to consume warm singleton Wants.
+    const launchGeneration = (AppStorage.get<number>('winehua.launch.generation') || 0) + 1;
+    AppStorage.setOrCreate<number>('winehua.launch.generation', launchGeneration);
+    AppStorage.set<number>('winehua.launch.generation', launchGeneration);
+    hilog.info(DOMAIN, 'SmokeRunner',
+      'launch generation=%{public}d mode=%{public}s request=%{public}s',
+      launchGeneration, mode, request);
   }
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
@@ -259,6 +266,7 @@ export default class EntryAbility extends UIAbility {
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     this.publishLaunchRequest(want);
+    WineWindowManager.getInstance().restoreDesktopIfRunning();
   }
 
   onDestroy(): void {

@@ -738,6 +738,15 @@ export class WineWindowManager {
     }
   }
 
+  restoreDesktopIfRunning(): void {
+    if (!this.isDesktopMode || this.desktopRootId <= 0) return;
+    // A new Want foregrounds EntryAbility even though the desktop compositor
+    // remains alive. Re-starting the singleton moves that existing desktop
+    // back to the foreground without recreating or stopping the Wine session.
+    hilog.info(DOMAIN, TAG, '[MW] refocusing DesktopAbility root=%{public}d', this.desktopRootId);
+    this.startDesktopAbility(this.desktopRootId);
+  }
+
   getDesktopRootId(): number { return this.desktopRootId; }
 
   // DesktopAbility 注册/注销其 UIAbilityContext, 用于 root 销毁时 terminateSelf
