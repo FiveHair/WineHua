@@ -199,7 +199,12 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
 
     launch->entryParams = std::move(params);
     launch->fingerprint = FingerprintVirglHostConfig(config);
-    launch->forwardPerfSummary = perfSummary || frameTimeline || sampledPerf;
+    /* Gate C memory records are written by the in-process renderer to its
+     * private log. Forward only filtered vkd3d-gate-c records so a device
+     * run can prove the exact flush/invalidate order through hilog without
+     * exposing unrelated application data or requiring sandbox access. */
+    launch->forwardPerfSummary = perfSummary || frameTimeline || sampledPerf ||
+        gateCTrace;
     if (error) error->clear();
     return true;
 }

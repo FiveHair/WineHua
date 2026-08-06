@@ -155,7 +155,10 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
             "WINEHUA_DXVK_ROOT=" + dxvkRoot,
             "WINEHUA_DXVK_PROFILE=legacy",
             "WINEHUA_DXVK_VERSION=1.10.3",
-            "WINEHUA_PERF_PROFILE=shadow-precise-direct-fence",
+            /* Product sessions use the qualified precise mapping contract
+             * without enabling the Gate C trace selector. Direct fence waits
+             * remain enabled explicitly below. */
+            "WINEHUA_PERF_PROFILE=shadow-precise",
             "WINEHUA_VULKAN_RUNTIME=1",
             "WINEHUA_VULKAN_LOADER_ARCH=x86_64",
             "WINEHUA_VENUS_ICD_ARCH=x86_64",

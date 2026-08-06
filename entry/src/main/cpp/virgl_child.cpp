@@ -99,7 +99,8 @@ void ForwardPerfSummary(const std::string& path, std::atomic<bool>& stop)
         while (fgets(line, sizeof(line), file))
         {
             if (!strstr(line, "WineHuaPerf") &&
-                !strstr(line, "WineHuaFrameTimeline")) continue;
+                !strstr(line, "WineHuaFrameTimeline") &&
+                !strstr(line, "vkd3d-gate-c")) continue;
             line[strcspn(line, "\r\n")] = '\0';
             OH_LOG_INFO(LOG_APP, "[VIRGL-PERF] %{public}s", line);
             forwarded = true;

@@ -323,6 +323,7 @@ struct Index {
     this.manualVkd3dSmokeExited = false;
     this.gameTestMode = false;
     this.automationMode = false;
+    this.perfProfileText = 'shadow-precise';
     WineWindowManager.getInstance().setAutomationMode(false);
     this.prefixMode = 'reuse';
     this.prefixRoot = `${FILES_BASE}/.wine`;
@@ -825,6 +826,8 @@ struct Index {
       'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
     environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
     environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'precise';
+    const diagnosticVkd3d = this.isVkd3dExperiment() ||
+      this.perfProfileText === 'shadow-precise-direct-fence';
     if ((this.experimentMode &&
       this.smokeRequest.experimentId.indexOf('vkd3d-500k-') === 0) ||
       requiresVkd3dRuntime) {
@@ -834,18 +837,17 @@ struct Index {
       environment['WINEDLLOVERRIDES'] = requiresVkd3dRuntime ? 'd3d12=n' : 'd3d12=n,b';
       environment['VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC'] = '1';
       environment['VN_WINEHUA_PERSISTENT_MAP_SYNC'] = '1';
-      environment['VN_WINEHUA_PERSISTENT_MAP_SYNC_TRACE'] = '1';
+      environment['VN_WINEHUA_PERSISTENT_MAP_SYNC_TRACE'] = diagnosticVkd3d ? '1' : '0';
       /* A frame emits several ring submissions inside the normal 1 ms
        * notification-coalescing interval. If the Host becomes idle between
-       * them, the final seqno wait has no wake-up. Keep the uncoalesced mode
-       * isolated to VKD3D until the physical Gate C run is qualified. */
+       * them, the final seqno wait has no wake-up. The qualified product path
+       * keeps uncoalesced notification but disables its per-submit trace. */
       environment['VN_WINEHUA_ALWAYS_NOTIFY_RING'] = '1';
-      environment['VN_WINEHUA_RING_NOTIFY_TRACE'] = '1';
-      // The Gate C probe intentionally excludes unsupported query meta
-      // pipelines. This profile is never selected for ordinary launches.
+      environment['VN_WINEHUA_RING_NOTIFY_TRACE'] = diagnosticVkd3d ? '1' : '0';
+      // Query Meta is outside the qualified 2.6 limited-500K product profile.
       environment['VKD3D_WINEHUA_DISABLE_QUERY_META'] = '1';
     }
-    environment['WINEDEBUG'] = '+loaddll,+module';
+    if (diagnosticVkd3d) environment['WINEDEBUG'] = '+loaddll,+module';
     return environment;
   }
 
@@ -951,10 +953,12 @@ struct Index {
     /* The renderer process is created while startServer() initializes the
      * broker, before the isolated PE receives capabilityProbeEnvironment().
      * Make the VKD3D transport selection before vtest starts. Manual VKD3D
-     * activation stops and recreates the graphics broker first, while normal
-     * launches retain the validated DXVK/WineD3D host profile. */
-    const hostShadowProfile = this.isVkd3dExperiment() || this.isVkd3dProfile()
-      ? 'shadow-precise-direct-fence' : this.perfProfileText;
+     * activation stops and recreates the graphics broker first. Product
+     * VKD3D uses the same precise mapping contract without Gate C tracing. */
+    const hostShadowProfile = this.isVkd3dExperiment() ||
+      this.perfProfileText === 'shadow-precise-direct-fence' ?
+      'shadow-precise-direct-fence' :
+      (this.isVkd3dProfile() ? 'shadow-precise' : this.perfProfileText);
     testNapi.setHostShadowProfile(hostShadowProfile);
     hilog.info(DOMAIN, 'Experiment', 'host shadow profile=%{public}s experiment=%{public}s',
       hostShadowProfile, this.smokeRequest.experimentId);
@@ -1301,6 +1305,7 @@ struct Index {
     // the qualified Gate C experiments. This keeps the user's normal prefix
     // and desktop/DXVK session untouched by the test payload.
     this.automationMode = true;
+    this.perfProfileText = 'shadow-precise-direct-fence';
     WineWindowManager.getInstance().setManagedToplevelTitleFilter('VKD3D Graphics Smoke');
     WineWindowManager.getInstance().setAutomationMode(true);
     this.prefixMode = 'clean';

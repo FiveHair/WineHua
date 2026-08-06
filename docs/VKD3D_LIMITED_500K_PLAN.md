@@ -134,3 +134,9 @@ real DX12 title investigation with descriptor-heap telemetry. This is formal lim
 D3D12 launches use VKD3D 2.6 on x64, D3D11/DXGI remain on DXVK Legacy, a heap
 request above 500,000 is rejected, Query Meta remains unsupported, and any
 capability/driver/Mesa/Venus/Wine change invalidates the qualification.
+
+The product profile keeps the qualified precise mapping, direct-fence,
+persistent-map synchronization, and uncoalesced ring notification behavior,
+but disables their high-volume diagnostic traces. Gate C and the manual DX12
+smoke opt into `shadow-precise-direct-fence` when full evidence capture is
+needed.

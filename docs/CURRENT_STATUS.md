@@ -144,6 +144,12 @@ does not advertise Query Meta support. The official VKD3D triangle and gears
 demos rendered successfully on 910, alongside the descriptor, Gate C, BDA,
 multi-queue, physical-present, and DXVK regression evidence.
 
+Normal UI and `game` launches inherit this mixed product default and use the
+qualified precise mapped-memory contract without Gate C, ring-notify, or
+persistent-map trace output. The manual DX12 smoke and automated Gate C runs
+select `shadow-precise-direct-fence` explicitly when those diagnostics are
+required.
+
 A capability, host-driver, Mesa/Venus, or Wine runtime change requires the
 capability audit and real-device gates to be repeated before shipping a new
 runtime payload.

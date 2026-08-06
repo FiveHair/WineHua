@@ -31,8 +31,9 @@ export default class EntryAbility extends UIAbility {
     const explicitD3d = !!parameters && parameters['winehua.d3d_backend'] !== undefined &&
       parameters['winehua.d3d_backend'] !== null;
     const persistedD3dRaw = AppStorage.get<string>('winehua.d3d.preference') || 'vkd3d_limited_500k';
+    const useProductD3dDefault = mode === '' || mode === 'game';
     const requestedD3d = explicitD3d ? value('winehua.d3d_backend', 'wined3d') :
-      (mode === '' ? persistedD3dRaw : 'wined3d');
+      (useProductD3dDefault ? persistedD3dRaw : 'wined3d');
     const d3dBackend = requestedD3d === 'dxvk_legacy' ||
       requestedD3d === 'dxvk_modern_2_6' || requestedD3d === 'vkd3d_limited_500k' ?
       requestedD3d : 'wined3d';
@@ -164,7 +165,7 @@ export default class EntryAbility extends UIAbility {
     const clickClientYPermille = Math.max(-1,
       Math.min(1000, Math.floor(requestedClickClientYPermille)));
     const requestedPerfProfile = value('winehua.perf_profile',
-      d3dBackend === 'vkd3d_limited_500k' ? 'shadow-precise-direct-fence' :
+      d3dBackend === 'vkd3d_limited_500k' ? 'shadow-precise' :
         (mode === '' || d3dBackend === 'dxvk_legacy' ?
           'shadow-precise-dirty-ring-inline-upload-coverage-sort' : 'baseline'));
     const perfProfile = ['direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback',
