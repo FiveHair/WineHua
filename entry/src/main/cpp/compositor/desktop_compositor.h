@@ -134,6 +134,16 @@ public:
     // 返回 id 对应的 state 由调用方锁内查询 (pick 时已确认非空)。
     uint32_t PickFullscreenLayerLocked(const std::vector<CompositorLayer>& layers) const;
 
+    // 非主全屏窗口 (显示模式切换时被 winewayland 连带标记的旧窗口) 是否应
+    // 跳过合成/命中 — 渲染 blitToplevel/blitSubsurface 与输入
+    // FindInputTargetAt 共用的唯一实现 (收敛前各有一份独立规则)。规则:
+    // fsOk 存在主全屏窗口时, toplevel 层看自身 fullscreen 标记, subsurface
+    // 层看父 toplevel 的 IsFullscreen(); 非全屏弹窗/对话框 (及其 subsurface)
+    // 不跳过。调用方须已持有 tmgr mutex。
+    static bool ShouldSkipFullscreenCascade(const CompositorLayer& layer,
+                                            uint32_t fullscreenId, bool fsOk,
+                                            ToplevelManager& tmgr);
+
     // 全屏内容 fit 几何 (渲染/输入共用): 内部做全屏内容尺寸选择
     // (SelectFullscreenContentSize: ZC 游戏用 preFs 分辨率, SHM 用 buffer
     // 尺寸) + ComputeFitRect — 该规则的唯一实现, 替换两侧各自组合。

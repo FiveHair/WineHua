@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 // 保比例适配 (letterbox) 几何: 正/逆映射的唯一实现。
@@ -25,6 +27,21 @@ inline double FitMapX(const FitRect& t, double x) { return t.offX + x * t.scale;
 inline double FitMapY(const FitRect& t, double y) { return t.offY + y * t.scale; }
 inline double FitUnmapX(const FitRect& t, double px) { return (px - t.offX) / t.scale; }
 inline double FitUnmapY(const FitRect& t, double py) { return (py - t.offY) / t.scale; }
+
+// subsurface 相对窗口原点的 fit 映射矩形 — 渲染 blit 与输入命中共用的唯一
+// 实现 (原两侧手写同一数学: 渲染 desktop_compositor.cpp blitSubsurface 全屏
+// 分支, 输入 input_resolver.cpp FindInputTargetAt 全屏分支)。relX/relY 为
+// subsurface 相对所属窗口原点的偏移; dispW/dispH 为实际绘制尺寸 (viewport
+// 裁剪后); scale=0 时宽度取 0 → 调用方以 max(1, ...) 兜底不为 0。
+inline void FitMapLayerRect(const FitRect& t, int relX, int relY,
+                            int dispW, int dispH,
+                            int& scrX, int& scrY, int& scrW, int& scrH)
+{
+    scrX = static_cast<int>(lround(FitMapX(t, relX)));
+    scrY = static_cast<int>(lround(FitMapY(t, relY)));
+    scrW = std::max(1, static_cast<int>(lround(dispW * t.scale)));
+    scrH = std::max(1, static_cast<int>(lround(dispH * t.scale)));
+}
 
 // -- 正/逆映射 (按取整后的 dst 尺寸) --
 // glViewport 路径用: 实际显示占据 dstW x dstH 整数像素, 与屏幕上可见像素的换算

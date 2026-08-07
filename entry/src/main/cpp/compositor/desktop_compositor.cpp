@@ -311,6 +311,20 @@ bool DesktopCompositor::ComputeFullscreenFitLocked(uint32_t toplevelId, int root
     return ComputeFitRect(rootW, rootH, contentW, contentH, out);
 }
 
+bool DesktopCompositor::ShouldSkipFullscreenCascade(const CompositorLayer& layer,
+                                                    uint32_t fullscreenId, bool fsOk,
+                                                    ToplevelManager& tmgr)
+{
+    if (!fsOk || layer.toplevelId == fullscreenId) return false;
+    if (layer.type == CompositorLayer::Type::Toplevel)
+        return layer.fullscreen;
+    if (layer.type == CompositorLayer::Type::Subsurface) {
+        const auto* parent = tmgr.FindToplevelLocked(layer.toplevelId);
+        return parent && parent->IsFullscreen();
+    }
+    return false;
+}
+
 void DesktopCompositor::ResolveSubsurfaceLayerPositionLocked(
     const SubsurfaceLayer& layer, int& x, int& y) const
 {
@@ -697,14 +711,9 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             // 跳过非主全屏的 toplevel: SHM 游戏只跳过被连带标 fullscreen 的
             // 旧窗口 (notepad/explorer 等, 显示模式切换时 winewayland 批量
             // 标记, fsPriority 选了游戏但它仍在 z-order 高位, 普通 blit 会
-            // 盖在游戏上面), 非全屏弹窗/对话框保留。
-            // 阶段 2: ZC 游戏不再独占跳过其它 toplevel — 它们正常合成进
-            // CPU 帧, 由 egl_renderer 按 zIndex 位置画 ZC 层并贴回上层
-            // (自然覆盖), 双 GL 实例互叠 bug 由此修复
-            // (见 COMPOSITOR_UNIFICATION.md §5 阶段 2)
-            if (hasFullscreen && layer.toplevelId != fullscreenId) {
-                if (layer.fullscreen) return;
-            }
+            // 盖在游戏上面), 非全屏弹窗/对话框保留。规则单一实现:
+            // ShouldSkipFullscreenCascade (与输入命中同源)
+            if (ShouldSkipFullscreenCascade(layer, fullscreenId, hasFullscreen, tmgr_)) return;
             auto* cst = tmgr_.FindToplevelLocked(layer.toplevelId);
             if (!cst) return;
             const auto& childPx = cst->Pixels();
@@ -763,34 +772,19 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             for (int y = 0; y < copyH; y++) {
                 auto* srcRow = &childPx[(srcY + y) * childW * 4];
                 auto* dstRow = &composited[(dstY + y) * rootW * 4];
-                if (!childArgb) {
-                    memcpy(&dstRow[dstX * 4], &srcRow[srcX * 4], copyW * 4);
-                    continue;
-                }
-                for (int x = 0; x < copyW; x++) {
-                    const uint8_t* sp = srcRow + (srcX + x) * 4;
-                    uint8_t* dp = dstRow + (dstX + x) * 4;
-                    uint8_t a = sp[3];
-                    if (a == 0) continue;
-                    if (a == 255) {
-                        memcpy(dp, sp, 4);
-                    } else {
-                        unsigned inv = 255 - a;
-                        unsigned b = sp[0] + (dp[0] * inv) / 255;
-                        unsigned g = sp[1] + (dp[1] * inv) / 255;
-                        unsigned r = sp[2] + (dp[2] * inv) / 255;
-                        dp[0] = b > 255 ? 255 : b;
-                        dp[1] = g > 255 ? 255 : g;
-                        dp[2] = r > 255 ? 255 : r;
-                        dp[3] = 255;
-                    }
-                }
+                // SrcOnly 混合语义 (源不乘 alpha, clamp, 目标 alpha 强制 255)
+                BlitClipAlpha(&dstRow[dstX * 4], &srcRow[srcX * 4], copyW,
+                              childArgb, PixelBlend::SrcOnly);
             }
         };
         auto blitSubsurface = [&](const CompositorLayer& layer) {
             if (layer.ShouldSkipCpu()) return;
             if (layer.w <= 0 || layer.h <= 0) return;
-            if (hasFullscreen && layer.toplevelId != fullscreenId) return;
+            // 只跳过"父 toplevel 也连带 fullscreen"的 subsurface (显示模式
+            // 切换时被 winewayland 批量标记的旧窗口残留菜单, 防盖在游戏上);
+            // 非全屏普通窗口 (如游戏上方新弹出的对话框) 的 subsurface 正常
+            // 渲染。规则单一实现: ShouldSkipFullscreenCascade (与输入命中同源)
+            if (ShouldSkipFullscreenCascade(layer, fullscreenId, hasFullscreen, tmgr_)) return;
             const auto& sl = *layer.sub;
             int layerX = layer.x;
             int layerY = layer.y;
@@ -803,10 +797,11 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             if (hasFullscreen && layer.toplevelId == fullscreenId) {
                 const int layerDispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
                 const int layerDispH = sl.vpDstH > 0 ? std::min(sl.vpDstH, sl.h) : sl.h;
-                const int layerDstX = transform.offX + static_cast<int>(lround((layerX - fullscreenX) * transform.scale));
-                const int layerDstY = transform.offY + static_cast<int>(lround((layerY - fullscreenY) * transform.scale));
-                const int layerDstW = std::max(1, static_cast<int>(lround(layerDispW * transform.scale)));
-                const int layerDstH = std::max(1, static_cast<int>(lround(layerDispH * transform.scale)));
+                // 与输入 FindInputTargetAt 全屏分支同几何 (FitMapLayerRect 唯一实现)
+                int layerDstX, layerDstY, layerDstW, layerDstH;
+                FitMapLayerRect(transform, layerX - fullscreenX, layerY - fullscreenY,
+                                layerDispW, layerDispH,
+                                layerDstX, layerDstY, layerDstW, layerDstH);
                 BlitScaled(composited.data(), rootW, rootH,
                            sl.pixels.data(), sl.w, layerDispW, layerDispH,
                            layerDstX, layerDstY, layerDstW, layerDstH,
@@ -846,24 +841,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                     ((renderSrcY + y) * sl.w + renderSrcX) * 4;
                 uint8_t* dstRow = composited.data() +
                     ((renderDstY + y) * rootW + renderDstX) * 4;
-                if (!needsAlphaBlend) {
-                    std::memcpy(dstRow, srcRow, static_cast<size_t>(renderW) * 4);
-                    continue;
-                }
-                for (int x = 0; x < renderW; x++) {
-                    const uint8_t* srcPixel = srcRow + x * 4;
-                    uint8_t* dstPixel = dstRow + x * 4;
-                    uint8_t a = srcPixel[3];
-                    if (a == 0) continue;
-                    if (a == 255) {
-                        std::memcpy(dstPixel, srcPixel, 4);
-                    } else {
-                        unsigned inv = 255 - a;
-                        dstPixel[0] = (srcPixel[0] * a + dstPixel[0] * inv) / 255;
-                        dstPixel[1] = (srcPixel[1] * a + dstPixel[1] * inv) / 255;
-                        dstPixel[2] = (srcPixel[2] * a + dstPixel[2] * inv) / 255;
-                    }
-                }
+                BlitClipAlpha(dstRow, srcRow, renderW, needsAlphaBlend, PixelBlend::Normal);
             }
         };
         for (const auto& layer : layers) {
@@ -932,24 +910,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         for (int y = 0; y < copyH; y++) {
             const uint8_t* srcRow = sl.pixels.data() + ((srcY + y) * sl.w + srcX) * 4;
             uint8_t* dstRow = out.data() + ((dstY + y) * winW + dstX) * 4;
-            if (!needsAlphaBlend) {
-                std::memcpy(dstRow, srcRow, static_cast<size_t>(copyW) * 4);
-                continue;
-            }
-            for (int x = 0; x < copyW; x++) {
-                const uint8_t* sp = srcRow + x * 4;
-                uint8_t* dp = dstRow + x * 4;
-                uint8_t a = sp[3];
-                if (a == 0) continue;
-                if (a == 255) {
-                    std::memcpy(dp, sp, 4);
-                } else {
-                    unsigned inv = 255 - a;
-                    dp[0] = (sp[0] * a + dp[0] * inv) / 255;
-                    dp[1] = (sp[1] * a + dp[1] * inv) / 255;
-                    dp[2] = (sp[2] * a + dp[2] * inv) / 255;
-                }
-            }
+            BlitClipAlpha(dstRow, srcRow, copyW, needsAlphaBlend, PixelBlend::Normal);
         }
     };
     for (const auto& layer : layers) {

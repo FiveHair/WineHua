@@ -1,6 +1,7 @@
 #include "compositor_utils.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <unistd.h>
 
 uint64_t MakeSurfaceKey(uint32_t clientPid, uint32_t surfaceId)
@@ -89,6 +90,54 @@ void BlitScaled(uint8_t* dst, int rootW, int rootH,
                 dpx[1] = static_cast<uint8_t>(std::min(ng, 255u));
                 dpx[2] = static_cast<uint8_t>(std::min(nr, 255u));
                 dpx[3] = 255;
+            }
+        }
+    }
+}
+
+// 收敛自三份内联行循环 (desktop_compositor.cpp blitToplevel / blitSubsurface /
+// blitWindowSubsurface 普通分支), 逐字节搬原实现, 行为不变。
+// 注: BlitScaled 的 alpha 混合分支也是 SrcOnly 语义 (src + dst*inv/255 + clamp
+// + dp[3]=255), 因带双线性权重未一并收敛, 仅记录于此。
+void BlitClipAlpha(uint8_t* dstRow, const uint8_t* srcRow, int copyW,
+                   bool alphaBlend, PixelBlend blend)
+{
+    if (!alphaBlend) {
+        std::memcpy(dstRow, srcRow, static_cast<size_t>(copyW) * 4);
+        return;
+    }
+    if (blend == PixelBlend::SrcOnly) {
+        for (int x = 0; x < copyW; x++) {
+            const uint8_t* sp = srcRow + x * 4;
+            uint8_t* dp = dstRow + x * 4;
+            const uint8_t a = sp[3];
+            if (a == 0) continue;
+            if (a == 255) {
+                std::memcpy(dp, sp, 4);
+            } else {
+                const unsigned inv = 255 - a;
+                const unsigned b = sp[0] + (dp[0] * inv) / 255;
+                const unsigned g = sp[1] + (dp[1] * inv) / 255;
+                const unsigned r = sp[2] + (dp[2] * inv) / 255;
+                dp[0] = b > 255 ? 255 : b;
+                dp[1] = g > 255 ? 255 : g;
+                dp[2] = r > 255 ? 255 : r;
+                dp[3] = 255;
+            }
+        }
+    } else {
+        for (int x = 0; x < copyW; x++) {
+            const uint8_t* sp = srcRow + x * 4;
+            uint8_t* dp = dstRow + x * 4;
+            const uint8_t a = sp[3];
+            if (a == 0) continue;
+            if (a == 255) {
+                std::memcpy(dp, sp, 4);
+            } else {
+                const unsigned inv = 255 - a;
+                dp[0] = (sp[0] * a + dp[0] * inv) / 255;
+                dp[1] = (sp[1] * a + dp[1] * inv) / 255;
+                dp[2] = (sp[2] * a + dp[2] * inv) / 255;
             }
         }
     }

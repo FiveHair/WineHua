@@ -21,9 +21,14 @@ struct InputTarget {
 
 // 输入命中裁决 (依赖 ToplevelManager + DesktopCompositor)
 //
-// 不变式: 命中顺序固定为 全屏窗口(含其 subsurface 层) → subsurface 层 →
-// toplevel → desktop root 兜底, 与渲染层序一致。zero-copy GL 层不参与
-// 置顶命中 (渲染时被遮挡重绘压回, 命中同样下放给 z-order 循环)。
+// 不变式: 命中是单一 Z 序逆序遍历 (从最高 zIndex 向下), 与渲染侧
+// TakeToplevelFrame 单一合成循环同源 — 均遍历 BuildLayerListLocked 同一
+// Layer 列表, 每层用其渲染时实际占屏区域做命中。全屏窗口作为普通层参与:
+// 命中用 fit 变换后的屏幕几何 (内容区命中 / 黑边命中标 swallow), 更高
+// zIndex 的窗口渲染在游戏上方, 逆序先到 → 命中优先 (游戏全屏时弹出的新
+// 窗口点击必须路由给它)。连带 fullscreen 旧窗口 (渲染时被跳过) 命中也
+// 跳过; zero-copy GL 层不参与置顶命中 (渲染时被遮挡重绘压回, 命中同样
+// 下放给 z-order 循环)。
 // 全屏黑边命中标 swallow, 调用方只吞 PRESS — MOVE/RELEASE 照常透传,
 // 否则按下拖到黑边松手会丢 release, 按键状态永久卡死 (见实现注释)。
 class InputResolver {
@@ -57,6 +62,10 @@ public:
                                double& dx, double& dy);
 
 private:
+    // root 尺寸解析 (FindInputTargetAt / SurfaceLocalToDesktop 两处全屏 fit
+    // 计算共用): root toplevel state 有尺寸用它的, 否则回退到 output 尺寸
+    void ResolveRootSize(int& rootW, int& rootH) const;
+
     ToplevelManager& tmgr_;
     DesktopCompositor& compositor_;
     const uint32_t& desktopRootToplevelId_;

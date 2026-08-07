@@ -60,6 +60,8 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
     dllPath += ":/data/storage/el1/bundle/libs/x86_64";
 #endif
 
+    // ==== Layer 0: 硬基线 (路径、locale、Wayland socket) ====
+    // NOTE: WINEDLLDIR0/1, WINEDLLPATH 在 DXVK 路径下会被 AppendD3dBackendEnv 覆盖
     std::vector<std::string> env = {
         "XDG_RUNTIME_DIR=" + sockDir,
         "WAYLAND_DISPLAY=" + sockName,
@@ -78,22 +80,31 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "TMPDIR=" WINE_TMPDIR,
         "MIDI_SOUNDFONT_PATH=" + midiSoundfontPath,
     };
+    // ==== Layer 1: Box64 性能调优 (仅 ARM64) ====
+    // NOTE: BOX64_DYNAREC_WEAKBARRIER=2 在桌面 DXVK 下会被 AppendStableDesktopDxvkEnv 覆盖为 0
     AppendBox64PerfStrings(env);
+    // ==== Layer 2: 运行时库路径 ====
+    // NOTE: BOX64_LD_LIBRARY_PATH (ARM64) 在 DXVK 路径下会被 AppendD3dBackendEnv 覆盖
 #ifdef __aarch64__
     env.push_back("LD_LIBRARY_PATH=" + libPath);
     env.push_back("BOX64_LD_LIBRARY_PATH=" + runtimeLibPath);
 #else
     env.push_back("LD_LIBRARY_PATH=" + runtimeLibPath);
 #endif
+    // ==== Layer 3: 音频 bootstrap (条件) ====
     if (audioBootstrapFd >= 0) {
         env.push_back("WINE_OHOS_AUDIO_ENABLE=1");
         env.push_back("WINE_OHOS_AUDIO_BOOTSTRAP_FD=" + std::to_string(audioBootstrapFd));
         env.push_back("WINE_OHOS_AUDIO_PROTOCOL_VERSION=" + std::to_string(WINEHUA_AUDIO_PROTOCOL_VERSION));
     }
+    // ==== Layer 4: 桌面模式标记 ====
     winehua::GraphicsBroker::GetInstance().SetWineRuntimeBinaryDir(binDir);
     // 告知 winewayland.drv 当前是桌面模式还是独立窗口模式
+    // NOTE: 桌面模式下 wine_child.cpp 也会通过 __winehua_desktop__ token 设置同值（冗余保险）
     env.push_back(std::string("WINEHUA_DESKTOP_MODE=") +
                   (WaylandServer::GetInstance()->IsDesktopMode() ? "1" : "0"));
+    // ==== Layer 5: 图形状态 ====
+    // NOTE: BOX64_EMULATED_LIBS (ARM64) 在 DXVK 路径下会被 AppendD3dBackendEnv 覆盖
     winehua::GraphicsBroker::GetInstance().AppendWineEnv(env);
 
     OH_LOG_INFO(LOG_APP,
@@ -105,18 +116,17 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
     return env;
 }
 
-static void UpsertEnvLine(std::vector<std::string>& env, const std::string& line)
+void UpsertEnvLine(std::vector<std::string>& env, const std::string& line)
 {
     const size_t sep = line.find('=');
     if (sep == std::string::npos || sep == 0) return;
     const std::string key = line.substr(0, sep);
-    for (std::string& existing : env) {
-        if (existing.compare(0, key.size(), key) == 0 &&
-            existing.size() > key.size() && existing[key.size()] == '=') {
-            existing = line;
-            return;
-        }
-    }
+    // 清理所有同 key 的旧条目, 然后追加新值 (与旧 UpsertEnv 行为一致,
+    // 避免 AppendStableDesktopDxvkEnv 等 push_back 路径产生重复 key)
+    env.erase(std::remove_if(env.begin(), env.end(), [&](const std::string& existing) {
+        return existing.compare(0, key.size(), key) == 0 &&
+               existing.size() > key.size() && existing[key.size()] == '=';
+    }), env.end());
     env.push_back(line);
 }
 
