@@ -42,6 +42,7 @@
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
         "launchType": "singleton",
+        "orientation": "auto_rotation",
         "skills": [
           {
             "entities": [
@@ -63,6 +64,7 @@
         "startWindowBackground": "$color:start_window_background",
         "exported": false,
         "launchType": "singleton",
+        "orientation": "auto_rotation",
         "removeMissionAfterTerminate": true
       },
       {
@@ -75,6 +77,7 @@
         "startWindowBackground": "$color:start_window_background",
         "exported": false,
         "launchType": "multiton",
+        "orientation": "auto_rotation",
         "removeMissionAfterTerminate": true
       }
     ]

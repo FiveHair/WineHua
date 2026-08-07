@@ -306,6 +306,22 @@ export default class EntryAbility extends UIAbility {
     // 手机走 fork-shim，必须在 Index.doInit 的首次 NCP 调用前设置。
     testNapi.setPhoneMode(deviceInfo.deviceType === 'phone');
 
+    // Phone desktop is rendered in a full-window XComponent. Let the system
+    // rotate that window with the sensor; its surface callback propagates the
+    // resulting size to Wine before the next frame is composited.
+    if (deviceInfo.deviceType === 'phone') {
+      try {
+        const mainWindow = windowStage.getMainWindowSync();
+        mainWindow.setPreferredOrientation(window.Orientation.AUTO_ROTATION).then(() => {
+          hilog.info(DOMAIN, 'testTag', 'phone auto-rotation enabled');
+        }).catch((err: Error) => {
+          hilog.warn(DOMAIN, 'testTag', 'phone auto-rotation failed: %{public}s', JSON.stringify(err));
+        });
+      } catch (err) {
+        hilog.warn(DOMAIN, 'testTag', 'phone auto-rotation setup failed: %{public}s', JSON.stringify(err));
+      }
+    }
+
     // 初始化多窗口管理器
     WineWindowManager.getInstance().init(windowStage, this.context);
 
