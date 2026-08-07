@@ -122,15 +122,18 @@ static void UpsertEnvLine(std::vector<std::string>& env, const std::string& line
 
 void AppendD3dBackendEnv(std::vector<std::string>& env,
                          const std::string& d3dBackend,
+                         const std::string& dxvkBackend,
                          const std::string& binDir)
 {
     if (d3dBackend == "vkd3d_limited_500k")
     {
+        const bool modern26 = dxvkBackend == "dxvk_modern_2_6";
+        const std::string dxvkRuntimeProfile = modern26 ? "modern-2.6" : "legacy";
         const std::string overlayRoot = std::string(WINE_RUNTIME_ROOT) +
             "/vkd3d/limited-500k";
         const std::string overlay64 = overlayRoot + "/x64";
         const std::string dxvkRoot = std::string(WINE_RUNTIME_ROOT) +
-            "/dxvk/legacy";
+            "/dxvk/" + dxvkRuntimeProfile;
         const std::string dxvk64 = dxvkRoot + "/x64";
         const std::string dxvk86 = dxvkRoot + "/x86";
         const std::string guestVulkanRoot = binDir + "/guest_vulkan";
@@ -141,7 +144,7 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
             binDir + "/guest_gfx/lib:" + binDir + ":" +
             binDir + "/x86_64-unix:" + std::string(WINE_RUNTIME_ROOT) +
             "/lib/x86_64";
-        /* Keep VKD3D first for d3d12, then the qualified DXVK Legacy
+        /* Keep VKD3D first for d3d12, then the independently selected DXVK
          * overlays for d3d11/dxgi. The Wine loader gives both overlay
          * families priority over an application's private DLL directory. */
         const std::string wineDllPath = overlay64 + ":" + dxvk64 + ":" +
@@ -153,8 +156,8 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
             "WINEHUA_VKD3D_PROFILE=limited-500k",
             "WINEHUA_VKD3D_VERSION=2.6",
             "WINEHUA_DXVK_ROOT=" + dxvkRoot,
-            "WINEHUA_DXVK_PROFILE=legacy",
-            "WINEHUA_DXVK_VERSION=1.10.3",
+            "WINEHUA_DXVK_PROFILE=" + dxvkRuntimeProfile,
+            "WINEHUA_DXVK_VERSION=" + std::string(modern26 ? "2.6.2" : "1.10.3"),
             /* Product sessions use the qualified precise mapping contract
              * without enabling the Gate C trace selector. Direct fence waits
              * remain enabled explicitly below. */
@@ -176,7 +179,9 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
             "VK_DRIVER_FILES=" + guestVulkanIcd,
             "VK_ICD_FILENAMES=" + guestVulkanIcd,
             "VN_DEBUG=vtest",
-            "VN_PERF=no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring",
+            "VN_PERF=" + std::string(modern26
+                ? "no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring"
+                : "no_fence_feedback,no_query_feedback,no_multi_ring"),
             "VN_WINEHUA_STRONG_RING_BARRIER=1",
             "VN_WINEHUA_REMOTE_MEMORY_SYNC=1",
             "VN_WINEHUA_PERSISTENT_MAP_SYNC=1",
@@ -186,22 +191,27 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
             "WINEDLLOVERRIDES=d3d12=n;d3d11=n;dxgi=n",
             "WINEDLLPATH=" + wineDllPath,
             "WINEDLLDIR0=" + overlay64,
-            "WINEDLLDIR1=" + dxvk86,
+            "WINEDLLDIR1=" + dxvk64,
+            "WINEDLLDIR2=" + dxvk86,
             /* ntdll stops scanning WINEDLLDIRn at the first missing index.
              * Keep Wine's PE runtime directories contiguous after the D3D
              * overlays so their imports can still resolve system DLLs. */
-            "WINEDLLDIR2=" + binDir + "/x86_64-windows",
-            "WINEDLLDIR3=" + binDir + "/i386-windows",
-            "WINEDLLDIR4=" + binDir,
-            /* Keep the validated DXVK Legacy compatibility switches active
-             * for D3D11 applications in the mixed default session. */
-            "WINEHUA_DXVK_RELAXED_FEATURES=1",
-            "DXVK_WINEHUA_COMMAND_QUERY_RESET=1",
-            "DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED=1",
-            "DXVK_WINEHUA_EMULATE_RGBA8_SNORM_RT=auto",
-            "DXVK_WINEHUA_BATCH_MAPPED_FLUSH=1",
+            "WINEDLLDIR3=" + binDir + "/x86_64-windows",
+            "WINEDLLDIR4=" + binDir + "/i386-windows",
+            "WINEDLLDIR5=" + binDir,
         };
         for (const std::string& line : managed) UpsertEnvLine(env, line);
+        if (!modern26)
+        {
+            const std::vector<std::string> legacyCompatibility = {
+                "WINEHUA_DXVK_RELAXED_FEATURES=1",
+                "DXVK_WINEHUA_COMMAND_QUERY_RESET=1",
+                "DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED=1",
+                "DXVK_WINEHUA_EMULATE_RGBA8_SNORM_RT=auto",
+                "DXVK_WINEHUA_BATCH_MAPPED_FLUSH=1",
+            };
+            for (const std::string& line : legacyCompatibility) UpsertEnvLine(env, line);
+        }
         return;
     }
     if (d3dBackend.rfind("dxvk_", 0) != 0) return;

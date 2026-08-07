@@ -362,7 +362,9 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
         FindLaunchEnvironmentValue(params, "VN_WINEHUA_STRONG_RING_BARRIER");
     env.push_back("VN_WINEHUA_STRONG_RING_BARRIER=" +
                   (strongRing.empty() ? "1" : strongRing));
-    if (params.d3dBackend == "dxvk_modern_2_6") {
+    if (params.d3dBackend == "dxvk_modern_2_6" ||
+        (params.d3dBackend == "vkd3d_limited_500k" &&
+         params.dxvkBackend == "dxvk_modern_2_6")) {
         const char* traceKeys[] = {
             "DXVK_WINEHUA_TRACE_SAMPLED",
             "DXVK_WINEHUA_TRACE_FLOW",
@@ -403,7 +405,7 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
 
     std::vector<std::string> env;
     gb.AppendWineEnv(env);
-    AppendD3dBackendEnv(env, params.d3dBackend, params.winehuaBin);
+    AppendD3dBackendEnv(env, params.d3dBackend, params.dxvkBackend, params.winehuaBin);
     AppendStableDesktopDxvkEnv(env, params);
     /* The broker now receives the finalized environment through the
      * serialized __env entryParams channel. Keep this helper side-effect
@@ -426,7 +428,7 @@ static void AppendDesktopD3dEntryEnv(std::string& entryParams, const LaunchParam
      * params.envStrs was assembled before wineboot and the VirGL receiver
      * finished starting, so it may still contain a stale SHM fallback. */
     winehua::GraphicsBroker::GetInstance().AppendWineEnv(env);
-    AppendD3dBackendEnv(env, params.d3dBackend, params.winehuaBin);
+    AppendD3dBackendEnv(env, params.d3dBackend, params.dxvkBackend, params.winehuaBin);
     AppendStableDesktopDxvkEnv(env, params);
     AppendMissingEntryParamsEnvOverrides(entryParams, env);
 
@@ -716,6 +718,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         options.windowsExePath = "C:\\windows\\explorer.exe";
         options.prefixMode = (p->prefixDir == WINE_SMOKE_PREFIX) ? "clean" : "reuse";
         options.d3dBackend = p->d3dBackend;
+        options.dxvkBackend = p->dxvkBackend;
         options.automationMode = false;
         int32_t exPid = SpawnWineProgram(options);
         OH_LOG_INFO(LOG_APP, "[Launch-Async] explorer window pid=%{public}d (broker path)",
@@ -740,7 +743,7 @@ void LaunchThreadFunc(LaunchParams* p) {
     PrepareDesktopSessionGraphicsEnv(*p);
     p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin,
                                audioBootstrapFd, p->homeDir, p->prefixDir);
-    AppendD3dBackendEnv(p->envStrs, p->d3dBackend, p->winehuaBin);
+    AppendD3dBackendEnv(p->envStrs, p->d3dBackend, p->dxvkBackend, p->winehuaBin);
     const std::string serializedEnv = SerializeEnvToEntryParams(p->envStrs);
 
     mkdir(p->prefixDir.c_str(), 0755);

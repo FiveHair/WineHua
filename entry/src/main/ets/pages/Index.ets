@@ -100,6 +100,7 @@ interface GameLaunchSnapshot {
   generation: number;
   smokeRequestText: string;
   d3dBackendText: string;
+  dxvkBackendText: string;
   gamePathText: string;
   gameArguments: string[];
   experimentNames: string[];
@@ -175,6 +176,8 @@ struct Index {
   @StorageLink('winehua.smoke.request') smokeRequestText: string = '';
   @StorageLink('winehua.d3d.backend') d3dBackendText: string = 'vkd3d_limited_500k';
   @StorageLink('winehua.d3d.preference') d3dPreferenceText: string = 'vkd3d_limited_500k';
+  @StorageLink('winehua.dxvk.backend') dxvkBackendText: string = 'dxvk_legacy';
+  @StorageLink('winehua.dxvk.preference') dxvkPreferenceText: string = 'auto';
   @StorageLink('winehua.game.path') gamePathText: string = '';
   @StorageLink('winehua.game.args') gameArguments: string[] = [];
   @StorageLink('winehua.experiment.names') experimentNames: string[] = [];
@@ -210,12 +213,14 @@ struct Index {
   private smokeStarted: boolean = false;
   private cleanPrefixPrepared: boolean = false;
   @State d3dBackend: string = 'vkd3d_limited_500k';
+  @State dxvkBackend: string = 'dxvk_legacy';
   private gameTestMode: boolean = false;
   private launchSnapshotReady: boolean = false;
   private acceptedGameLaunch: GameLaunchSnapshot | null = null;
   private lastStartedGameGeneration: number = -1;
   private sessionReady: boolean = false;
   private sessionD3dBackend: string = 'vkd3d_limited_500k';
+  private sessionDxvkBackend: string = 'dxvk_legacy';
   private sessionPerfProfile: string = 'baseline';
   private experimentMode: boolean = false;
   private experimentStaged: boolean = false;
@@ -231,6 +236,10 @@ struct Index {
       backend === 'vkd3d_limited_500k' ? backend : 'wined3d';
   }
 
+  private normalizeDxvkBackend(backend: string): string {
+    return backend === 'dxvk_modern_2_6' ? 'dxvk_modern_2_6' : 'dxvk_legacy';
+  }
+
   private applyLaunchSnapshot(): void {
     this.smokeRequest = parseSmokeRequest(this.smokeRequestText);
     this.automationMode = this.smokeRequest.mode === 'smoke';
@@ -238,6 +247,7 @@ struct Index {
     this.gameTestMode = this.smokeRequest.mode === 'game' || this.experimentMode;
     this.experimentStaged = false;
     this.d3dBackend = this.normalizeD3dBackend(this.d3dBackendText);
+    this.dxvkBackend = this.normalizeDxvkBackend(this.dxvkBackendText);
     this.prefixMode = this.smokeRequest.prefixMode;
     this.prefixRoot = this.prefixMode === 'clean' ? WINE_SMOKE_PREFIX : `${FILES_BASE}/.wine`;
     this.driveC = `${this.prefixRoot}/drive_c`;
@@ -251,6 +261,7 @@ struct Index {
       generation: this.launchGeneration,
       smokeRequestText: this.smokeRequestText,
       d3dBackendText: this.normalizeD3dBackend(this.d3dBackendText),
+      dxvkBackendText: this.normalizeDxvkBackend(this.dxvkBackendText),
       gamePathText: this.gamePathText,
       gameArguments: this.gameArguments.slice(),
       experimentNames: this.experimentNames.slice(),
@@ -270,11 +281,13 @@ struct Index {
     const snapshot = this.acceptedGameLaunch;
     if (!snapshot) {
       this.d3dBackendText = this.sessionD3dBackend;
+      this.dxvkBackendText = this.sessionDxvkBackend;
       this.perfProfileText = this.sessionPerfProfile;
       return;
     }
     this.smokeRequestText = snapshot.smokeRequestText;
     this.d3dBackendText = snapshot.d3dBackendText;
+    this.dxvkBackendText = snapshot.dxvkBackendText;
     this.gamePathText = snapshot.gamePathText;
     this.gameArguments = snapshot.gameArguments.slice();
     this.experimentNames = snapshot.experimentNames.slice();
@@ -308,12 +321,16 @@ struct Index {
       return;
     }
     const requestedBackend = this.normalizeD3dBackend(this.d3dBackendText);
+    const requestedDxvkBackend = this.normalizeDxvkBackend(this.dxvkBackendText);
     const requestedPerfProfile = this.perfProfileText;
     if (requestedBackend !== this.sessionD3dBackend ||
+      requestedDxvkBackend !== this.sessionDxvkBackend ||
       requestedPerfProfile !== this.sessionPerfProfile) {
       hilog.warn(DOMAIN, 'GameTest',
-        'warm launch ignored; requested backend=%{public}s perf=%{public}s session backend=%{public}s perf=%{public}s',
-        requestedBackend, requestedPerfProfile, this.sessionD3dBackend, this.sessionPerfProfile);
+        'warm launch ignored; requested backend=%{public}s dxvk=%{public}s perf=%{public}s '
+          + 'session backend=%{public}s dxvk=%{public}s perf=%{public}s',
+        requestedBackend, requestedDxvkBackend, requestedPerfProfile,
+        this.sessionD3dBackend, this.sessionDxvkBackend, this.sessionPerfProfile);
       this.restoreAcceptedLaunchSnapshot();
       return;
     }
@@ -332,6 +349,7 @@ struct Index {
   aboutToAppear(): void {
     this.applyLaunchSnapshot();
     this.sessionD3dBackend = this.d3dBackend;
+    this.sessionDxvkBackend = this.dxvkBackend;
     this.sessionPerfProfile = this.perfProfileText;
     if (this.gameTestMode) this.acceptedGameLaunch = this.captureGameLaunchSnapshot();
     this.launchSnapshotReady = true;
@@ -457,6 +475,7 @@ struct Index {
     this.automationMode = false;
     this.perfProfileText = 'shadow-precise';
     this.sessionD3dBackend = this.d3dBackend;
+    this.sessionDxvkBackend = this.dxvkBackend;
     this.sessionPerfProfile = this.perfProfileText;
     WineWindowManager.getInstance().setAutomationMode(false);
     this.prefixMode = 'reuse';
@@ -1003,8 +1022,8 @@ struct Index {
   }
 
   private d3dPresentBackend(): string {
-    // D3D12 uses VKD3D/Venus; D3D11 and DXGI use the validated DXVK Legacy
-    // overlays in the same default mixed session.
+    // D3D12 uses VKD3D/Venus while D3D11 and DXGI use the independently
+    // selected, device-qualified DXVK overlay in the same mixed session.
     return this.d3dBackend.indexOf('dxvk_') === 0 || this.isVkd3dExperiment() ||
       this.isVkd3dProfile() ?
       'venus_broker_present' : 'virgl_compositor';
@@ -1015,12 +1034,33 @@ struct Index {
       backend === 'vkd3d_limited_500k' ? backend : 'wined3d';
     this.d3dBackend = selected;
     this.d3dBackendText = selected;
+    if (selected === 'dxvk_legacy' || selected === 'dxvk_modern_2_6') {
+      this.dxvkBackend = selected;
+      this.dxvkBackendText = selected;
+      this.dxvkPreferenceText = selected;
+    }
     // Persist an explicit choice; a fresh install defaults to the qualified VKD3D profile.
     this.d3dPreferenceText = selected;
     this.statusText = selected === 'dxvk_legacy' ? 'DXVK Legacy' :
       (selected === 'dxvk_modern_2_6' ? 'DXVK Modern 2.6' :
         (selected === 'vkd3d_limited_500k' ? 'VKD3D 2.6 Limited 500K (supported)' : 'WineD3D'));
     hilog.info(DOMAIN, 'GameTest', 'D3D backend selected=%{public}s', selected);
+  }
+
+  private selectDxvkBackend = (backend: string): void => {
+    const selected = this.normalizeDxvkBackend(backend);
+    this.dxvkBackend = selected;
+    this.dxvkBackendText = selected;
+    this.dxvkPreferenceText = selected;
+    if (this.d3dBackend === 'wined3d' || this.d3dBackend.indexOf('dxvk_') === 0) {
+      this.d3dBackend = selected;
+      this.d3dBackendText = selected;
+      this.d3dPreferenceText = selected;
+    }
+    this.statusText = selected === 'dxvk_modern_2_6' ?
+      'D3D11 / DXGI: DXVK 2.6.2' : 'D3D11 / DXGI: DXVK 1.10.3';
+    hilog.info(DOMAIN, 'GameTest', 'DXVK backend selected=%{public}s d3d12=%{public}s',
+      selected, this.d3dBackend);
   }
 
   private enterDir = (name: string): void => {
@@ -1127,7 +1167,8 @@ struct Index {
       return;
     }
     testNapi.launchClient(BOX64, [], this.sockPath, `${BIN_DIR}:${WINE_LIB}`, this.zHome,
-      this.automationMode || this.experimentMode, this.prefixMode, this.sessionD3dBackend);
+      this.automationMode || this.experimentMode, this.prefixMode, this.sessionD3dBackend,
+      this.sessionDxvkBackend);
   }
 
   private doReset = (): void => {
@@ -1157,6 +1198,7 @@ struct Index {
       workingDirectory: this.curDir,
       prefixMode: this.prefixMode,
       d3dBackend: this.d3dBackend,
+      dxvkBackend: this.dxvkBackend,
       presentBackend: this.d3dPresentBackend(),
       automationMode: this.experimentMode
     });
@@ -1222,6 +1264,7 @@ struct Index {
       workingDirectory: this.windowsParentDirectory(gamePath),
       prefixMode: this.prefixMode,
       d3dBackend: this.d3dBackend,
+      dxvkBackend: this.dxvkBackend,
       presentBackend: this.d3dPresentBackend(),
       automationMode: this.experimentMode
     }) as WineProcessHandle;
@@ -1263,6 +1306,7 @@ struct Index {
           workingDirectory: 'C:\\smoke\\x64',
           prefixMode: 'reuse',
           d3dBackend: this.d3dBackend,
+          dxvkBackend: this.dxvkBackend,
           presentBackend: this.d3dPresentBackend(),
           automationMode: false
         }) as WineProcessHandle;
@@ -1437,6 +1481,7 @@ struct Index {
       workingDirectory: 'C:\\smoke\\x64',
       prefixMode: 'clean',
       d3dBackend: 'vkd3d_limited_500k',
+      dxvkBackend: this.dxvkBackend,
       presentBackend: 'venus_broker_present',
       automationMode: true
     }) as WineProcessHandle;
@@ -1478,6 +1523,7 @@ struct Index {
     this.automationMode = true;
     this.perfProfileText = 'shadow-precise-direct-fence';
     this.sessionD3dBackend = this.d3dBackend;
+    this.sessionDxvkBackend = this.dxvkBackend;
     this.sessionPerfProfile = this.perfProfileText;
     this.sessionReady = false;
     WineWindowManager.getInstance().setManagedToplevelTitleFilter('VKD3D Graphics Smoke');
@@ -1561,21 +1607,31 @@ struct Index {
 
         Divider().color('#2a2a2a').width('100%')
 
-        Text('D3D backend')
+        Text('D3D11 / DXGI')
           .fontWeight(FontWeight.Bold).fontColor('#999')
           .width('100%').padding({ top: 12, bottom: 8 })
 
         Row({ space: 4 }) {
-          Button('WineD3D')
+          Button('DXVK 2.6.2')
             .layoutWeight(1).height(34)
-            .backgroundColor(this.d3dBackend === 'wined3d' ? '#285' : '#333')
-            .onClick(() => this.selectD3dBackend('wined3d'))
-          Button('DXVK Legacy')
+            .backgroundColor(this.dxvkBackend === 'dxvk_modern_2_6' ? '#285' : '#333')
+            .onClick(() => this.selectDxvkBackend('dxvk_modern_2_6'))
+          Button('DXVK 1.10.3')
             .layoutWeight(1).height(34)
-            .backgroundColor(this.d3dBackend === 'dxvk_legacy' ? '#285' : '#333')
-            .onClick(() => this.selectD3dBackend('dxvk_legacy'))
+            .backgroundColor(this.dxvkBackend === 'dxvk_legacy' ? '#285' : '#333')
+            .onClick(() => this.selectDxvkBackend('dxvk_legacy'))
         }
-        .width('100%').margin({ bottom: 8 })
+        .width('100%').margin({ bottom: 6 })
+
+        Button('WineD3D fallback')
+          .width('100%').height(32)
+          .backgroundColor(this.d3dBackend === 'wined3d' ? '#285' : '#333')
+          .onClick(() => this.selectD3dBackend('wined3d'))
+          .margin({ bottom: 8 })
+
+        Text('D3D12')
+          .fontWeight(FontWeight.Bold).fontColor('#999')
+          .width('100%').padding({ top: 2, bottom: 8 })
 
         Button('VKD3D 2.6 (supported, 500K)')
           .width('100%').height(34)
@@ -1584,7 +1640,7 @@ struct Index {
           .margin({ bottom: 6 })
 
         if (this.d3dBackend === 'vkd3d_limited_500k') {
-          Text('Default mixed route: D3D12 -> VKD3D, D3D11/DXGI -> DXVK Legacy; x64 only, 500,000 descriptor limit, Query Meta compatibility enabled.')
+          Text(`Default mixed route: D3D12 -> VKD3D; D3D11/DXGI -> ${this.dxvkBackend === 'dxvk_modern_2_6' ? 'DXVK 2.6.2' : 'DXVK 1.10.3'}; x64 D3D12, 500,000 descriptor limit.`)
             .fontSize(11).fontColor('#d9a').maxLines(3)
             .width('100%').margin({ bottom: 6 })
           Text(this.vkd3dSmokeStatus)

@@ -20,6 +20,21 @@ interface ExperimentArtifactEntry {
 export default class EntryAbility extends UIAbility {
   private contentPage: string = 'pages/Index';
 
+  private defaultDxvkBackend(): string {
+    /* This is an evidence allowlist, not a Host-to-Guest capability inference.
+     * The bundled Guest Mesa/DXVK payload is fixed by the HAP manifest, while
+     * the product/build identity below pins the audited Host driver. A system
+     * update therefore falls back to 1.10.3 until that identity is qualified. */
+    const qualified920 = deviceInfo.productModel === 'VYG-AL00' &&
+      deviceInfo.incrementalVersion === '26.0.0.32';
+    return qualified920 ? 'dxvk_modern_2_6' : 'dxvk_legacy';
+  }
+
+  private resolveDxvkBackend(value: string): string {
+    if (value === 'dxvk_legacy' || value === 'dxvk_modern_2_6') return value;
+    return this.defaultDxvkBackend();
+  }
+
   private publishLaunchRequest(want: Want): boolean {
     const parameters = want.parameters;
     const value = (key: string, fallback: string): string => {
@@ -37,6 +52,13 @@ export default class EntryAbility extends UIAbility {
     const d3dBackend = requestedD3d === 'dxvk_legacy' ||
       requestedD3d === 'dxvk_modern_2_6' || requestedD3d === 'vkd3d_limited_500k' ?
       requestedD3d : 'wined3d';
+    const explicitDxvk = !!parameters && parameters['winehua.dxvk_backend'] !== undefined &&
+      parameters['winehua.dxvk_backend'] !== null;
+    const persistedDxvk = AppStorage.get<string>('winehua.dxvk.preference') || 'auto';
+    let dxvkBackend = this.resolveDxvkBackend(explicitDxvk ?
+      value('winehua.dxvk_backend', 'auto') : persistedDxvk);
+    if (d3dBackend === 'dxvk_legacy') dxvkBackend = 'dxvk_legacy';
+    if (d3dBackend === 'dxvk_modern_2_6') dxvkBackend = 'dxvk_modern_2_6';
     let gamePath = value('winehua.game_path', '');
     const experimentId = value('winehua.experiment_id', '');
     const experimentExecutable = value('winehua.experiment_executable', '');
@@ -216,6 +238,8 @@ export default class EntryAbility extends UIAbility {
     AppStorage.set<string>('winehua.smoke.request', request);
     AppStorage.setOrCreate<string>('winehua.d3d.backend', d3dBackend);
     AppStorage.set<string>('winehua.d3d.backend', d3dBackend);
+    AppStorage.setOrCreate<string>('winehua.dxvk.backend', dxvkBackend);
+    AppStorage.set<string>('winehua.dxvk.backend', dxvkBackend);
     AppStorage.setOrCreate<string>('winehua.game.path', gamePath);
     AppStorage.set<string>('winehua.game.path', gamePath);
     AppStorage.setOrCreate<string[]>('winehua.experiment.names', experimentNames);
@@ -253,6 +277,7 @@ export default class EntryAbility extends UIAbility {
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     PersistentStorage.persistProp<string>('winehua.d3d.preference', 'vkd3d_limited_500k');
+    PersistentStorage.persistProp<string>('winehua.dxvk.preference', 'auto');
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
     } catch (err) {

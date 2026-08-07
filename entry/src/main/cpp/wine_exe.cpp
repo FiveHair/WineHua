@@ -303,7 +303,7 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
         sockDir, sockName, libPath, binDir, -1, homeDir, prefixDir);
     /* Product defaults first, then per-run settings. Smoke and game launches
      * must be able to select their own log directory and diagnostics. */
-    AppendD3dBackendEnv(envStrs, options.d3dBackend, binDir);
+    AppendD3dBackendEnv(envStrs, options.d3dBackend, options.dxvkBackend, binDir);
     for (const std::string& line : options.environment) UpsertEnv(&envStrs, line);
     UpsertEnv(&envStrs, "WINEHUA_D3D_BACKEND=" + options.d3dBackend);
     UpsertEnv(&envStrs, "WINEHUA_PRESENT_BACKEND=" + options.presentBackend);
@@ -506,6 +506,12 @@ napi_value RunWineProgram(napi_env env, napi_callback_info info)
     options.workingDirectory = GetString(env, args[0], "workingDirectory");
     options.prefixMode = GetString(env, args[0], "prefixMode", "reuse");
     options.d3dBackend = GetString(env, args[0], "d3dBackend", "vkd3d_limited_500k");
+    const std::string impliedDxvkBackend = options.d3dBackend == "dxvk_modern_2_6"
+        ? "dxvk_modern_2_6" : "dxvk_legacy";
+    options.dxvkBackend = GetString(env, args[0], "dxvkBackend", impliedDxvkBackend.c_str());
+    if (options.dxvkBackend != "dxvk_legacy" &&
+        options.dxvkBackend != "dxvk_modern_2_6")
+        options.dxvkBackend = impliedDxvkBackend;
     options.presentBackend = GetString(env, args[0], "presentBackend", "virgl_compositor");
     options.automationMode = GetBool(env, args[0], "automationMode", false);
     ReadStringArray(env, args[0], "argv", &options.argv);

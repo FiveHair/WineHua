@@ -14,6 +14,7 @@ struct LaunchParams {
     std::string winehuaBin;
     std::string prefixDir;
     std::string d3dBackend = "vkd3d_limited_500k";
+    std::string dxvkBackend = "dxvk_legacy";
     bool automationMode = false;
     std::vector<std::string> envStrs;
     std::vector<char*> envp;

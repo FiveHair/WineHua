@@ -15,6 +15,7 @@ struct ProgramOptions {
     std::string workingDirectory;
     std::string prefixMode = "reuse";
     std::string d3dBackend = "vkd3d_limited_500k";
+    std::string dxvkBackend = "dxvk_legacy";
     std::string presentBackend = "virgl_compositor";
     bool automationMode = false;
 };
