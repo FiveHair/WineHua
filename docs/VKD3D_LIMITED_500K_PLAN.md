@@ -9,7 +9,8 @@
 
 Document the qualified vkd3d-proton 2.6 limited-500K profile for devices whose Vulkan
 driver supports a 500,000-entry bindless resource view array, without claiming
-upstream vkd3d-proton compatibility or changing the validated DXVK paths.
+upstream vkd3d-proton compatibility or coupling the independently qualified DXVK
+profiles to the selected VKD3D version.
 
 The upstream-compatible profile remains unchanged: resource-view descriptor
 arrays need 1,000,000 entries. The limited profile never fabricates a Vulkan feature or limit. It is a real
@@ -84,8 +85,8 @@ cannot be silently truncated by the experimental profile.
 
 - Do not modify Host, Venus, Wine, or PE probes to report larger limits or
   enabled features than they expose.
-- Do not change `master`, the validated DXVK Legacy path, or the Modern 2.6
-  profile.
+- Do not change `master`, the validated DXVK 1.10.3 fallback, or the adapted
+  DXVK 2.6.2 profile. VKD3D admission must not downgrade D3D11 selection.
 - Keep the default D3D12 route limited to the qualified x64 VKD3D profile; a built
   DLL alone is never sufficient evidence.
 - Capability hash, Host driver, Mesa/Venus, or Wine Vulkan changes invalidate
@@ -120,20 +121,24 @@ The 1,000-frame physical-display evidence already exercises the isolated
 that evidence as the BrokerPresent gate and run the full DXVK product
 regression.
 
-The validated product DXVK Legacy 1.10.3 path has now passed a clean-prefix
-x86/x64 full feature matrix, fixed-frame validation, coverage audit, and cube
-presentation with no fallback or per-frame device wait-idle. See
-`VKD3D_DXVK_REGRESSION_910_20260805.md`. The additional non-default Modern
-2.6.2 baseline did not pass its x86/x64 matrices and remains explicitly
-unqualified; it was not changed or hidden by a Legacy fallback.
+The Maleoon 910 regression used DXVK 1.10.3 because its Vulkan 1.2 Guest does
+not meet DXVK 2.6.2 admission. That path passed a clean-prefix x86/x64 full
+feature matrix, fixed-frame validation, coverage audit, and cube presentation
+with no fallback or per-frame device wait-idle. See
+`VKD3D_DXVK_REGRESSION_910_20260805.md`. The Modern matrix failure recorded in
+that document is a 910 capability result; it must not be generalized to
+Maleoon 920. The WineHua DXVK 2.6.2 profile is adapted and has separate real
+D3D11 game validation on 920.
 
 The limited-500K track has therefore completed its descriptor, Gate C, BDA,
 multiple-queue, physical BrokerPresent, and validated product-path regression
 checks on the recorded 910 artifacts. It may proceed to a carefully selected
 real DX12 title investigation with descriptor-heap telemetry. This is formal limited support rather than unrestricted upstream support: default
-D3D12 launches use VKD3D 2.6 on x64, D3D11/DXGI remain on DXVK Legacy, a heap
-request above 500,000 is rejected, Query Meta remains unsupported, and any
-capability/driver/Mesa/Venus/Wine change invalidates the qualification.
+D3D12 launches use VKD3D 2.6 on x64, while D3D11/DXGI use the independently
+qualified DXVK profile (2.6.2 on 920, with 1.10.3 retained for 910 and other
+Vulkan 1.2 devices). A heap request above 500,000 is rejected, Query Meta
+remains unsupported, and any capability/driver/Mesa/Venus/Wine change
+invalidates the qualification.
 
 The product profile keeps the qualified precise mapping, direct-fence,
 persistent-map synchronization, and uncoalesced ring notification behavior,

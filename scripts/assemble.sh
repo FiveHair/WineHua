@@ -437,7 +437,7 @@ assemble_pad() {
     "modern-2.6": {
       "version": "2.6.2",
       "commit": "$dxvk_modern_commit",
-      "state": "baseline-unmodified-development-only",
+      "state": "adapted-game-validated-capability-gated",
       "requiredCapabilities": {"vulkanApi": "1.3", "robustness2": true, "dynamicRendering": true, "maintenance4": true},
       "x64": {"d3d11.dll": "$dxvkmodern64_d3d11_sha", "dxgi.dll": "$dxvkmodern64_dxgi_sha"},
       "x86": {"d3d11.dll": "$dxvkmodern32_d3d11_sha", "dxgi.dll": "$dxvkmodern32_dxgi_sha"}

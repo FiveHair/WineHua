@@ -1,18 +1,26 @@
 # WineHua DXVK Modern Upgrade Readiness
 
-> Updated: 2026-08-01
+> Updated: 2026-08-07
 
-> Purpose: record capability evidence and upgrade gates for a future DXVK 2.x
-> or VKD3D investigation. This is a planning and qualification memo, not
-> authorization to replace the current product runtime.
+> Purpose: record the independent DXVK and VKD3D capability decisions. DXVK
+> 2.6.2 is already adapted and game-validated on Maleoon 920; this document
+> must not downgrade that result because a separate VKD3D profile has stricter
+> descriptor requirements.
 
 ## 1. Current product decision
 
-The Phase 2 product default remains the WineHua DXVK 1.10.3 fork. DXVK 2.6.2
-is packaged as a separately selected, capability-gated Modern profile.
+DXVK and VKD3D are selected independently. On Maleoon 920, the WineHua DXVK
+2.6.2 profile has passed D3D11 smoke and real D3D11 workload validation. Its
+observed game compatibility is not lower than the 1.10.x path. It is not a
+transport-only candidate and must not be described as one.
+
+DXVK 1.10.3 remains the qualified fallback for devices that cannot satisfy the
+DXVK 2.6.2 Vulkan 1.3 and robustness2 contract, including Maleoon 910. Selecting
+VKD3D-Proton 2.6 limited-500K for D3D12 does not by itself require selecting
+DXVK 1.10.3 for D3D11.
 
 ```text
-DXVK Legacy 1.10.3
+DXVK 2.6.2 on qualified 920 devices
   -> Wine Vulkan
   -> x86_64 Mesa Venus
   -> virglrenderer Venus
@@ -20,11 +28,9 @@ DXVK Legacy 1.10.3
   -> Venus BrokerPresent
 ```
 
-The immediate priority is compatibility, visual correctness, regression
-coverage, and long-run stability on this path. Do not replace its managed DLLs
-with an upstream DXVK 2.x build. A future Modern runtime must be packaged as a
-separate manifest profile, selected before process startup, and retain this
-fallback order:
+The managed 2.6.2 DLLs are the WineHua-adapted build, not an unmodified upstream
+drop. Profiles are selected before process startup and retain this fallback
+order:
 
 ```text
 DXVK_MODERN -> DXVK_LEGACY -> WineD3D
@@ -50,7 +56,7 @@ the corresponding Venus adapter.
 | `VK_EXT_extended_dynamic_state` | no | yes | Current Legacy DXVK already enables it on 920. |
 | `VK_EXT_vertex_attribute_divisor` | no | yes | Current Legacy DXVK already enables it on 920. |
 | `VK_EXT_shader_demote_to_helper_invocation` | no | yes | Current Legacy DXVK already enables it on 920. |
-| Descriptor indexing | Host yes, Venus no | Venus reports yes | Present in the current 920 transport capture; requalify all subfeatures before any 2.7+ decision. |
+| Descriptor indexing | Host yes, Venus no | Host yes, Venus no | Not required by DXVK 2.6.2; remains a blocker for newer descriptor-indexing-dependent profiles. |
 | ETC2 / ASTC | Host yes, Venus no | Host yes, Venus no | Not a direct replacement for DXGI BC data. |
 | BC1-BC7 | no | no | WineHua BC decode/emulation remains necessary. |
 | Buffer device address | not qualified | Venus reports yes | Present in the current 920 transport capture; not by itself sufficient for DXVK 2.7+. |
@@ -83,8 +89,8 @@ All three passed on Maleoon 920. The Guest loader is `1.3.290`, the Venus
 adapter is `1.3.269`, and all paths successfully created a device requesting
 Vulkan 1.3 synchronization2, dynamic rendering, maintenance4, and all three
 `VK_EXT_robustness2` features: robust buffer access, robust image access, and
-null descriptors. This qualifies the transport only. It is deliberately not a
-claim that an unmodified DXVK 2.6.2 D3D11 device can be created.
+null descriptors. This was the initial transport checkpoint; it was later
+superseded by the adapted DXVK 2.6.2 D3D11 and game runs in section 5.
 
 The captured adapter still reports these upstream D3D11 baseline gaps:
 
@@ -186,9 +192,15 @@ The GPU diagnostics smoke records the actual guest device API, feature set,
 requested profile, loaded DXVK DLL paths, and D3D11 creation result in both a
 GUI report and `C:\\smoke\\results\\diagnostics`.
 
-Modern stays an opt-in development profile until the remaining real-workload
-and long-duration gates below pass. It must never be selected by pretending a
-Vulkan 1.2 device has Vulkan 1.3 features.
+Modern is a game-validated, capability-gated profile on 920. It must never be
+selected by pretending a Vulkan 1.2 device has Vulkan 1.3 features.
+
+The physical-device evidence includes Heaven D3D11 sessions under
+`D:\\MyProject\\winehua-logs\\automation\\heaven-modern-*`. The clean baseline
+log records `WINEHUA_DXVK_PROFILE=modern-2.6`, `WINEHUA_DXVK_VERSION=2.6.2`,
+and the managed `modern-2.6` DLL directories; the DXVK log reports
+`DXVK: 2.6.2`. Captured frames and FPS samples prove that this was a rendered
+game workload rather than device creation alone.
 
 ## 6. Required WineHua compatibility inventory
 
@@ -211,36 +223,36 @@ Diagnostics may be redesigned for the Modern code base. Correctness fixes,
 semantic emulation, runtime manifest integration, and smoke coverage must not
 be omitted merely because their original commits do not apply cleanly.
 
-## 7. Remaining Modern release gates
+## 7. Remaining Modern coverage work
 
-1. Run fixed-setting Legacy versus Modern A/B on Heaven, ComputeMark, Tomb
-   Raider, and other real workloads. Record DLL identity, frame percentiles,
-   Host CPU time, completion wait, shadow bytes, present cost, output image,
-   and crash status.
+1. Continue fixed-setting Legacy versus Modern A/B on additional games and
+   workloads. Record DLL identity, frame percentiles, Host CPU time, completion
+   wait, shadow bytes, present cost, output image, and crash status.
 2. Complete a separate 60-minute stability gate and overwrite-install refresh.
 3. Re-run qualification whenever the capability hash, Host driver, Venus, or
    Mesa changes.
 
-The default remains Legacy until a Modern candidate passes all gates. A new
+This remaining breadth and long-duration work does not erase the existing 920
+game result or justify describing 2.6.2 as less compatible than 1.10.x. A new
 capability hash, Host driver update, Venus update, or Mesa update invalidates
 the qualification and requires rerunning the matrix.
 
 ## 8. VKD3D boundary
 
-VKD3D is a separate future project, not a consequence of upgrading DXVK.
-DXVK Modern qualification proves a D3D9/10/11 translation path only. A VKD3D
-phase requires a fresh D3D12 capability matrix, resource-binding and memory
-model audit, descriptor-indexing/buffer-device-address review, D3D12 smoke,
-and independent real-game stability evidence. Current Venus gaps make it
-inappropriate to promise VKD3D support or performance from DXVK 2.x work.
+VKD3D is a separate D3D12 project, not a consequence of upgrading DXVK. DXVK
+2.6.2 qualification proves a D3D9/10/11 translation path only. The current
+VKD3D-Proton 2.6 limited-500K profile has its own capability matrix, descriptor
+ceiling, smoke, demo, and sample evidence. Failure to qualify a newer VKD3D
+profile does not downgrade DXVK 2.6.2.
 
 ## 9. Decision record
 
 ```text
-Product default:       WineHua DXVK Legacy 1.10.3
-Modern DXVK 2.6.2:     capability-gated, opt-in development profile on 920
+920 D3D11:             WineHua DXVK 2.6.2, adapted and game-validated
+910 / Vulkan 1.2:      DXVK 1.10.3 fallback
+Modern DXVK 2.6.2:     capability-gated; not a transport/smoke-only candidate
 910 and Vulkan 1.2:    Legacy 1.10.3 only; Modern reports UNSUPPORTED
-Immediate objective:   real-workload qualification and long-run stability
+Immediate objective:   broaden game coverage and long-run stability
 DXVK 2.7+/3.x:         deferred pending Venus descriptor/BDA capability work
-VKD3D:                  deferred to an independent D3D12 phase
+VKD3D:                  independent D3D12 profile and qualification
 ```
