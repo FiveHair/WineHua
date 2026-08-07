@@ -1,0 +1,65 @@
+From b4695b3ab5f9e452a6a529eca477e9b34f93eca6 Mon Sep 17 00:00:00 2001
+From: Philip Rebohle <philip.rebohle@tu-dortmund.de>
+Date: Thu, 16 Mar 2023 22:28:06 +0100
+Subject: [PATCH 19/22] include: Add definitions for DXVK interop interface.
+
+Signed-off-by: Philip Rebohle <philip.rebohle@tu-dortmund.de>
+---
+ include/vkd3d_device_vkd3d_ext.idl | 19 +++++++++++++++++++
+ include/vkd3d_vk_includes.h        |  6 +++++-
+ 2 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/include/vkd3d_device_vkd3d_ext.idl b/include/vkd3d_device_vkd3d_ext.idl
+index 53588b66..3e615d76 100644
+--- a/include/vkd3d_device_vkd3d_ext.idl
++++ b/include/vkd3d_device_vkd3d_ext.idl
+@@ -35,3 +35,22 @@ interface ID3D12DeviceExt : IUnknown
+     HRESULT CaptureUAVInfo(D3D12_UAV_INFO *uav_info);
+ }
+ 
++[
++    uuid(39da4e09-bd1c-4198-9fae-86bbe3be41fd),
++    object,
++    local,
++    pointer_default(unique)
++]
++interface ID3D12DXVKInteropDevice : IUnknown
++{
++    HRESULT GetDXGIAdapter(REFIID iid, void **object);
++    HRESULT GetInstanceExtensions(UINT *extension_count, const char **extensions);
++    HRESULT GetDeviceExtensions(UINT *extension_count, const char **extensions);
++    HRESULT GetDeviceFeatures(const VkPhysicalDeviceFeatures2 **features);
++    HRESULT GetVulkanHandles(VkInstance *vk_instance, VkPhysicalDevice *vk_physical_device, VkDevice *vk_device);
++    HRESULT GetVulkanQueueInfo(ID3D12CommandQueue *queue, VkQueue *vk_queue, UINT32 *vk_queue_family);
++    void GetVulkanImageLayout(ID3D12Resource *resource, D3D12_RESOURCE_STATES state, VkImageLayout *vk_layout);
++    HRESULT GetVulkanResourceInfo(ID3D12Resource *resource, UINT64 *vk_handle, UINT64 *buffer_offset);
++    HRESULT LockCommandQueue(ID3D12CommandQueue *queue);
++    HRESULT UnlockCommandQueue(ID3D12CommandQueue *queue);
++}
+diff --git a/include/vkd3d_vk_includes.h b/include/vkd3d_vk_includes.h
+index e16169a0..3443f9ff 100644
+--- a/include/vkd3d_vk_includes.h
++++ b/include/vkd3d_vk_includes.h
+@@ -26,10 +26,15 @@
+     typedef UINT64 VkCuModuleNVX;
+ #endif 
+ 
++typedef struct VkPhysicalDeviceFeatures2 VkPhysicalDeviceFeatures2;
+ typedef struct VkPhysicalDevice_T *VkPhysicalDevice;
+ typedef struct VkCommandBuffer_T *VkCommandBuffer;
+ typedef struct VkInstance_T *VkInstance;
+ typedef struct VkDevice_T *VkDevice;
++typedef struct VkQueue_T *VkQueue;
++
++typedef enum VkResult VkResult;
++typedef enum VkImageLayout VkImageLayout;
+ 
+ typedef enum D3D12_VK_EXTENSION
+ {
+@@ -55,4 +60,3 @@ typedef struct D3D12_UAV_INFO
+ } D3D12_UAV_INFO;
+ 
+ #endif  // __VKD3D_VK_INCLUDES_H
+-
+-- 
+2.43.0

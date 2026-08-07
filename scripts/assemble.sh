@@ -316,6 +316,12 @@ assemble_pad() {
     cp "$dxvk_modern_root/x64/bin/dxgi.dll" "$wine_data/dxvk/modern-2.6/x64/dxgi.dll"
     cp "$dxvk_modern_root/x86/bin/d3d11.dll" "$wine_data/dxvk/modern-2.6/x86/d3d11.dll"
     cp "$dxvk_modern_root/x86/bin/dxgi.dll" "$wine_data/dxvk/modern-2.6/x86/dxgi.dll"
+    # D3D11On12 must use DXVK Modern's D3D11 implementation while retaining
+    # the qualified Legacy DXGI path. Keep the modern D3D11 DLL in its own
+    # development-only directory so WINEDLLPATH cannot pick Modern DXGI.
+    mkdir -p "$wine_data/dxvk/on12-modern-d3d11/x64"
+    cp "$dxvk_modern_root/x64/bin/d3d11.dll" \
+        "$wine_data/dxvk/on12-modern-d3d11/x64/d3d11.dll"
     local vkd3d_root="$VKD3D_PROTON_BUILD_ROOT/limited-500k"
     [ -f "$vkd3d_root/x64/d3d12.dll" ] || err "VKD3D-Proton x64 d3d12.dll missing: $vkd3d_root/x64/d3d12.dll"
     [ -f "$vkd3d_root/x64/winehua-d3d12-smoke.exe" ] || \
@@ -396,6 +402,7 @@ assemble_pad() {
     venus_runtime_id="venus-${guest_venus_icd_sha:0:12}-${host_virglrenderer_sha:0:12}"
     local dxvk64_d3d11_sha dxvk64_dxgi_sha dxvk32_d3d11_sha dxvk32_dxgi_sha
     local dxvkmodern64_d3d11_sha dxvkmodern64_dxgi_sha dxvkmodern32_d3d11_sha dxvkmodern32_dxgi_sha
+    local dxvkon1264_d3d11_sha
     dxvk64_d3d11_sha="$(sha256sum "$wine_data/dxvk/legacy/x64/d3d11.dll" | awk '{print $1}')"
     dxvk64_dxgi_sha="$(sha256sum "$wine_data/dxvk/legacy/x64/dxgi.dll" | awk '{print $1}')"
     dxvk32_d3d11_sha="$(sha256sum "$wine_data/dxvk/legacy/x86/d3d11.dll" | awk '{print $1}')"
@@ -404,6 +411,7 @@ assemble_pad() {
     dxvkmodern64_dxgi_sha="$(sha256sum "$wine_data/dxvk/modern-2.6/x64/dxgi.dll" | awk '{print $1}')"
     dxvkmodern32_d3d11_sha="$(sha256sum "$wine_data/dxvk/modern-2.6/x86/d3d11.dll" | awk '{print $1}')"
     dxvkmodern32_dxgi_sha="$(sha256sum "$wine_data/dxvk/modern-2.6/x86/dxgi.dll" | awk '{print $1}')"
+    dxvkon1264_d3d11_sha="$(sha256sum "$wine_data/dxvk/on12-modern-d3d11/x64/d3d11.dll" | awk '{print $1}')"
     cat > "$wine_data/dxvk/manifest.json" <<EOF
 {
   "schemaVersion": 2,
@@ -441,6 +449,13 @@ assemble_pad() {
       "requiredCapabilities": {"vulkanApi": "1.3", "robustness2": true, "dynamicRendering": true, "maintenance4": true},
       "x64": {"d3d11.dll": "$dxvkmodern64_d3d11_sha", "dxgi.dll": "$dxvkmodern64_dxgi_sha"},
       "x86": {"d3d11.dll": "$dxvkmodern32_d3d11_sha", "dxgi.dll": "$dxvkmodern32_dxgi_sha"}
+    },
+    "on12-modern-d3d11": {
+      "version": "2.6.2-d3d11-plus-legacy-dxgi",
+      "commit": "$dxvk_modern_commit",
+      "state": "development-only",
+      "requiredVkd3dInterop": "ID3D12DXVKInteropDevice",
+      "x64": {"d3d11.dll": "$dxvkon1264_d3d11_sha", "dxgi.dll": "$dxvk64_dxgi_sha"}
     }
   }
 }
