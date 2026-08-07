@@ -20,7 +20,7 @@ interface ExperimentArtifactEntry {
 export default class EntryAbility extends UIAbility {
   private contentPage: string = 'pages/Index';
 
-  private publishLaunchRequest(want: Want): void {
+  private publishLaunchRequest(want: Want): boolean {
     const parameters = want.parameters;
     const value = (key: string, fallback: string): string => {
       if (!parameters || parameters[key] === undefined || parameters[key] === null) return fallback;
@@ -200,9 +200,6 @@ export default class EntryAbility extends UIAbility {
       .indexOf(requestedPerfProfile) >= 0 ? requestedPerfProfile : 'baseline';
     this.contentPage = mode === 'smoke' && suite === 'host-vulkan' ?
       'pages/HostVulkanSmoke' : 'pages/Index';
-    // Experiments are explicitly requested through a Want and use the same
-    // headless Wine bootstrap as smoke. Normal launches remain interactive.
-    WineWindowManager.getInstance().setAutomationMode(mode === 'smoke' || mode === 'experiment');
     const request = JSON.stringify({
       mode: mode,
       runId: value('winehua.run_id', `${Date.now()}`),
@@ -251,6 +248,7 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, 'SmokeRunner',
       'launch generation=%{public}d mode=%{public}s request=%{public}s',
       launchGeneration, mode, request);
+    return mode === 'smoke' || mode === 'experiment';
   }
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
@@ -260,7 +258,10 @@ export default class EntryAbility extends UIAbility {
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
     }
-    this.publishLaunchRequest(want);
+    const automationMode = this.publishLaunchRequest(want);
+    // Window ownership is a cold-session decision. A singleton onNewWant is
+    // validated by Index before it may affect the running desktop session.
+    WineWindowManager.getInstance().setAutomationMode(automationMode);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
   }
 

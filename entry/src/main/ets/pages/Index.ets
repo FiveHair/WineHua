@@ -96,6 +96,24 @@ interface WineProcessHandle {
   exitCodeSource: string;
 }
 
+interface GameLaunchSnapshot {
+  generation: number;
+  smokeRequestText: string;
+  d3dBackendText: string;
+  gamePathText: string;
+  gameArguments: string[];
+  experimentNames: string[];
+  experimentHashes: string[];
+  d3dEnvKeys: string[];
+  d3dEnvValues: string[];
+  gameClickTitlePrefix: string;
+  gameClickButtonText: string;
+  gameClickDelayMs: number;
+  gameClickClientXPermille: number;
+  gameClickClientYPermille: number;
+  perfProfileText: string;
+}
+
 interface Vkd3dManualResult {
   status: string;
   stage: string;
@@ -194,7 +212,11 @@ struct Index {
   @State d3dBackend: string = 'vkd3d_limited_500k';
   private gameTestMode: boolean = false;
   private launchSnapshotReady: boolean = false;
+  private acceptedGameLaunch: GameLaunchSnapshot | null = null;
   private lastStartedGameGeneration: number = -1;
+  private sessionReady: boolean = false;
+  private sessionD3dBackend: string = 'vkd3d_limited_500k';
+  private sessionPerfProfile: string = 'baseline';
   private experimentMode: boolean = false;
   private experimentStaged: boolean = false;
   private pendingVkd3dSmoke: boolean = false;
@@ -204,21 +226,68 @@ struct Index {
   private manualVkd3dSmokePid: number = -1;
   private manualVkd3dSmokeExited: boolean = false;
 
+  private normalizeD3dBackend(backend: string): string {
+    return backend === 'dxvk_legacy' || backend === 'dxvk_modern_2_6' ||
+      backend === 'vkd3d_limited_500k' ? backend : 'wined3d';
+  }
+
   private applyLaunchSnapshot(): void {
     this.smokeRequest = parseSmokeRequest(this.smokeRequestText);
     this.automationMode = this.smokeRequest.mode === 'smoke';
     this.experimentMode = this.smokeRequest.mode === 'experiment';
     this.gameTestMode = this.smokeRequest.mode === 'game' || this.experimentMode;
     this.experimentStaged = false;
-    this.d3dBackend = this.d3dBackendText === 'dxvk_legacy' ||
-      this.d3dBackendText === 'dxvk_modern_2_6' ||
-      this.d3dBackendText === 'vkd3d_limited_500k' ? this.d3dBackendText : 'wined3d';
+    this.d3dBackend = this.normalizeD3dBackend(this.d3dBackendText);
     this.prefixMode = this.smokeRequest.prefixMode;
     this.prefixRoot = this.prefixMode === 'clean' ? WINE_SMOKE_PREFIX : `${FILES_BASE}/.wine`;
     this.driveC = `${this.prefixRoot}/drive_c`;
     this.sockPath = `${this.prefixRoot}/wine-wayland`;
     this.curDir = this.driveC;
     this.hasRawfileWineData = this.detectRawfileWineData();
+  }
+
+  private captureGameLaunchSnapshot(): GameLaunchSnapshot {
+    return {
+      generation: this.launchGeneration,
+      smokeRequestText: this.smokeRequestText,
+      d3dBackendText: this.normalizeD3dBackend(this.d3dBackendText),
+      gamePathText: this.gamePathText,
+      gameArguments: this.gameArguments.slice(),
+      experimentNames: this.experimentNames.slice(),
+      experimentHashes: this.experimentHashes.slice(),
+      d3dEnvKeys: this.d3dEnvKeys.slice(),
+      d3dEnvValues: this.d3dEnvValues.slice(),
+      gameClickTitlePrefix: this.gameClickTitlePrefix,
+      gameClickButtonText: this.gameClickButtonText,
+      gameClickDelayMs: this.gameClickDelayMs,
+      gameClickClientXPermille: this.gameClickClientXPermille,
+      gameClickClientYPermille: this.gameClickClientYPermille,
+      perfProfileText: this.perfProfileText
+    };
+  }
+
+  private restoreAcceptedLaunchSnapshot(): void {
+    const snapshot = this.acceptedGameLaunch;
+    if (!snapshot) {
+      this.d3dBackendText = this.sessionD3dBackend;
+      this.perfProfileText = this.sessionPerfProfile;
+      return;
+    }
+    this.smokeRequestText = snapshot.smokeRequestText;
+    this.d3dBackendText = snapshot.d3dBackendText;
+    this.gamePathText = snapshot.gamePathText;
+    this.gameArguments = snapshot.gameArguments.slice();
+    this.experimentNames = snapshot.experimentNames.slice();
+    this.experimentHashes = snapshot.experimentHashes.slice();
+    this.d3dEnvKeys = snapshot.d3dEnvKeys.slice();
+    this.d3dEnvValues = snapshot.d3dEnvValues.slice();
+    this.gameClickTitlePrefix = snapshot.gameClickTitlePrefix;
+    this.gameClickButtonText = snapshot.gameClickButtonText;
+    this.gameClickDelayMs = snapshot.gameClickDelayMs;
+    this.gameClickClientXPermille = snapshot.gameClickClientXPermille;
+    this.gameClickClientYPermille = snapshot.gameClickClientYPermille;
+    this.perfProfileText = snapshot.perfProfileText;
+    this.applyLaunchSnapshot();
   }
 
   private onLaunchGenerationChanged(propertyName: string): void {
@@ -235,18 +304,36 @@ struct Index {
     if (request.mode !== 'game' || request.prefixMode !== 'reuse' || !reusableDesktopSession) {
       hilog.warn(DOMAIN, 'GameTest',
         'warm launch ignored; reusable desktop session and cold isolation boundaries preserved');
+      this.restoreAcceptedLaunchSnapshot();
+      return;
+    }
+    const requestedBackend = this.normalizeD3dBackend(this.d3dBackendText);
+    const requestedPerfProfile = this.perfProfileText;
+    if (requestedBackend !== this.sessionD3dBackend ||
+      requestedPerfProfile !== this.sessionPerfProfile) {
+      hilog.warn(DOMAIN, 'GameTest',
+        'warm launch ignored; requested backend=%{public}s perf=%{public}s session backend=%{public}s perf=%{public}s',
+        requestedBackend, requestedPerfProfile, this.sessionD3dBackend, this.sessionPerfProfile);
+      this.restoreAcceptedLaunchSnapshot();
       return;
     }
     this.applyLaunchSnapshot();
-    if (this.prefixReady && !this.initInProgress) {
+    this.acceptedGameLaunch = this.captureGameLaunchSnapshot();
+    if (this.sessionReady && !this.initInProgress) {
       this.startRequestedGame();
     } else if (!this.initInProgress && this.state === 'idle') {
       setTimeout(() => this.doInit(), 0);
+    } else {
+      hilog.info(DOMAIN, 'GameTest',
+        'warm game queued generation=%{public}d until session ready', this.launchGeneration);
     }
   }
 
   aboutToAppear(): void {
     this.applyLaunchSnapshot();
+    this.sessionD3dBackend = this.d3dBackend;
+    this.sessionPerfProfile = this.perfProfileText;
+    if (this.gameTestMode) this.acceptedGameLaunch = this.captureGameLaunchSnapshot();
     this.launchSnapshotReady = true;
 
     testNapi.setStateCallback((s: string) => {
@@ -259,6 +346,7 @@ struct Index {
 
       if (stateMsg == 'wineserver-starting' || stateMsg == 'wineboot-starting') {
         this.initInProgress = true;
+        this.sessionReady = false;
         this.setInitStatus('Wine 正在初始化...', true);
       } else if (stateMsg == 'wine-ready') {
         // C++ publishes wine-ready only after wineboot's durable completion
@@ -282,6 +370,7 @@ struct Index {
       } else if (stateMsg == 'wine-failed' || stateMsg == 'wineboot-failed' ||
         stateMsg == 'wineserver-failed') {
         this.initInProgress = false;
+        this.sessionReady = false;
         const failureText = stateMsg == 'wineboot-failed' ? 'Wine 初始化失败' :
           (stateMsg == 'wineserver-failed' ? 'Wine 服务启动失败' : '启动失败');
         if (this.pendingVkd3dSmoke || this.vkd3dSmokePhase === 'running') {
@@ -359,6 +448,7 @@ struct Index {
     this.processList = [];
     this.state = 'idle';
     this.prefixReady = false;
+    this.sessionReady = false;
     this.initInProgress = false;
     this.pendingVkd3dSmoke = false;
     this.manualVkd3dSmokePid = -1;
@@ -366,6 +456,8 @@ struct Index {
     this.gameTestMode = false;
     this.automationMode = false;
     this.perfProfileText = 'shadow-precise';
+    this.sessionD3dBackend = this.d3dBackend;
+    this.sessionPerfProfile = this.perfProfileText;
     WineWindowManager.getInstance().setAutomationMode(false);
     this.prefixMode = 'reuse';
     this.prefixRoot = `${FILES_BASE}/.wine`;
@@ -590,6 +682,7 @@ struct Index {
       try {
         if (testNapi.checkWinePrefix(this.prefixMode)) {
           this.prefixReady = true;
+          this.sessionReady = true;
           this.initInProgress = false;
           this.setInitStatus('已就绪', false);
           this.curDir = this.driveC;
@@ -606,12 +699,15 @@ struct Index {
     // 超时，仍然尝试刷新一次
     this.refreshPrefix();
     if (this.prefixReady) {
+      this.sessionReady = true;
+      this.initInProgress = false;
       this.initOverlayVisible = false;
       this.startRequestedSmoke();
       this.startRequestedGame();
       this.startPendingVkd3dSmoke();
     } else {
       this.initInProgress = false;
+      this.sessionReady = false;
       this.setInitStatus('Wine 前缀初始化超时', false);
       hilog.error(DOMAIN, 'wine', 'prefix remained unavailable after initialization timeout');
     }
@@ -943,6 +1039,9 @@ struct Index {
   }
 
   private doInit = async (): Promise<void> => {
+    if (this.initInProgress) return;
+    this.initInProgress = true;
+    this.sessionReady = false;
     // Automation owns an internal HOME and must never open a Picker.
     if (this.automationMode || this.experimentMode) {
       this.zHome = `${WINE_AUTOMATION_HOME}/`;
@@ -951,28 +1050,40 @@ struct Index {
       // used by the normal desktop session, so Z: points at installed games.
       this.zHome = '/storage/Users/currentUser/Download/app.hackeris.winehua/';
     } else {
-      const documentViewPicker = new picker.DocumentViewPicker();
-      let documentSaveResult = await documentViewPicker.save({ pickerMode: picker.DocumentPickerMode.DOWNLOAD });
-      const pickerHome = new fileUri.FileUri(documentSaveResult[0]).path;
-      this.zHome = pickerHome.endsWith('/') ? pickerHome : `${pickerHome}/`;
+      try {
+        const documentViewPicker = new picker.DocumentViewPicker();
+        const documentSaveResult = await documentViewPicker.save({
+          pickerMode: picker.DocumentPickerMode.DOWNLOAD
+        });
+        const pickerHome = new fileUri.FileUri(documentSaveResult[0]).path;
+        this.zHome = pickerHome.endsWith('/') ? pickerHome : `${pickerHome}/`;
+      } catch (error) {
+        this.initInProgress = false;
+        this.setInitStatus('未选择游戏目录', false);
+        hilog.warn(DOMAIN, 'wine', 'game directory selection cancelled: %{public}s', JSON.stringify(error));
+        return;
+      }
     }
-    // HDC shell cannot remove application-owned sandbox files. A clean smoke
+    // HDC shell cannot remove application-owned sandbox files. A clean test
     // prefix must be reset by the App before any server or socket is started.
-    if ((this.automationMode || this.experimentMode) && this.prefixMode === 'clean' && !this.cleanPrefixPrepared) {
+    if ((this.automationMode || this.experimentMode || this.gameTestMode) &&
+      this.prefixMode === 'clean' && !this.cleanPrefixPrepared) {
       this.setInitStatus('正在创建干净测试环境...', true);
       const resetOk = testNapi.resetWinePrefix('clean') as boolean;
       if (!resetOk) {
+        this.initInProgress = false;
         this.setInitStatus('干净测试环境重置失败', false);
-        hilog.error(DOMAIN, 'SmokeRunner', 'App-owned clean prefix reset failed');
+        hilog.error(DOMAIN, 'SmokeRunner', 'App-owned clean test prefix reset failed');
         return;
       }
       this.cleanPrefixPrepared = true;
       this.prefixReady = false;
-      hilog.info(DOMAIN, 'SmokeRunner', 'App-owned clean prefix reset completed');
+      hilog.info(DOMAIN, 'SmokeRunner', 'App-owned clean test prefix reset completed');
     }
     hilog.info(DOMAIN, 'wine', 'auto-init: Z home=%{public}s', this.zHome);
     const gamesDir = `${this.zHome}games`;
     if (!ensureDirectory(gamesDir)) {
+      this.initInProgress = false;
       this.setInitStatus('创建 games 目录失败', false);
       return;
     }
@@ -989,12 +1100,12 @@ struct Index {
      * replaceable files/wine runtime. Refresh only this manifest-owned tree so
      * overwrite installs cannot keep running stale test binaries. */
     if (!syncManagedSmoke(this.prefixMode)) {
+      this.initInProgress = false;
       this.setInitStatus('测试程序同步失败', false);
       hilog.error(DOMAIN, 'wine', 'auto-init: managed C:\\smoke synchronization failed');
       return;
     }
     hilog.info(DOMAIN, 'wine', 'auto-init: starting Wine...');
-    this.initInProgress = true;
     this.setInitStatus('启动服务...', true);
     /* The renderer process is created while startServer() initializes the
      * broker, before the isolated PE receives capabilityProbeEnvironment().
@@ -1002,9 +1113,10 @@ struct Index {
      * activation stops and recreates the graphics broker first. Product
      * VKD3D uses the same precise mapping contract without Gate C tracing. */
     const hostShadowProfile = this.isVkd3dExperiment() ||
-      this.perfProfileText === 'shadow-precise-direct-fence' ?
+      this.sessionPerfProfile === 'shadow-precise-direct-fence' ?
       'shadow-precise-direct-fence' :
-      (this.isVkd3dProfile() ? 'shadow-precise' : this.perfProfileText);
+      (this.sessionD3dBackend === 'vkd3d_limited_500k' ?
+        'shadow-precise' : this.sessionPerfProfile);
     testNapi.setHostShadowProfile(hostShadowProfile);
     hilog.info(DOMAIN, 'Experiment', 'host shadow profile=%{public}s experiment=%{public}s',
       hostShadowProfile, this.smokeRequest.experimentId);
@@ -1015,11 +1127,12 @@ struct Index {
       return;
     }
     testNapi.launchClient(BOX64, [], this.sockPath, `${BIN_DIR}:${WINE_LIB}`, this.zHome,
-      this.automationMode || this.experimentMode, this.prefixMode, this.d3dBackend);
+      this.automationMode || this.experimentMode, this.prefixMode, this.sessionD3dBackend);
   }
 
   private doReset = (): void => {
     this.setInitStatus('正在清空...', true);
+    this.sessionReady = false;
     try {
       testNapi.resetWinePrefix(this.prefixMode);
       this.state = 'idle';
@@ -1072,10 +1185,13 @@ struct Index {
   }
 
   private startRequestedGame = (): void => {
-    if (!this.gameTestMode ||
-      this.lastStartedGameGeneration === this.launchGeneration ||
-      this.gamePathText.length === 0) return;
-    this.lastStartedGameGeneration = this.launchGeneration;
+    const acceptedLaunch = this.acceptedGameLaunch;
+    if (!this.gameTestMode || !this.sessionReady || !acceptedLaunch ||
+      this.lastStartedGameGeneration === acceptedLaunch.generation ||
+      acceptedLaunch.gamePathText.length === 0) return;
+    // StorageLinks may have observed a later rejected Want. Restore the full
+    // accepted snapshot before deriving the process environment and argv.
+    this.restoreAcceptedLaunchSnapshot();
     let gamePath = this.gamePathText;
     const gameArguments = this.gameArguments.slice();
     if (this.experimentMode) {
@@ -1110,17 +1226,24 @@ struct Index {
       automationMode: this.experimentMode
     }) as WineProcessHandle;
     hilog.info(DOMAIN, 'GameTest',
-      'game launch path=%{public}s argc=%{public}d env=%{public}d backend=%{public}s perf=%{public}s '
-        + 'pid=%{public}d status=%{public}s',
+      'game launch generation=%{public}d path=%{public}s argc=%{public}d env=%{public}d '
+        + 'backend=%{public}s perf=%{public}s pid=%{public}d status=%{public}s',
+      acceptedLaunch.generation,
       gamePath, this.gameArguments.length, this.d3dEnvKeys.length,
       this.d3dBackend, this.perfProfileText,
       result.pid, result.status);
-    if (this.experimentMode && this.experimentStaged &&
+    const launched = result.found && result.pid > 0;
+    if (launched) {
+      this.lastStartedGameGeneration = acceptedLaunch.generation;
+    } else {
+      this.statusText = `Launch failed: ${result.status}`;
+    }
+    if (launched && this.experimentMode && this.experimentStaged &&
       this.smokeRequest.experimentResultName.length > 0) {
       this.monitorExperimentResult(this.smokeRequest.experimentId,
         this.smokeRequest.experimentResultName);
     }
-    if (this.gameClickTitlePrefix.length > 0 && this.gameClickButtonText.length > 0) {
+    if (launched && this.gameClickTitlePrefix.length > 0 && this.gameClickButtonText.length > 0) {
       const titlePrefix = this.gameClickTitlePrefix;
       const buttonText = this.gameClickButtonText;
       const delayMs = this.gameClickDelayMs;
@@ -1354,6 +1477,9 @@ struct Index {
     // and desktop/DXVK session untouched by the test payload.
     this.automationMode = true;
     this.perfProfileText = 'shadow-precise-direct-fence';
+    this.sessionD3dBackend = this.d3dBackend;
+    this.sessionPerfProfile = this.perfProfileText;
+    this.sessionReady = false;
     WineWindowManager.getInstance().setManagedToplevelTitleFilter('VKD3D Graphics Smoke');
     WineWindowManager.getInstance().setAutomationMode(true);
     this.prefixMode = 'clean';
@@ -1375,6 +1501,7 @@ struct Index {
       this.processList = [];
       this.state = 'idle';
       this.prefixReady = false;
+      this.sessionReady = false;
       this.initInProgress = false;
       setTimeout(() => this.doInit(), 250);
     } catch (e) {
