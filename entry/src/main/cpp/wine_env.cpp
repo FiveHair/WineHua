@@ -187,6 +187,12 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
             "WINEDLLPATH=" + wineDllPath,
             "WINEDLLDIR0=" + overlay64,
             "WINEDLLDIR1=" + dxvk86,
+            /* ntdll stops scanning WINEDLLDIRn at the first missing index.
+             * Keep Wine's PE runtime directories contiguous after the D3D
+             * overlays so their imports can still resolve system DLLs. */
+            "WINEDLLDIR2=" + binDir + "/x86_64-windows",
+            "WINEDLLDIR3=" + binDir + "/i386-windows",
+            "WINEDLLDIR4=" + binDir,
             /* Keep the validated DXVK Legacy compatibility switches active
              * for D3D11 applications in the mixed default session. */
             "WINEHUA_DXVK_RELAXED_FEATURES=1",
@@ -260,6 +266,11 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "WINEDLLPATH=" + wineDllPath,
         "WINEDLLDIR0=" + overlay64,
         "WINEDLLDIR1=" + overlay86,
+        /* Preserve the contiguous Wine PE runtime search path after the
+         * selected DXVK overlays. */
+        "WINEDLLDIR2=" + binDir + "/x86_64-windows",
+        "WINEDLLDIR3=" + binDir + "/i386-windows",
+        "WINEDLLDIR4=" + binDir,
     };
     for (const std::string& line : managed) UpsertEnvLine(env, line);
     if (!legacy) return;
