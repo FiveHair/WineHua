@@ -165,6 +165,10 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-descriptor-serialized");
     const bool preciseDirtyCoverageSort =
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-coverage-sort");
+    /* Diagnostic only: submit the private upload separately and wait for its
+     * fence before the Guest copy, without a queue-wide idle. */
+    const bool preciseDirtyUploadWait =
+        !strcmp(profile, "shadow-precise-dirty-ring-upload-wait");
     const bool preciseDirtyCoverageSortSampled =
         !strcmp(profile, "shadow-precise-dirty-ring-coverage-sort-sampled");
     /* Keep the established precise-dirty/coverage upload path unchanged
@@ -200,7 +204,8 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     const bool deferShmemUnref = !strcmp(profile, "shadow-precise-retain-shmem");
     const bool cpuShadowUpload =
         !strcmp(profile, "shadow-precise-cpu-upload");
-    const bool waitShadowUpload = !strcmp(profile, "shadow-precise-sync-submit");
+    const bool waitShadowUpload = !strcmp(profile, "shadow-precise-sync-submit") ||
+        preciseDirtyUploadWait;
     const bool mailboxPresent = !strcmp(profile, "shadow-precise-strong-ring-mailbox");
     const bool asyncPresent = !strcmp(
         profile, "shadow-precise-strong-ring-async-present");
@@ -217,7 +222,8 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
          preciseDirtyFrameTimeline ||
          preciseDirtyCoverageSortSampled ||
          preciseDirtyNoUploadFast || preciseDirtyInlineUpload ||
-         preciseDirtyInlineUploadSerialized) ||
+        preciseDirtyUploadWait ||
+        preciseDirtyInlineUploadSerialized) ||
         asyncPresent ||
         pollPresent ||
         mailboxPresent ||
@@ -228,6 +234,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
                         preciseDirtyFrameTimeline ||
                         preciseDirtyCoverageSortSampled || preciseDirtyNoUpload ||
                         preciseDirtyNoUploadFast || preciseDirtyInlineUpload ||
+                        preciseDirtyUploadWait ||
                         preciseDirtyInlineUploadSerialized ||
                         preciseDirtyNoMerge) ? "precise-dirty" : precise ? "precise" : skip ? "none" :
         (explicitToHost ? "to-host-explicit" : "full");
@@ -239,6 +246,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         preciseNoSemaphoreFeedbackSingleRing ? "gpu-upload" :
         legacyHostSync ? "legacy-host-sync" :
         preciseDirtyAliasCover ? "inline-gpu-upload-alias-cover" :
+        preciseDirtyUploadWait ? "gpu-upload-wait" :
         preciseDirtyCoveragePoll ? "inline-gpu-upload-coverage-sort" :
         preciseDirtyCoverageSortSampled ? "inline-gpu-upload-coverage-sort-sampled" :
         preciseDirtyBgraArrayTrace ? "inline-gpu-upload-bgra-array-trace" :

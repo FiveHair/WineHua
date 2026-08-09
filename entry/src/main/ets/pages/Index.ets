@@ -892,6 +892,7 @@ struct Index {
       this.perfProfileText === 'shadow-precise-dirty-ring-no-upload' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-no-upload-fast' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-upload-wait' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-coverage-poll' ||
@@ -937,6 +938,7 @@ struct Index {
       this.perfProfileText === 'shadow-precise-dirty-ring-no-upload' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-no-upload-fast' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-upload-wait' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-coverage-poll' ||

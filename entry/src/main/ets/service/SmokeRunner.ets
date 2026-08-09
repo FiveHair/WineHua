@@ -1412,6 +1412,7 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload' ||
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload-fast' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-upload-wait' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
           this.perfProfile === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
           this.perfProfile === 'shadow-precise-dirty-ring-coverage-poll' ||
@@ -1463,6 +1464,7 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload' ||
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload-fast' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-upload-wait' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
           this.perfProfile === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
           this.perfProfile === 'shadow-precise-dirty-ring-coverage-poll' ||

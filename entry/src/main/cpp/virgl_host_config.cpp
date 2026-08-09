@@ -110,7 +110,8 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     const bool sampledPerf =
         config.shadowTrace == "inline-gpu-upload-coverage-sort-sampled";
     const bool captureTrace = config.shadowTrace == "1" || frameAssocTrace;
-    const bool forceGpuUpload = config.shadowTrace == "gpu-upload";
+    const bool forceGpuUpload = config.shadowTrace == "gpu-upload" ||
+        config.shadowTrace == "gpu-upload-wait";
     const bool noGpuUploadFast = config.shadowTrace == "no-gpu-upload-fast";
     const bool noGpuUpload = config.shadowTrace == "no-gpu-upload" || noGpuUploadFast;
     const bool serializedGpuUpload =
@@ -139,7 +140,7 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
         (precise ? "precise" : config.shadowMode);
     const std::string toHostMode = explicitToHost || (precise && !preciseDirty)
         ? "explicit" : "full";
-    const std::string sampledTrace = precise && !frameAssocTrace ? "0" : "1";
+    const std::string sampledTrace = sampledPerf || !precise || frameAssocTrace ? "1" : "0";
 
     std::string params = config.helperPath + "|" + config.socketPath;
     AppendEnv(params, "LD_LIBRARY_PATH", config.libraryPath);
@@ -196,6 +197,10 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     AppendEnv(params, "VKR_WINEHUA_SHADOW_COVER_UPLOAD", aliasCover ? "1" : "0");
     AppendEnv(params, "WINEHUA_VKR_PRESENT_STAGE_TRACE",
               (captureTrace || presentImageTrace) ? "1" : "0");
+    AppendEnv(params, "WINEHUA_VKR_PRESENT_PREWAIT",
+              frameAssocTrace ? "1" : "0");
+    AppendEnv(params, "WINEHUA_VKR_SUBMIT_POSTWAIT",
+              frameAssocTrace ? "1" : "0");
     AppendEnv(params, "WINEHUA_VENUS_PRESENT_MODE", config.presentMode);
     AppendEnv(params, "EGL_PLATFORM", "surfaceless");
     if (config.syncMode == "egl-thread")

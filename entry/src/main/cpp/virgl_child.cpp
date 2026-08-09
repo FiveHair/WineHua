@@ -286,6 +286,8 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "VKR_WINEHUA_SHADOW_TRACE" ||
            key == "VKR_WINEHUA_BGRA_ARRAY_RGBA" ||
            key == "WINEHUA_VKR_PRESENT_STAGE_TRACE" ||
+           key == "WINEHUA_VKR_PRESENT_PREWAIT" ||
+           key == "WINEHUA_VKR_SUBMIT_POSTWAIT" ||
            key == "WINEHUA_VENUS_GPU_FRAME_PROFILE" ||
            key == "WINEHUA_VTEST_PRESENT_PERF_SUMMARY" ||
            key == "VKR_WINEHUA_PERF_SUMMARY" ||
