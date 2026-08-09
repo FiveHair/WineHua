@@ -1,0 +1,741 @@
+import { AppLibraryService, AppEntry, ScanMarks, LaunchOverrides } from '../service/AppLibraryService';
+import { WineEnvService } from '../service/WineEnvService';
+import { LogExportService } from '../service/LogExportService';
+import { ProcessService, ProcessInfo } from '../service/ProcessService';
+import { Breakpoint, BreakpointSystem } from '../common/Breakpoint';
+import { EmptyState } from './EmptyState';
+import { EngineGuide } from './EngineGuide';
+import { CustomLaunchDialog } from './CustomLaunchDialog';
+import { promptAction, ChipGroup, ChipGroupItemOptions } from '@kit.ArkUI';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+
+const DOMAIN = 0x0000;
+const TAG = 'AppLibraryView';
+
+// 分类 chips (设计 4.1): 最近使用/收藏/开始菜单/内建/外部导入;
+// 有隐藏条目时追加 hidden ("已隐藏" — 否则"隐藏"菜单项成单向陷阱, 无法找回)。
+// 初始选中不由展示顺序决定: pickInitialChip 按 CHIP_AUTO_PRIORITY 挑第一个
+// 非空分类, 避免首屏落在空分类上
+// 前两者为动态视图 (lastRun 时间戳 / favorite 旗标, 与来源正交),
+// 后三者按入库来源互斥归类 (sourceOf: builtin 旗标 > source 字段, 老数据缺省 import)
+// 控件: 系统预置 ChipGroup (@kit.ArkUI, API 12+)
+
+// 初始 chip 自动挑选优先级 (注意与展示顺序不同: 外部导入排在内建之前 — 需求指定;
+// 展示顺序见 chipDefs, 两者独立)。hidden 不参与: 它是找回入口, 不该成为首屏
+const CHIP_AUTO_PRIORITY: Array<string> = ['recent', 'favorite', 'startmenu', 'import', 'builtin'];
+
+// chip 定义 (ArkTS 禁止内联对象类型, 需显式 interface)
+interface ChipDef {
+  kind: string;
+  label: string;
+}
+
+// 重命名输入对话框 (MenuItem"重命名"弹出)
+@CustomDialog
+struct RenameDialog {
+  controller?: CustomDialogController;
+  initial: string = '';
+  onDone: (name: string) => void = () => {};
+  @State text: string = '';
+
+  aboutToAppear(): void {
+    this.text = this.initial;
+  }
+
+  build() {
+    Column({ space: 14 }) {
+      Text('重命名')
+        .fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.text_primary'))
+      TextInput({ text: this.initial })
+        .onChange((value: string) => {
+          this.text = value;
+        })
+      Row({ space: 12 }) {
+        Button('取消')
+          .layoutWeight(1)
+          .backgroundColor($r('app.color.control_bg'))
+          .onClick(() => this.controller?.close())
+        Button('确定')
+          .layoutWeight(1)
+          .onClick(() => {
+            this.onDone(this.text);
+            this.controller?.close();
+          })
+      }
+      .width('100%')
+    }
+    .padding(18)
+    .backgroundColor($r('app.color.overlay_bg'))
+    .borderRadius(12)
+  }
+}
+
+// 应用库页 (设计 4.1): 搜索框 (右侧"扫描"菜单) + ChipGroup 分类 (最近使用/收藏/
+// 开始菜单/内建/外部导入) + 卡片网格 (lg, 列数随宽自适应) / 列表 (sm·md)。
+// 条目 (网格卡片与列表行共用 entryItem): 左图标, 右侧两行 — 名称 / exe 文件名 +
+// 类型标签 ("内建"·"收藏"小胶囊); 单击启动 (加载态为半透明遮罩+转圈),
+// 长按(PC 右键)菜单: 启动/收藏/重命名/配置/隐藏/打开所在目录/从列表移除 (内建工具不可隐藏/移除)。
+
+// entryItem 参数 (ArkTS 多参 Builder 需对象字面量; loadingAsIcon=true 时
+// 加载态显示在图标位 — 列表行用; 网格卡片另有整卡遮罩, 传 false)
+interface EntryItemSpec {
+  entry: AppEntry;
+  iconSize: number;
+  loadingAsIcon: boolean;
+}
+@Component
+export struct AppLibraryView {
+  @State entries: AppEntry[] = [];
+  @State prefixReady: boolean = false;
+  // 断点镜像: lg → Grid 大卡, sm/md → List
+  @State bp: Breakpoint = 'lg';
+  @State chip: string = 'recent';
+  // 搜索关键字 (名称/路径子串, 大小写不敏感)
+  @State searchText: string = '';
+  // Grid columnsTemplate: 随可用宽度自适应 (300vp/列, 1~4 列)
+  @State gridCols: string = '1fr 1fr';
+  // 启动反馈: 点击后卡片进入加载态。成功 = 受理 pid 3s 后仍在进程表
+  // (getProcessList 只含 running, 闪退进程届时已被 ProcMon 摘除);
+  // 失败 = 受理即失败 / evt:launch-failed / 该 pid 的 evt:proc-exited。
+  // 不再用 wine-running 当成功信号 — 它的语义只是"broker 受理 spawn",
+  // 闪退程序会被误判成功
+  @State launchingPath: string = '';
+  // 扫描进行中状态由 AppLibraryService 持有 (scanning/scanLabel), 全窗遮罩
+  // 渲染在 Index 根 Stack — 要盖住侧栏, 页面内遮罩只覆盖内容区 (bindContentCover
+  // 方案实测不弹出, 且拦截范围不够); 本页只经 runScan 触发扫描
+  // 初始 chip 是否已自动挑选过 (见 pickInitialChip)
+  private chipAutoPicked: boolean = false;
+  // 空态"去文件页"回调, 由 Index 注入 (切换 Tabs 到文件页), 有才显示按钮
+  onNavigateToFiles?: () => void;
+  // "打开所在目录"回调, 由 Index 注入 (定位文件页到目录), 有才显示该菜单项
+  onOpenDir?: (dirPath: string) => void;
+
+  private lib: AppLibraryService = AppLibraryService.getInstance();
+  private env: WineEnvService = WineEnvService.getInstance();
+  private launchTimer: number = -1;
+  private launchingPid: number = -1;
+  private renameController: CustomDialogController | null = null;
+  private customLaunchController: CustomDialogController | null = null;
+
+  private mirror = (): void => {
+    const wasReady = this.prefixReady;
+    this.entries = this.lib.entries;
+    this.prefixReady = this.env.prefixReady;
+    // prefix 就绪 false→true 边沿: 补内建工具入库 (service 内部幂等,
+    // 边沿触发避免 mirror↔notify 反馈回路)
+    if (this.prefixReady && !wasReady) {
+      this.lib.ensureBuiltinTools();
+    }
+    this.pickInitialChip();
+  }
+
+  // 初始 chip 自动挑选: 按 CHIP_AUTO_PRIORITY 选第一个有内容的分类, 避免默认
+  // 落在空分类 (如全新安装的"最近使用") 让用户首屏面对空界面。
+  // 仅在"能挑到非空分类"时置位; 全空则保持 recent (空态文案带引导), 不置位 —
+  // 后续入库 (如 prefix 就绪边沿内建工具落库) 触发的 mirror 会再试。
+  // 用户手动切换 chip 时也置位 (见 ChipGroup onChange), 之后不再抢夺选择
+  private pickInitialChip(): void {
+    if (this.chipAutoPicked) {
+      return;
+    }
+    const vis = this.entries.filter((e: AppEntry) => !e.hidden);
+    const nonEmpty = (kind: string): boolean => {
+      switch (kind) {
+        case 'recent': return vis.some((e: AppEntry) => e.lastRun !== undefined);
+        case 'favorite': return vis.some((e: AppEntry) => e.favorite);
+        case 'startmenu': return vis.some((e: AppEntry) => this.lib.sourceOf(e) == 'lnk');
+        case 'import': return vis.some((e: AppEntry) => this.lib.sourceOf(e) == 'import');
+        case 'builtin': return vis.some((e: AppEntry) => e.builtin);
+        default: return false;
+      }
+    };
+    for (const kind of CHIP_AUTO_PRIORITY) {
+      if (nonEmpty(kind)) {
+        this.chip = kind;
+        this.chipAutoPicked = true;
+        return;
+      }
+    }
+  }
+
+  // 启动反馈事件流: 只关心本次受理 pid 的退出与全局 launch-failed
+  private onLaunchEvent = (evt: string): void => {
+    if (!this.launchingPath) {
+      return;
+    }
+    if (evt == 'launch-failed') {
+      this.failLaunching('程序启动失败。可尝试切换渲染策略（环境页）后重试');
+      return;
+    }
+    if (evt.startsWith('proc-exited:')) {
+      const pid = Number(evt.substring(12));
+      if (pid == this.launchingPid) {
+        this.failLaunching('程序启动后闪退。可尝试切换渲染策略（环境页）或开启兼容模式后重试');
+      }
+    }
+  }
+
+  aboutToAppear(): void {
+    this.lib.subscribe(this.mirror);
+    this.env.subscribe(this.mirror);
+    this.env.subscribeEvents(this.onLaunchEvent);
+    const bps = BreakpointSystem.getInstance();
+    bps.subscribe(() => {
+      this.bp = bps.current;
+    });
+    this.bp = bps.current;
+    this.mirror();
+  }
+
+  private clearLaunching(): void {
+    this.launchingPath = '';
+    this.launchingPid = -1;
+    if (this.launchTimer >= 0) {
+      clearTimeout(this.launchTimer);
+      this.launchTimer = -1;
+    }
+  }
+
+  // 启动失败: 读状态清理 + 失败对话框 (可读原因 + 导出日志入口, 设计 4.1)
+  private failLaunching(reason: string): void {
+    this.clearLaunching();
+    AlertDialog.show({
+      title: '启动失败',
+      message: reason,
+      primaryButton: {
+        value: '知道了',
+        action: () => {}
+      },
+      secondaryButton: {
+        value: '导出日志',
+        action: () => {
+          const path = LogExportService.getInstance().exportLogs(this.env);
+          promptAction.showToast({ message: path ? '日志已导出到下载目录' : '日志导出失败' });
+        }
+      }
+    });
+  }
+
+  private async launch(entry: AppEntry, overrides?: LaunchOverrides): Promise<void> {
+    // launchingPath 兼作防重入 — 引擎拉起/ensureDesktop 等待窗口期重复点击
+    // 不会启动多个实例
+    if (this.launchingPath) {
+      return;
+    }
+    if (!this.env.canLaunch()) {
+      // 引擎未就绪: 编排/后台自动启动进行中 (isBusy) 明确提示稍后再试,
+      // 不与编排抢跑; 否则点 app 即隐含启动引擎意图 — 进加载态拉起引擎后走原流程
+      if (this.env.isBusy()) {
+        promptAction.showToast({ message: 'Wine 正在启动中，稍后再试' });
+        return;
+      }
+      this.launchingPath = entry.path;   // 占位: 卡片进入加载态 + 防重入
+      this.launchingPid = -1;
+      const ready = await this.env.ensureEngineReady();
+      if (!ready) {
+        this.failLaunching('Wine 引擎启动失败。可尝试到设置页重启引擎或重置环境后重试');
+        return;   // failLaunching 内部 clearLaunching 清占位
+      }
+    }
+    // 已就绪但无桌面会话：先拉起桌面，避免程序启动后只有程序窗口没有桌面
+    if (!this.env.sessionAlive) {
+      this.launchingPath = entry.path;   // 占位: 卡片进入加载态 + 防重入
+      this.launchingPid = -1;
+      const ok = await this.env.ensureDesktop();
+      if (!ok) {
+        this.failLaunching('桌面启动失败。可尝试到环境页重启引擎后重试');
+        return;   // failLaunching 内部 clearLaunching 清占位
+      }
+    }
+    this.clearLaunching();
+    const pid = this.lib.launch(entry.path, overrides);
+    if (pid <= 0) {
+      this.failLaunching('程序启动失败。可尝试切换渲染策略（环境页）后重试');
+      return;
+    }
+    this.launchingPath = entry.path;
+    this.launchingPid = pid;
+    // 3s 存活判成功: 闪退进程此时已被 ProcMon (1Hz) 摘除; proc-exited 事件
+    // 先到则立即判失败 (见 onLaunchEvent)
+    this.launchTimer = setTimeout(() => {
+      if (!this.launchingPath) {
+        return;
+      }
+      const alive = ProcessService.getInstance().processList
+        .some((p: ProcessInfo) => p.pid == this.launchingPid);
+      if (alive) {
+        this.clearLaunching();
+      } else {
+        this.failLaunching('程序启动后闪退。可尝试切换渲染策略（环境页）或开启兼容模式后重试');
+      }
+    }, 3000);
+  }
+
+  private confirmRemove(entry: AppEntry): void {
+    AlertDialog.show({
+      title: '移除应用',
+      message: `确定从应用库移除「${entry.name}」吗？（不会删除文件）`,
+      primaryButton: {
+        value: '取消',
+        action: () => {}
+      },
+      secondaryButton: {
+        value: '移除',
+        fontColor: $r('app.color.danger'),
+        action: () => {
+          this.lib.remove(entry.path);
+        }
+      }
+    });
+  }
+
+  private openRename(entry: AppEntry): void {
+    this.renameController = new CustomDialogController({
+      builder: RenameDialog({
+        initial: entry.name,
+        onDone: (name: string) => {
+          this.lib.rename(entry.path, name);
+        }
+      }),
+      autoCancel: true
+    });
+    this.renameController.open();
+  }
+
+  // 自定义启动: 弹窗选渲染策略 + 兼容模式档位 → 按临时参数启动一次 (不持久化)。
+  // onLaunch 里 this.launch(entry, { graphics, compatMode }) 透传弹窗选择
+  private customLaunch(entry: AppEntry): void {
+    this.customLaunchController = new CustomDialogController({
+      builder: CustomLaunchDialog({
+        exeName: entry.name,
+        onLaunch: (graphics?: 'dxvk' | 'wined3d',
+                   compatMode?: 'compat' | 'balanced' | 'perf') => {
+          this.launch(entry, { graphics: graphics, compatMode: compatMode });
+        }
+      }),
+      autoCancel: true
+    });
+    this.customLaunchController.open();
+  }
+
+  // exe 路径 → 所在目录 (去掉最后一段文件名)
+  private dirOf(path: string): string {
+    const idx = path.lastIndexOf('/');
+    return idx > 0 ? path.substring(0, idx) : path;
+  }
+
+  // 当前 chip + 搜索关键字过滤后的条目。
+  // 有搜索词时跨分类全局搜 (五分类互斥后, 片内搜索会让"明明在库的应用"
+  // 在别的分类下搜不到, 比不过滤更迷惑); 隐藏条目不参与全局搜索
+  private filtered(): AppEntry[] {
+    const kw = this.searchText.toLowerCase();
+    if (kw) {
+      return this.entries.filter((e: AppEntry) => !e.hidden &&
+        (e.name.toLowerCase().includes(kw) || e.path.toLowerCase().includes(kw)));
+    }
+    switch (this.chip) {
+      case 'recent':
+        // filter 返回新数组, 原地 sort 安全; lastRun 新→旧
+        return this.entries.filter((e: AppEntry) => e.lastRun !== undefined && !e.hidden)
+          .sort((a: AppEntry, b: AppEntry) => (b.lastRun ?? 0) - (a.lastRun ?? 0));
+      case 'favorite':
+        return this.entries.filter((e: AppEntry) => e.favorite && !e.hidden);
+      case 'startmenu':
+        return this.entries.filter((e: AppEntry) => this.lib.sourceOf(e) == 'lnk' && !e.hidden);
+      case 'builtin':
+        return this.entries.filter((e: AppEntry) => e.builtin && !e.hidden);
+      case 'import':
+        return this.entries.filter((e: AppEntry) => this.lib.sourceOf(e) == 'import' && !e.hidden);
+      case 'hidden':
+        return this.entries.filter((e: AppEntry) => e.hidden);
+      default:
+        return this.entries.filter((e: AppEntry) => !e.hidden);
+    }
+  }
+
+  private hasHidden(): boolean {
+    return this.entries.some((e: AppEntry) => e.hidden);
+  }
+
+  // chip 定义 (kind + 文案): hidden 项仅在有隐藏条目或正处于 hidden 时出现
+  private chipDefs(): ChipDef[] {
+    const defs: ChipDef[] = [
+      { kind: 'recent', label: '最近使用' },
+      { kind: 'favorite', label: '收藏' },
+      { kind: 'startmenu', label: '开始菜单' },
+      { kind: 'builtin', label: '内建' },
+      { kind: 'import', label: '外部导入' }
+    ];
+    if (this.hasHidden() || this.chip == 'hidden') {
+      defs.push({ kind: 'hidden', label: '已隐藏' });
+    }
+    return defs;
+  }
+
+  // 各分类空态文案 (有搜索词时统一为"没有匹配")
+  private emptyTitle(): string {
+    if (this.searchText) {
+      return '没有匹配的应用';
+    }
+    switch (this.chip) {
+      case 'recent': return '还没有运行记录';
+      case 'favorite': return '还没有收藏';
+      case 'startmenu': return '没有开始菜单快捷方式';
+      case 'builtin': return '内建工具未就绪';
+      case 'import': return '还没有导入的应用';
+      case 'hidden': return '没有隐藏的应用';
+      default: return '应用库为空';
+    }
+  }
+
+  private emptyDesc(): string {
+    if (this.searchText) {
+      return '';
+    }
+    switch (this.chip) {
+      case 'recent': return '从应用库或文件页启动应用后，会显示在这里';
+      case 'favorite': return '长按应用卡片，选择「收藏」';
+      case 'startmenu': return '安装 Windows 程序后，扫描它的开始菜单快捷方式';
+      case 'builtin': return '环境初始化完成后自动加入';
+      case 'import': return '把 Windows 程序放入下载目录 (Z:)，或在文件页导入';
+      default: return '';
+    }
+  }
+
+  // 扫描菜单 (搜索框右侧"扫描"点击弹出): 两个入库来源分别对应一个分类 ——
+  // 开始菜单 = lnk 解析 (scanShortcuts), 外部导入 = Z: 目录 exe (scanZExes)
+  @Builder
+  scanMenu() {
+    Menu() {
+      MenuItem({ content: '扫描开始菜单' })
+        .onChange(() => {
+          this.runScan('lnk');
+        })
+      MenuItem({ content: '扫描 Z: 目录' })
+        .onChange(() => {
+          this.runScan('z');
+        })
+    }
+  }
+
+  // 扫描统一入口 (菜单与空态按钮共用)。扫描期间 Index 根 Stack 的全窗遮罩
+  // 拦触摸 (状态由 service 持有), 防扫描中误操作造成状态交错; lib.scanning
+  // 兼作防重入。扫描内部是异步 fs (LnkScanner/collectExe 均为 Promise 版),
+  // 事件循环保持活性 — 遮罩转圈动画能正常播放; 若用同步 API, 遮罩自己都会冻结
+  private async runScan(kind: string): Promise<void> {
+    if (this.lib.scanning) {
+      return;
+    }
+    const t0 = Date.now();
+    hilog.info(DOMAIN, TAG, 'runScan start kind=%{public}s', kind);
+    try {
+      if (kind == 'lnk') {
+        const r: ScanMarks = await this.lib.scanShortcuts();
+        promptAction.showToast({
+          message: r.added > 0 ? `新增 ${r.added} 个应用`
+            : r.classified > 0 ? `${r.classified} 个应用归入开始菜单`
+            : '没有发现新快捷方式'
+        });
+      } else {
+        const added = await this.lib.scanZExes();
+        promptAction.showToast({ message: added > 0 ? `新增 ${added} 个应用` : '没有发现新程序' });
+      }
+    } finally {
+      hilog.info(DOMAIN, TAG, 'runScan end kind=%{public}s elapsed=%{public}dms', kind, Date.now() - t0);
+    }
+  }
+
+  // 条目菜单 (右键与长按通用, 设计 4.1)
+  @Builder
+  entryMenu(entry: AppEntry) {
+    Menu() {
+      MenuItem({ content: '启动' })
+        .onChange(() => {
+          this.launch(entry);
+        })
+      MenuItem({ content: entry.favorite ? '取消收藏' : '收藏' })
+        .onChange(() => {
+          this.lib.toggleFavorite(entry.path);
+        })
+      MenuItem({ content: '重命名' })
+        .onChange(() => {
+          this.openRename(entry);
+        })
+      MenuItem({ content: '自定义启动' })
+        .onChange(() => {
+          this.customLaunch(entry);
+        })
+      if (!entry.builtin) {
+        MenuItem({ content: entry.hidden ? '取消隐藏' : '隐藏' })
+          .onChange(() => {
+            this.lib.setHidden(entry.path, !entry.hidden);
+          })
+      }
+      if (this.onOpenDir) {
+        MenuItem({ content: '打开所在目录' })
+          .onChange(() => {
+            if (this.onOpenDir) {
+              this.onOpenDir(this.dirOf(entry.path));
+            }
+          })
+      }
+      if (!entry.builtin) {
+        MenuItem({ content: '从列表移除' })
+          .contentFontColor($r('app.color.danger'))
+          .onChange(() => {
+            this.confirmRemove(entry);
+          })
+      }
+    }
+  }
+
+  // 条目内容 (Grid 卡片与 sm/md 列表行共用, 参考 .temp/ui 设计稿):
+  // 左图标, 右侧两行 — 上行名称, 下行绝对路径 (Windows 形式 C:\ / Z:\, 超长省略)
+  // + 类型标签 ("内建"·"收藏" 小胶囊)
+  @Builder
+  entryItem($$: EntryItemSpec) {
+    Row({ space: 10 }) {
+      if ($$.loadingAsIcon && this.launchingPath == $$.entry.path) {
+        LoadingProgress()
+          .width(22).height(22)
+          .color($r('app.color.accent'))
+      } else if ($$.entry.icon) {
+        Image(`file://${$$.entry.icon}`)
+          .width($$.iconSize).height($$.iconSize)
+      } else {
+        // 无图标占位: 系统网格符号 (启动器入口语义, 同任务列表/文件页 exe 行)
+        SymbolGlyph($r('sys.symbol.square_grid_2x2'))
+          .fontSize($$.iconSize - 8)
+          .fontColor([$r('app.color.accent')])
+          .width($$.iconSize).height($$.iconSize)
+      }
+      Column({ space: 3 }) {
+        Text($$.entry.name)
+          .fontSize(14)
+          .fontColor($r('app.color.text_primary'))
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Row({ space: 6 }) {
+          Text(this.lib.windowsPathOf($$.entry.path))
+            .fontSize(11)
+            .fontColor($r('app.color.text_tertiary'))
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            // 绝对路径是无空格连续串, 默认 BREAK_WORD 按"单词"截断会整串
+            // 省略 (只剩 "C:"); BREAK_ALL 按字符截断, 末尾省略号用满右侧空间
+            .wordBreak(WordBreak.BREAK_ALL)
+          if ($$.entry.builtin) {
+            Text('内建')
+              .fontSize(9)
+              .fontColor($r('app.color.text_secondary'))
+              .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+              .backgroundColor($r('app.color.control_bg'))
+              .borderRadius(4)
+          }
+          if ($$.entry.favorite) {
+            Text('收藏')
+              .fontSize(9)
+              .fontColor($r('app.color.accent'))
+              .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+              .backgroundColor($r('app.color.accent_bg'))
+              .borderRadius(4)
+          }
+        }
+        .width('100%')
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
+  }
+
+  // lg 网格卡片: entryItem + 启动反馈整卡遮罩 (图标保持可见)
+  @Builder
+  gridCard(entry: AppEntry) {
+    Stack() {
+      // 水平 padding 必须挂在内容层而非 Stack 根: 子组件 100% 宽相对父容器
+      // 扣除 padding 后的内容区, 挂根部会让遮罩左右各缺 12vp 露边
+      Row() {
+        this.entryItem({ entry: entry, iconSize: 44, loadingAsIcon: false })
+      }
+      .width('100%').height('100%')
+      .padding({ left: 12, right: 12 })
+      if (this.launchingPath == entry.path) {
+        Column() {
+          LoadingProgress()
+            .width(32).height(32)
+            .color($r('app.color.accent'))
+        }
+        .width('100%').height('100%')
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor('#99000000')
+        .borderRadius(12)
+      }
+    }
+    .width('100%').height(76)
+    .backgroundColor($r('app.color.card_bg'))
+    .borderRadius(12)
+    // 手势挂在卡片实体节点上 (与重构前一致): GridItem 是虚拟容器,
+    // 长按手势派发与实体节点不同, 挂 GridItem 上实测长按菜单不弹出
+    .onClick(() => this.launch(entry))
+    .hoverEffect(HoverEffect.Highlight)
+    // modalMode 同 FileBrowserView 注: 默认点击穿透下层, TARGET_WINDOW 菜单外点击仅关菜单
+    // 平板长按 + PC 右键双触发: 不同 ResponseType 独立绑定互不覆盖
+    .bindContextMenu(this.entryMenu(entry), ResponseType.LongPress,
+      { modalMode: ModalMode.TARGET_WINDOW })
+    .bindContextMenu(this.entryMenu(entry), ResponseType.RightClick,
+      { modalMode: ModalMode.TARGET_WINDOW })
+  }
+
+  build() {
+    Column() {
+      // 首行: 搜索框 + 扫描入口 (扫描固定最右; 菜单: 扫描开始菜单 / 扫描 Z: 目录)。
+      // 页头不放"应用库"大标题 — 侧栏已标识当前页, 标题只占纵向空间
+      // 间距必须加在"扫描"侧: layoutWeight(1) 组件的 margin / 父容器 space 在剩余
+      // 空间分配时不扣除, 加在 Search 上会被吸收 (两版实测均无效)
+      Row() {
+        Search({ placeholder: '搜索应用名称或路径' })
+          .height(36)
+          .layoutWeight(1)
+          .onChange((value: string) => {
+            this.searchText = value.trim();
+          })
+        Text('扫描')
+          .fontColor($r('app.color.accent'))
+          .padding({ left: 16, top: 4, bottom: 4 })
+          // modalMode 同 bindContextMenu 处注释: 默认菜单外点击穿透下层
+          .bindMenu(this.scanMenu(), { modalMode: ModalMode.TARGET_WINDOW })
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 14, right: 14, top: 8 })
+
+      // 筛选 chips: 系统预置 ChipGroup, 单选
+      // chipGroupPadding 控制上下内边距 (默认 14vp), 设小值压缩行高;
+      // 实测确认是否生效 (此前清零疑似被外层 padding 干扰)
+      ChipGroup({
+        items: this.chipDefs().map((d): ChipGroupItemOptions => ({ label: { text: d.label } })),
+        selectedIndexes: [Math.max(0, this.chipDefs().findIndex((d) => d.kind == this.chip))],
+        multiple: false,
+        chipGroupPadding: { top: 2, bottom: 2 },
+        onChange: (sel: Array<number>) => {
+          // 单选再点已选项时回调空数组, 忽略以保留当前选中
+          if (sel.length > 0) {
+            this.chip = this.chipDefs()[sel[0]].kind;
+            // 手动选择后即锁定, pickInitialChip 不再覆盖 (见该函数注释)
+            this.chipAutoPicked = true;
+          }
+        }
+      })
+      .padding({ left: 14, right: 14, top: 6, bottom: 8 })
+
+      Stack() {
+      // 引擎未就绪引导 (共享 EngineGuide, prefix 未初始化): 优先于空态显示 —
+      // 首次启动时 entries 为空, 空态文案 (如"还没有运行记录") 会误导用户
+      // 以为没应用, 实际是需要先启动引擎初始化环境 (解压数据 + 建 prefix)
+      if (!this.prefixReady) {
+        EngineGuide()
+      } else if (this.filtered().length == 0) {
+        Column() {
+          EmptyState({
+            icon: $r('sys.symbol.square_grid_2x2'),
+            title: this.emptyTitle(),
+            desc: this.emptyDesc()
+          })
+          // 可扫描的分类在空态给出直达按钮 (搜索框旁"扫描"菜单的替身, 减少发现成本)
+          if (!this.searchText && (this.chip == 'startmenu' || this.chip == 'import')) {
+            Row({ space: 12 }) {
+              if (this.chip == 'startmenu') {
+                Button('扫描开始菜单')
+                  .backgroundColor($r('app.color.control_bg'))
+                  .onClick(() => {
+                    this.runScan('lnk');
+                  })
+              } else {
+                Button('扫描 Z: 目录')
+                  .backgroundColor($r('app.color.control_bg'))
+                  .onClick(() => {
+                    this.runScan('z');
+                  })
+                if (this.onNavigateToFiles) {
+                  Button('去文件页')
+                    .backgroundColor($r('app.color.control_bg'))
+                    .onClick(() => {
+                      if (this.onNavigateToFiles) {
+                        this.onNavigateToFiles();
+                      }
+                    })
+                }
+              }
+            }
+            .margin({ top: 8 })
+          }
+        }
+        .width('100%').height('100%')
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor($r('app.color.window_bg'))
+      } else if (this.bp == 'lg') {
+        // lg 卡片栅格 (Pad 全屏 / PC 宽窗): 横向双行卡片较宽, 按 300vp/列取 1~4 列
+        Grid() {
+          // key 带上会变的显示字段 (名称/收藏/图标): ArkUI ForEach 同 key 复用
+          // 子项不重跑 builder, 而 entry.name 等是普通对象字段非状态变量, 重命名
+          // 后 key 不变则界面永久滞留旧名 (需手动刷新才显示的根因; TaskListView
+          // 图标 key 同款先例)。launchingPath 是 @State 走细粒度订阅, 无需进 key
+          ForEach(this.filtered(), (entry: AppEntry) => {
+            GridItem() {
+              this.gridCard(entry)
+            }
+          }, (entry: AppEntry) => `${entry.path}|${entry.name}|${entry.favorite ? 1 : 0}|${entry.icon ?? ''}`)
+        }
+        .columnsTemplate(this.gridCols)
+        .columnsGap(12)
+        .rowsGap(12)
+        .padding(12)
+        .width('100%').height('100%')
+        .backgroundColor($r('app.color.window_bg'))
+        .onAreaChange((_oldValue: Area, newValue: Area) => {
+          // 断点 lg 一刀切会窗口稍窄挤、超宽稀; 按可用宽度算列数
+          const cols = Math.max(1, Math.min(4, Math.floor((newValue.width as number) / 300)));
+          const tpl = '1fr '.repeat(cols).trim();
+          if (tpl != this.gridCols) {
+            this.gridCols = tpl;
+          }
+        })
+      } else {
+        // sm/md 列表 (与网格共用 entryItem, 加载态在图标位)
+        List({ space: 1 }) {
+          ForEach(this.filtered(), (entry: AppEntry) => {
+            ListItem() {
+              // Builder 调用返回 void 不能链式挂属性, 包一层 Row (实体节点) 承载手势
+              Row() {
+                this.entryItem({ entry: entry, iconSize: 36, loadingAsIcon: true })
+              }
+              .width('100%').height(60)
+              .padding({ left: 14, right: 14 })
+              // 手势挂在行实体节点上 (与重构前一致, 见 Grid 卡片同注)
+              .onClick(() => this.launch(entry))
+              .hoverEffect(HoverEffect.Highlight)
+              // modalMode 同上方 Grid 分支注释
+              .bindContextMenu(this.entryMenu(entry), ResponseType.LongPress,
+                { modalMode: ModalMode.TARGET_WINDOW })
+              .bindContextMenu(this.entryMenu(entry), ResponseType.RightClick,
+                { modalMode: ModalMode.TARGET_WINDOW })
+            }
+            .backgroundColor($r('app.color.card_bg'))
+            // key 规则同上方 Grid 分支注释 (带名称/收藏/图标, 强制变更行重建)
+          }, (entry: AppEntry) => `${entry.path}|${entry.name}|${entry.favorite ? 1 : 0}|${entry.icon ?? ''}`)
+        }
+        .width('100%').height('100%')
+        .scrollBar(BarState.Off)
+        .backgroundColor($r('app.color.window_bg'))
+      }
+      }
+      .layoutWeight(1).width('100%')
+    }
+    .width('100%').height('100%')
+    // 根容器统一背景: 启动器下层是桌面 XComponent, 根透明会透出桌面 (顶行/分支不再单设)
+    .backgroundColor($r('app.color.window_bg'))
+  }
+}
