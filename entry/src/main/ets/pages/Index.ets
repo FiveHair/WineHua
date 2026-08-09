@@ -899,6 +899,7 @@ struct Index {
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-bgra-array-trace' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-present-image-trace' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-perf' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-gpu-frame-profile' ||
@@ -943,6 +944,7 @@ struct Index {
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
+      this.perfProfileText === 'shadow-precise-dirty-ring-bgra-array-trace' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-present-image-trace' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-perf' ||
       this.perfProfileText === 'shadow-precise-dirty-ring-gpu-frame-profile' ||

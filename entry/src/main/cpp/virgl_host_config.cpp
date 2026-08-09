@@ -95,8 +95,11 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     const bool explicitToHost = config.shadowMode == "to-host-explicit";
     const bool preciseDirty = config.shadowMode == "precise-dirty";
     const bool precise = config.shadowMode == "precise" || preciseDirty;
+    const bool bgraArrayTrace =
+        config.shadowTrace == "inline-gpu-upload-bgra-array-trace";
     const bool frameAssocTrace =
-        config.shadowTrace == "inline-gpu-upload-frame-assoc-trace";
+        config.shadowTrace == "inline-gpu-upload-frame-assoc-trace" ||
+        bgraArrayTrace;
     /* Gate C is an isolated diagnostic profile. Keep its mapped-memory and
      * direct-fence semantics while tracing the exact private swapchain image
      * across the guest, vtest and Host presenter boundary. */
@@ -165,6 +168,7 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     AppendEnv(params, "VKR_WINEHUA_SHADOW_FROM_HOST", fromHostMode);
     AppendEnv(params, "VKR_WINEHUA_SHADOW_TO_HOST", toHostMode);
     AppendEnv(params, "VKR_WINEHUA_SHADOW_TRACE", captureTrace ? "1" : "0");
+    AppendEnv(params, "VKR_WINEHUA_BGRA_ARRAY_RGBA", bgraArrayTrace ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_PERF_SUMMARY", perfSummary ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_PERF_SAMPLE_INTERVAL", sampledPerf ? "120" : "0");
     AppendEnv(params, "VKR_WINEHUA_FRAME_TIMELINE_INTERVAL", frameTimeline ? "120" : "0");

@@ -162,6 +162,22 @@ def run_hdc_install(hdc: str, device_id: str, hap_path: Path) -> tuple[int, str]
     return result.returncode, result.stdout
 
 
+def run_hdc_windows(hdc: str, device_id: str, *args: str) -> tuple[int, str]:
+    """Run an HDC command through Windows without collapsing its argv."""
+    def ps_quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    command = " ".join([
+        f"& {ps_quote(hdc_local_path(Path(hdc)))}",
+        "-t", ps_quote(device_id),
+        *(ps_quote(arg) for arg in args),
+    ])
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, errors="replace")
+    return result.returncode, result.stdout
+
+
 def get_device_text(hdc: str, device_id: str, remote_path: str) -> str:
     """Return the first balanced { ... } span from a remote file, or ''."""
     code, text = run_hdc(hdc, device_id, "shell", "cat", remote_path)
@@ -832,9 +848,6 @@ def get_d3d11_coverage(summary: dict, run_suite: str, long_seconds: int) -> dict
             "offscreenRenderTarget": bool(metrics.get("offscreenRenderTarget")),
             "msaa4xSupported": bool(metrics.get("msaa4xSupported")),
             "msaaResolveFunctional": bool(metrics.get("msaaResolveFunctional")),
-            "stencilQueryEnabled": bool(metrics.get("stencilQueryEnabled")),
-            "stencilPixelFunctional": bool(metrics.get("stencilPixelFunctional")),
-            "stencilQueryFunctional": bool(metrics.get("stencilFunctional")),
             "computeShaderDispatch": bool(metrics.get("computeShaderDispatch")),
             "computeUavSubmitted": bool(metrics.get("computeUavSubmitted")),
             "computeUavFunctional": bool(metrics.get("computeUavFunctional")),
@@ -860,6 +873,11 @@ def get_d3d11_coverage(summary: dict, run_suite: str, long_seconds: int) -> dict
             "requiredPass": not missing,
             "missingRequired": missing,
             "submittedOnly": submitted_only,
+            "optionalDiagnostics": {
+                "stencilQueryEnabled": bool(metrics.get("stencilQueryEnabled")),
+                "stencilPixelFunctional": bool(metrics.get("stencilPixelFunctional")),
+                "stencilQueryFunctional": bool(metrics.get("stencilFunctional")),
+            },
             "metrics": {
                 "presentFrames": int(metrics.get("presentFrames", 0)),
                 "queueSubmitCount": int(metrics.get("queueSubmitCount", 0)),
@@ -924,22 +942,22 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
     # starting Wayland, wineserver or Wine.
     run_hdc(hdc, device_id, "shell", "power-shell", "wakeup")
     run_hdc(hdc, device_id, "shell", "hilog", "-x")
-    start_command = (" ".join([
-        "aa", "start", "-a", ABILITY, "-b", BUNDLE,
+    start_args = (
+        "shell", "aa", "start", "-a", ABILITY, "-b", BUNDLE,
         "--ps", "winehua.mode", "smoke",
         "--ps", "winehua.run_id", run_id,
         "--ps", "winehua.suite", run_suite,
         "--ps", "winehua.prefix", run_prefix,
         "--ps", "winehua.perf_profile", perf_profile,
         "--ps", "winehua.long_seconds", str(long_seconds),
-    ]))
-    code, start_output = run_hdc(hdc, device_id, "shell", start_command)
+    )
+    code, start_output = run_hdc_windows(hdc, device_id, *start_args)
     if "10106102" in start_output:
         # Devices without a credential can be dismissed with one deterministic
         # swipe.  A credential-protected lock remains an infrastructure error.
         run_hdc(hdc, device_id, "shell",
                 "uitest uiInput swipe 1280 1350 1280 300 1200")
-        code, start_output = run_hdc(hdc, device_id, "shell", start_command)
+        code, start_output = run_hdc_windows(hdc, device_id, *start_args)
     (run_directory / "start.log").write_text(start_output, encoding="utf-8")
     if code != 0 or "start ability successfully" not in start_output:
         raise RuntimeError(f"Want start failed: {start_output.strip()}")

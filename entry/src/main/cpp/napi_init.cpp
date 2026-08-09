@@ -174,8 +174,11 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     const bool preciseDirtyAliasCover =
         !strcmp(profile,
                 "shadow-precise-dirty-ring-inline-upload-alias-cover");
+    const bool preciseDirtyBgraArrayTrace =
+        !strcmp(profile, "shadow-precise-dirty-ring-bgra-array-trace");
     const bool preciseDirtyFrameAssocTrace =
-        !strcmp(profile, "shadow-precise-dirty-ring-frame-assoc-trace");
+        !strcmp(profile, "shadow-precise-dirty-ring-frame-assoc-trace") ||
+        preciseDirtyBgraArrayTrace;
     const bool preciseDirtyPresentImageTrace =
         !strcmp(profile, "shadow-precise-dirty-ring-present-image-trace");
     const bool preciseDirtyInlineUpload =
@@ -238,6 +241,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         preciseDirtyAliasCover ? "inline-gpu-upload-alias-cover" :
         preciseDirtyCoveragePoll ? "inline-gpu-upload-coverage-sort" :
         preciseDirtyCoverageSortSampled ? "inline-gpu-upload-coverage-sort-sampled" :
+        preciseDirtyBgraArrayTrace ? "inline-gpu-upload-bgra-array-trace" :
         preciseDirtyCoverageSort ? "inline-gpu-upload-coverage-sort" :
         preciseDirtyDescriptorSerialized ? "inline-gpu-upload-descriptor-serialized" :
         preciseDirtyFrameAssocTrace ? "inline-gpu-upload-frame-assoc-trace" :
