@@ -5,6 +5,7 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 import testNapi from 'libentry.so';
 import { PopupWindowManager } from './PopupWindowManager';
 import { ArgbWindowManager } from './ArgbWindowManager';
+import { DisplaySettingsService } from './DisplaySettingsService';
 
 const DOMAIN = 0x0000;
 const TAG = 'WineWM';
@@ -33,7 +34,7 @@ export class WineWindowManager {
   private uiAbilityContext: common.UIAbilityContext | null = null;
   // 设备显示密度 + 屏幕尺寸 (用于缩放)
   private displayScale: number = 1.0;
-  private scaleBoost: number = 1.0;  // 放大系数, 使 effectiveScale = displayScale × boost = 2.0
+  private scaleBoost: number = 1.0;  // 放大系数, effectiveScale = displayScale × boost, 目标值来自 DisplaySettingsService (默认 2.0)
   // 标题栏 + 边框总高度 (VP), 用于窗口 resize
   // = getWindowDecorHeight() + decorBorderOffset
   private measuredTitleBarH: number = 56;
@@ -45,18 +46,21 @@ export class WineWindowManager {
   private barCalibrationCount: number = 0;
 
   // -- Desktop 模式 (Tablet) --
-  isDesktopMode: boolean = false;  // 公开: WineEnvService 镜像
+  isDesktopMode: boolean = false;
   private automationMode: boolean = false;
   private desktopRootId: number = 0;
-  private desktopAbilityRunning: boolean = false;
-  private desktopAbilityCtx: common.UIAbilityContext | null = null;
-  // 桌面 root 存在信号 (WineEnvService 镜像 → sessionAlive 判定):
-  // desktop_root 事件置 true, root 销毁置 false
+  // 单 Ability 三层页面: 桌面已激活 → Index 挂载 DesktopLayer 盖住启动器。
+  // root 销毁时翻回 false (等效旧双 Ability 时代"root 销毁关闭 DesktopAbility
+  // 回主页面"的语义), 新 desktop_root 事件再置 true
   desktopActive: boolean = false;
   // 桌面 root 的 XComponent surface 校准完成（renderer 就绪）才置 true。
   // desktop_root 只是 toplevel 出现，renderer 就绪晚数秒 — ensureDesktop
   // 等这个信号再放行程序启动，否则程序窗口抢占桌面渲染初始化会闪退
   desktopSurfaceReady: boolean = false;
+  // 启动器可见性镜像 (Index @Watch 同步): 非桌面态时窗口退出全屏,
+  // XComponent surface 高度随系统栏波动 — DesktopLayer.onSurfaceChanged
+  // 据此跳过 root resize, 避免把中间态高度发给 Wine 桌面 (热重启残留 bug)
+  desktopLauncherVisible: boolean = true;
   // 主窗口 windowStage (ARGB 异型子窗口/popup 回退宿主)
   private mainWindowStage: window.WindowStage | null = null;
 
@@ -109,6 +113,10 @@ export class WineWindowManager {
     });
   }
 
+  setDesktopLauncherVisible(v: boolean): void {
+    this.desktopLauncherVisible = v;
+  }
+
   setAutomationMode(enabled: boolean): void {
     this.automationMode = enabled;
     this.isDesktopMode = deviceInfo.deviceType === 'tablet' && !enabled;
@@ -140,12 +148,19 @@ export class WineWindowManager {
     }
 
     // 获取设备显示密度 + 主窗口可用区域
+    // 目标 effectiveScale 取自用户设置 (DisplaySettingsService, 默认 2.0),
+    // 仅此处 (启动) 读取一次 — 运行中改设置不影响当前会话, 设置页已注明"重启生效"。
+    const displaySettings = DisplaySettingsService.getInstance();
+    if (this.uiAbilityContext) {
+      displaySettings.init(this.uiAbilityContext);
+    }
+    const targetScale = displaySettings.scale;
     try {
       const d = display.getDefaultDisplaySync();
       this.displayScale = d.densityPixels;
-      this.scaleBoost = 2.0 / this.displayScale;  // 使 effectiveScale = 2.0
-      hilog.info(DOMAIN, TAG, '[MW] display %{public}dx%{public}d deviceDPI=%{public}s boost=%{public}s -> effective=2.0',
-        d.width, d.height, this.displayScale.toFixed(2), this.scaleBoost.toFixed(2));
+      this.scaleBoost = targetScale / this.displayScale;
+      hilog.info(DOMAIN, TAG, '[MW] display %{public}dx%{public}d deviceDPI=%{public}s boost=%{public}s -> effective=%{public}s',
+        d.width, d.height, this.displayScale.toFixed(2), this.scaleBoost.toFixed(2), targetScale.toFixed(2));
       testNapi.setDisplayScale(this.displayScale * this.scaleBoost);
 
       // Wine 输出尺寸: 沉浸模式下 avoid area 为 0, 直接用显示尺寸
@@ -157,8 +172,9 @@ export class WineWindowManager {
       testNapi.setOutputSize(outW, outH);
     } catch (_) {
       this.displayScale = 1.61;
-      this.scaleBoost = 2.0 / 1.61;
-      hilog.warn(DOMAIN, TAG, '[MW] display query failed, using displayScale=1.61 boost=1.24');
+      this.scaleBoost = targetScale / 1.61;
+      hilog.warn(DOMAIN, TAG, '[MW] display query failed, using displayScale=1.61 boost=%{public}s',
+        this.scaleBoost.toFixed(2));
       testNapi.setDisplayScale(this.displayScale * this.scaleBoost);
     }
 
@@ -347,12 +363,14 @@ export class WineWindowManager {
         }
         break;
       case 'desktop_root':
-        // Tablet: C++ 识别到 explorer desktop → 打开 DesktopAbility
-        hilog.info(DOMAIN, TAG, '[MW] desktop_root toplevel #%{public}d → start DesktopAbility', id);
+        // Tablet: C++ 识别到 explorer desktop → Index 三层页面挂载 DesktopLayer
+        hilog.info(DOMAIN, TAG, '[MW] desktop_root toplevel #%{public}d → desktopActive', id);
         this.desktopRootId = id;
         this.desktopSurfaceReady = false;   // 新 root: renderer 尚未就绪
-        this.desktopActive = true;          // 桌面激活信号 (WineEnvService 镜像)
-        this.startDesktopAbility(id);
+        if (!this.desktopActive) {
+          this.desktopActive = true;
+        }
+        // 非首次仅 rootId 更新也 notify (Index 镜像刷新)
         this.notify();
         break;
       case 'destroyed':
@@ -530,7 +548,7 @@ export class WineWindowManager {
           const h = obj.h as number;
           if (w && h) {
             const barH = 0; //  标题栏已通过 setWindowDecorVisible(false) 隐藏
-            const s = this.displayScale * this.scaleBoost;  // effective scale = 2.0
+            const s = this.displayScale * this.scaleBoost;  // effective scale (启动时定, 默认 2.0)
             const winW = Math.round(w * s);
             const winH = Math.round(h * s + barH);
             //  保存目标尺寸, 供 surface 事件校准 titleBarH + 重新 resize
@@ -724,20 +742,16 @@ export class WineWindowManager {
     hilog.info(DOMAIN, TAG, '[MW] onToplevelDestroyed #%{public}d', id);
     this.destroyed.add(id);
 
-    // Desktop 模式: root 销毁 → 关闭 DesktopAbility, 回到主页面
+    // Desktop 模式: root 销毁 → 翻回启动器层 (单 Ability 无 DesktopAbility 可关,
+    // desktopActive=false 让 Index 卸载 DesktopLayer 并显示启动器)
     if (this.isDesktopMode && id === this.desktopRootId) {
-      hilog.info(DOMAIN, TAG, '[MW] desktop root #%{public}d destroyed, closing DesktopAbility', id);
+      hilog.info(DOMAIN, TAG, '[MW] desktop root #%{public}d destroyed, back to launcher', id);
       this.desktopRootId = 0;
       this.desktopSurfaceReady = false;
-      this.desktopActive = false;
-      if (this.desktopAbilityCtx) {
-        this.desktopAbilityCtx.terminateSelf().catch((err: Error) => {
-          hilog.warn(DOMAIN, TAG, '[MW] ERR terminateSelf DesktopAbility: %{public}s', JSON.stringify(err));
-        });
-        this.desktopAbilityCtx = null;
+      if (this.desktopActive) {
+        this.desktopActive = false;
+        this.notify();
       }
-      this.desktopAbilityRunning = false;
-      this.notify();
       return;
     }
     // Desktop 模式: 非 root toplevel 销毁, C++ 自动停止合成
@@ -775,39 +789,5 @@ export class WineWindowManager {
     hilog.info(DOMAIN, TAG, '[MW] onToplevelDestroyed #%{public}d done', id);
   }
 
-  // Desktop 模式: 打开 DesktopAbility
-  private startDesktopAbility(rootId: number): void {
-    // singleton 模式: 重复 startAbility 不会创建新实例, 只会触发 onNewWant
-    if (!this.desktopAbilityRunning) {
-      this.desktopAbilityRunning = true;
-    }
-    try {
-      const want: Want = {
-        bundleName: 'app.hackeris.winehua',
-        abilityName: 'DesktopAbility',
-        parameters: { toplevelId: rootId }
-      };
-      this.uiAbilityContext!.startAbility(want).catch((err: Error) => {
-        hilog.error(DOMAIN, TAG, '[MW] startAbility(DesktopAbility) failed: %{public}s',
-          JSON.stringify(err));
-      });
-      hilog.info(DOMAIN, TAG, '[MW] startAbility(DesktopAbility) #%{public}d OK', rootId);
-    } catch (e) {
-      hilog.error(DOMAIN, TAG, '[MW] startDesktopAbility error: %{public}s', JSON.stringify(e));
-    }
-  }
-
   getDesktopRootId(): number { return this.desktopRootId; }
-
-  // DesktopAbility 注册/注销其 UIAbilityContext, 用于 root 销毁时 terminateSelf
-  registerDesktopAbility(ctx: common.UIAbilityContext): void {
-    hilog.info(DOMAIN, TAG, '[MW] registerDesktopAbility');
-    this.desktopAbilityCtx = ctx;
-  }
-
-  unregisterDesktopAbility(): void {
-    hilog.info(DOMAIN, TAG, '[MW] unregisterDesktopAbility');
-    this.desktopAbilityCtx = null;
-    this.desktopAbilityRunning = false;
-  }
 }
