@@ -585,9 +585,14 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
     /*
      * 自动恢复最小化窗口: 判定逻辑见 IsRestoreSizeCommit (compositor_utils.h)。
      * 注意: 此处已持有 toplevelMutex_, 不能调 SetToplevelRestored。
+     * justRestored: 还原帧的 geo 是 Wine 记录的"原位" — 用户拖动过窗口
+     * (move grab 只改 compositor 坐标, Wine 不知道) 时原位是旧的, 下方
+     * 位置跟随必须跳过 (见 wine geo sync 分支)。
      */
+    bool justRestored = false;
     if (IsRestoreSizeCommit(st.IsMinimized(), fi.contentW, fi.contentH)) {
         st.SetMinimized(false);
+        justRestored = true;
         OH_LOG_INFO(LOG_APP, "[MW] auto-restore tl=%{public}u size=%{public}dx%{public}d",
                     sd->toplevelId, fi.contentW, fi.contentH);
     }
@@ -630,7 +635,41 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
         snprintf(json, sizeof(json), "{\"x\":%d,\"y\":%d}", fi.screenX, fi.screenY);
         FireToplevelEvent(sd->toplevelId, "argb_move", json);
     }
-    // 后续 commit: 忽略 geoX/geoY, compositor 位置为权威
+    /*
+     * 桌面模式后续 commit 的位置同步:
+     * - compositor 位置为权威: move grab 后 Wine 不知道新位置, 下次
+     *   commit 的 geo 仍是旧值 → 不能无条件跟随 (拖动会被弹回)
+     * - 但 Wine 程序主动 SetWindowPos (geo ≠ 上次 Wine 快照) 必须跟随:
+     *   否则首帧后移动的窗口永远停在初始位置 — 3DMLauncher UI 窗口
+     *   首帧 @(0,0), launcher 布局阶段移到 (220,66) 被忽略, 内容停在
+     *   左上角而窗口框 (972x801, 含边框+阴影) 在中间, 呈"边框残影"
+     *   (2026-08-11 实测: 该窗口首帧后 geo 更新到 (220,66) 未生效)
+     * - 判定用 wineX_/wineY_ 快照 (首帧写, 此处跟随更新) 而非 x_/y_:
+     *   move grab 只改 x_/y_, 快照不变 → 拖动后不被旧 geo 弹回
+     * - 最小化坐标 (-32000,-32000) 只记快照不移动; 恢复时 geo 正常
+     *   自动跟随回新位置
+     */
+    if (Policy().RootCompositing() && !outFirstCommit &&
+        (fi.screenX != st.WineX() || fi.screenY != st.WineY())) {
+        if (justRestored) {
+            /*
+             * 还原帧: 保持 compositor 位置 (用户可能拖动过, Wine 不知道
+             * 新位置, 其 geo 是旧原位 — 实测还原回 (0,0) 而非拖动位置)。
+             * 只同步 Wine 快照, 后续 commit (geo==快照) 不再误触发。
+             */
+            st.SetWinePosition(fi.screenX, fi.screenY);
+            OH_LOG_INFO(LOG_APP, "[MW-MOVE] restore keep pos tl=%{public}u (%{public}d,%{public}d) wine=(%{public}d,%{public}d)",
+                        sd->toplevelId, st.X(), st.Y(), fi.screenX, fi.screenY);
+        } else if (fi.screenX > -compositor_consts::kMinimizedCoordThreshold &&
+                   fi.screenY > -compositor_consts::kMinimizedCoordThreshold) {
+            st.SetPosition(fi.screenX, fi.screenY);
+            st.SetWinePosition(fi.screenX, fi.screenY);
+            OH_LOG_INFO(LOG_APP, "[MW-MOVE] wine geo sync tl=%{public}u (%{public}d,%{public}d)",
+                        sd->toplevelId, fi.screenX, fi.screenY);
+        } else {
+            st.SetWinePosition(fi.screenX, fi.screenY);
+        }
+    }
     st.MarkDirty();
     // 记录 shm 格式 (ARGB8888=layered/shaped 有意义 alpha), 变化时通知
     // ArkTS 切换窗口背景 (PC 模式透明背景才能透过 per-pixel alpha)
