@@ -11,6 +11,7 @@
 #include <IPCKit/ipc_kit.h>
 #include <native_window/external_window.h>
 #include "virgl_ipc_protocol.h"
+#include "wine_env.h"
 
 // ---- 与 OH_IPCRemoteProxy_* 签名兼容的包装：真 proxy 走原 API，dummy 走 socket relay ----
 static int SendVirglRequestLocked(OHIPCRemoteProxy* proxy, uint32_t code,
@@ -908,8 +909,13 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
         // Emulator.exe. Route the x86_64 guest to software rendering
         // (softpipe) instead of virpipe, and do not advertise the vtest
         // socket. arm64 real-device virgl path is unchanged.
-        env.push_back("GALLIUM_DRIVER=softpipe");
-        env.push_back("LIBGL_DRIVERS_PATH=/data/storage/el1/bundle/libs/x86_64");
+        //
+        // NOTE: 必须用 UpsertEnvLine 覆盖而不是 push_back — guest_gfx env
+        // 文件 (共享产物, arm64/x86_64 同一份) 里已含 GALLIUM_DRIVER=virpipe
+        // 与 LIBGL_DRIVERS_PATH=$ORIGIN/lib/dri, 而 getenv 取首个匹配项,
+        // push_back 追加的 softpipe/el1 值会被产物里的旧值遮蔽。
+        UpsertEnvLine(env, "GALLIUM_DRIVER=softpipe");
+        UpsertEnvLine(env, "LIBGL_DRIVERS_PATH=/data/storage/el1/bundle/libs/x86_64");
 #else
         if (!state.virglSocketPath.empty()) env.push_back("VTEST_SOCKET_NAME=" + state.virglSocketPath);
 #endif
