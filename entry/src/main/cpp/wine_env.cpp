@@ -103,6 +103,12 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
     // NOTE: 桌面模式下 wine_child.cpp 也会通过 __winehua_desktop__ token 设置同值（冗余保险）
     env.push_back(std::string("WINEHUA_DESKTOP_MODE=") +
                   (WaylandServer::GetInstance()->IsDesktopMode() ? "1" : "0"));
+    // WINEHUA_SIMULATE_RESOLUTION: win32u per-process 模拟 ChangeDisplaySettings
+    // (记录游戏主动 CDS 请求的分辨率, 查询时返回 — DDraw 全屏游戏依赖)。
+    // 仅 PC 多窗口模式注入: Pad 模拟桌面 (RootCompositing) 由合成器缩放绘制,
+    // 不需要分辨率模拟。
+    if (!WaylandServer::GetInstance()->IsDesktopMode())
+        env.push_back("WINEHUA_SIMULATE_RESOLUTION=1");
     // ==== Layer 5: 图形状态 ====
     // NOTE: BOX64_EMULATED_LIBS (ARM64) 在 DXVK 路径下会被 AppendD3dBackendEnv 覆盖
     winehua::GraphicsBroker::GetInstance().AppendWineEnv(env);

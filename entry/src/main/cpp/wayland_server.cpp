@@ -370,7 +370,7 @@ void WaylandServer::NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t
         st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
         *st = XDG_TOPLEVEL_STATE_MAXIMIZED;
     }
-    // 全屏窗口在 OHOS 侧尺寸变化时保持 FULLSCREEN 状态, 否则 Wine 会退出全屏
+    // 全屏窗口在 OHOS 侧尺寸变化时保持 FULLSCREEN 状态, 否则 Wine 会退出全屏。
     if (IsToplevelFullscreen(toplevelId)) {
         st = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
         *st = XDG_TOPLEVEL_STATE_FULLSCREEN;

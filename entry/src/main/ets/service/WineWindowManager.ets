@@ -179,6 +179,18 @@ export class WineWindowManager {
     return this.displayScale * this.scaleBoost;
   }
 
+  getDesktopMode(): boolean {
+    return this.isDesktopMode;
+  }
+
+  // 最近通过 resize 事件报告给 ArkTS 的 Wine 内容尺寸 (PC 模式防环用:
+  // onSurfaceChanged 反馈 configure 前比对, 一致说明窗口尺寸由我们按
+  // 内容尺寸设置, 不必再通知 Wine, 避免反馈环把窗口模式游戏推到
+  // 非内容尺寸)
+  getLastResizeWineDim(toplevelId: number): [number, number] | null {
+    return this.entries.get(toplevelId)?.lastResizeWineDim ?? null;
+  }
+
   unregisterAbility(toplevelId: number): void {
     // 级联销毁该窗口的全部 popup 子窗口
     PopupWindowManager.getInstance().destroyPopupsForToplevel(toplevelId);
@@ -433,16 +445,23 @@ export class WineWindowManager {
         // PC 模式 popup 子窗口 (desktop 模式 C++ 不会发这些事件)
         // 父窗口可能是普通 ability 窗口, 也可能是 ARGB 异型子窗口 (回退)
         if (this.isDesktopMode) return;
+        // 父窗口 Wine 尺寸传给 PopupWindowManager: 全屏游戏把渲染 surface 放
+        // popup (popup 尺寸==模拟分辨率==父窗口尺寸), 需判定并拉伸到宿主屏幕;
+        // 普通菜单 popup 不受影响。
         PopupWindowManager.getInstance().onPopupEvent(
           id, event, data,
           this.getWindowStage(id) ?? this.mainWindowStage,
           this.getWindow(id) ?? ArgbWindowManager.getInstance().getWindow(id),
-          this.getEffectiveScale());
+          this.getEffectiveScale(),
+          this.entries.get(id)?.lastResizeWineDim ?? null);
         break;
       case 'fullscreen':
       case 'unfullscreen':
-        // 全屏由 C++ 合成器直接处理 (桌面模式缩放绘制 + 输入映射),
-        // ArkTS 无需动作; 显式列出避免落进 unknown event 告警
+        // 桌面模式: 全屏由 C++ 合成器直接处理 (缩放绘制 + 输入映射), ArkTS 无需动作
+        if (this.isDesktopMode && id !== this.desktopRootId) return;
+        // PC 模式: 游戏 xdg fullscreen → OHOS 沉浸式全屏 (盖住 dock/任务栏)。
+        // 游戏画面由 popup (全屏拉伸) 承载, 主窗口最大化保证无系统 UI 露出。
+        this.queueOrApply(id, event, data);
         break;
       default:
         hilog.warn(DOMAIN, TAG, '[MW] unknown event #%{public}d %{public}s', id, event);
@@ -560,6 +579,36 @@ export class WineWindowManager {
           hilog.warn(DOMAIN, TAG, '[MW] unmaximize #%{public}d failed: %{public}s', toplevelId, JSON.stringify(e));
         });
         break;
+      case 'fullscreen':
+        // PC 模式游戏 xdg fullscreen: OHOS 沉浸式全屏 (铺满屏幕、盖住 dock)。
+        // 与 maximize 的 EXIT_IMMERSIVE (工作区最大化) 区分 — 游戏全屏是
+        // 真正的全屏; win.maximize() 不带参数默认 ENTER_IMMERSIVE。
+        // 画面由 popup (全屏拉伸) 承载, 主窗口沉浸式保证无系统 UI 露出。
+        try {
+          hilog.info(DOMAIN, TAG, '[MW] fullscreen #%{public}d → win.maximize() (ENTER_IMMERSIVE)', toplevelId);
+          win.maximize().then(() => {
+            hilog.info(DOMAIN, TAG, '[MW] fullscreen OK #%{public}d', toplevelId);
+          }).catch((err: Error) => {
+            hilog.warn(DOMAIN, TAG, '[MW] fullscreen #%{public}d failed: %{public}s', toplevelId, JSON.stringify(err));
+          });
+        } catch (err) {
+          hilog.warn(DOMAIN, TAG, '[MW] fullscreen #%{public}d exception: %{public}s', toplevelId, JSON.stringify(err));
+        }
+        break;
+      case 'unfullscreen':
+        // 退出沉浸式全屏, 恢复普通窗口; 尺寸由 C++ 侧 configure(preFs)
+        // → resize 事件恢复 (tl_unset_fullscreen 用 preFs 尺寸)
+        try {
+          hilog.info(DOMAIN, TAG, '[MW] unfullscreen #%{public}d → win.maximize(EXIT_IMMERSIVE)', toplevelId);
+          win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE).then(() => {
+            hilog.info(DOMAIN, TAG, '[MW] unfullscreen OK #%{public}d', toplevelId);
+          }).catch((err: Error) => {
+            hilog.warn(DOMAIN, TAG, '[MW] unfullscreen #%{public}d failed: %{public}s', toplevelId, JSON.stringify(err));
+          });
+        } catch (err) {
+          hilog.warn(DOMAIN, TAG, '[MW] unfullscreen #%{public}d exception: %{public}s', toplevelId, JSON.stringify(err));
+        }
+        break;
       case 'argb':
         /*
          * layered/shaped (异型) 窗口标记, 仅记录状态 (后续子窗口方案使用)。
@@ -593,9 +642,16 @@ export class WineWindowManager {
 
     // 解析初始参数
     let title = '';
+    let initW = 0;
+    let initH = 0;
     try {
       const obj: Record<string, string | number> = JSON.parse(data) as Record<string, string | number>;
       if (obj.title) title = obj.title as string;
+      // created 事件的 Wine 内容尺寸 (w/h): 传入 Ability 设置窗口初始尺寸,
+      // 避免 OHOS 默认窗口尺寸 → onSurfaceChanged 反馈 → 窗口模式游戏
+      // 接受 configure resize → 内容不缩放 (画面缩在左上角 + 反馈环)
+      initW = Number(obj.w) || 0;
+      initH = Number(obj.h) || 0;
     } catch (_) { /* use defaults */ }
 
     hilog.info(DOMAIN, TAG, '[MW]  startAbility(WineWindowAbility) #%{public}d title="%{public}s"',
@@ -610,7 +666,7 @@ export class WineWindowManager {
     const want: Want = {
       bundleName: 'app.hackeris.winehua',
       abilityName: 'WineWindowAbility',
-      parameters: { toplevelId: id, title: title }
+      parameters: { toplevelId: id, title: title, w: initW, h: initH }
     };
 
     hilog.info(DOMAIN, TAG, '[MW] startAbility want: bundle=%{public}s ability=%{public}s params=%{public}s',

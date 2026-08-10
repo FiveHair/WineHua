@@ -196,7 +196,8 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         WaylandServer::ZeroCopyLayerInfo layer;
         if (!server->GetZeroCopyLayerInfo(surface.surfaceKey, rendererToplevelId,
                                           static_cast<int>(surface.width),
-                                          static_cast<int>(surface.height), layer)) continue;
+                                          static_cast<int>(surface.height), layer))
+            continue;
 
         glGenTextures(1, &zeroCopyTexture_);
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, zeroCopyTexture_);
@@ -763,6 +764,8 @@ void EglRenderer::RenderLoop() {
             // 存储帧尺寸供输入坐标转换
             frameW_ = fw;
             frameH_ = fh;
+            OH_LOG_INFO(LOG_APP, "[DBG-CPU] tl=%{public}u fw=%{public}d fh=%{public}d px=%{public}zu firstLogged=%{public}d loop=%{public}d",
+                        useToplevel, fw, fh, px.size(), firstFrameLogged, loopCount);
             if (!firstFrameLogged) {
                 OH_LOG_INFO(LOG_APP, "[MW-RNDR] tl=%{public}u  FIRST FRAME %{public}dx%{public}d px=%{public}zu",
                             useToplevel, fw, fh, px.size());
@@ -835,6 +838,12 @@ void EglRenderer::RenderLoop() {
             letterbox_ = FitRect{};
             glViewport(0, 0, width_, height_);
         }
+        static uint32_t sFitLogN = 0;
+        if (++sFitLogN % 60 == 1 || width_ == 0 || height_ == 0)
+            OH_LOG_INFO(LOG_APP, "[DBG-FIT] tl=%{public}u surface=%{public}dx%{public}d frame=%{public}dx%{public}d lb=%{public}dx%{public}d+%{public}d,%{public}d zc=%{public}d/%{public}d/%{public}d",
+                        useToplevel, width_, height_, frameW_, frameH_,
+                        letterbox_.dstW, letterbox_.dstH, letterbox_.offX, letterbox_.offY,
+                        zeroCopyRegistered_ ? 1 : 0, zeroCopyHasFrame_ ? 1 : 0, zeroCopyFullscreen_ ? 1 : 0);
 
         // 诊断: 前10帧详细打印 surface -> frame -> viewport 完整映射
         if (loopCount < 10) {
@@ -882,6 +891,12 @@ void EglRenderer::RenderLoop() {
 
         if (zeroCopyHasFrame_ && zeroCopyRegistered_ && frameW_ > 0 && frameH_ > 0 &&
             zeroCopyLayerW_ > 0 && zeroCopyLayerH_ > 0) {
+            if ((zeroCopyFrames_ == 1 || zeroCopyFrames_ % 120 == 0))
+                OH_LOG_INFO(LOG_APP, "[DBG-ZC] tl=%{public}u lb=%{public}dx%{public}d+%{public}d,%{public}d frame=%{public}dx%{public}d layer=%{public}dx%{public}d+%{public}d,%{public}d fs=%{public}d src=%{public}dx%{public}d",
+                            useToplevel, letterbox_.dstW, letterbox_.dstH, letterbox_.offX, letterbox_.offY,
+                            frameW_, frameH_, zeroCopyLayerW_, zeroCopyLayerH_,
+                            zeroCopyLayerX_, zeroCopyLayerY_, zeroCopyFullscreen_,
+                            zeroCopySourceW_, zeroCopySourceH_);
             int layerViewportX, layerViewportY, layerViewportW, layerViewportH;
             if (zeroCopyFullscreen_) {
                 // ZC 游戏全屏: 层内容保比例缩放进桌面帧的显示区, 而非按帧比例

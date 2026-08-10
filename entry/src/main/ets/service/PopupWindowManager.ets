@@ -1,4 +1,4 @@
-import { window } from '@kit.ArkUI';
+import { display, window } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
 
@@ -24,6 +24,9 @@ class PopupEntry {
   w: number = 0;
   h: number = 0;
   argb: boolean = false;  // ARGB8888 帧 (圆角菜单/异型 tooltip), 子窗口需透明背景
+  // 全屏 popup: 游戏 exclusive 全屏的渲染承载窗口 (popup 尺寸==模拟分辨率==
+  // 父窗口 Wine 尺寸)。铺满宿主屏幕 (画面由 renderer fit 拉伸), 不跟随父窗口。
+  fullscreenPopup: boolean = false;
 }
 
 /**
@@ -55,7 +58,7 @@ export class PopupWindowManager {
   // -- 事件入口 (由 WineWindowManager 分发) --
   onPopupEvent(parentToplevel: number, event: string, data: string,
                stage: window.WindowStage | null, parentWin: window.Window | null,
-               scale: number): void {
+               scale: number, parentWineDim: [number, number] | null = null): void {
     /*
      * 风险标注 (P2): stage/parentWin 为空时所有事件都会积压, 包括 popup_hide。
      * hide 其实只需要 popupId 不需要 stage。当前由 WineWindowManager.unregisterAbility
@@ -71,7 +74,7 @@ export class PopupWindowManager {
       q.push([event, data]);
       return;
     }
-    this.dispatch(parentToplevel, event, data, stage, parentWin, scale);
+    this.dispatch(parentToplevel, event, data, stage, parentWin, scale, parentWineDim);
   }
 
   // 父窗口就绪后 flush 积压事件 (WineWindowManager.flushPendingEvents 调用)
@@ -88,7 +91,8 @@ export class PopupWindowManager {
   }
 
   private dispatch(parentToplevel: number, event: string, data: string,
-                   stage: window.WindowStage, parentWin: window.Window, scale: number): void {
+                   stage: window.WindowStage, parentWin: window.Window, scale: number,
+                   parentWineDim: [number, number] | null = null): void {
     let parsed: PopupEventData;
     try {
       parsed = JSON.parse(data) as PopupEventData;
@@ -99,7 +103,7 @@ export class PopupWindowManager {
     }
     switch (event) {
       case 'popup_show':
-        this.show(parentToplevel, parsed, stage, parentWin, scale);
+        this.show(parentToplevel, parsed, stage, parentWin, scale, parentWineDim);
         break;
       case 'popup_move':
         this.move(parsed, parentWin, scale);
@@ -118,14 +122,22 @@ export class PopupWindowManager {
 
   // -- popup_show: 创建子窗口 --
   private show(parentToplevel: number, data: PopupEventData, stage: window.WindowStage,
-               parentWin: window.Window, scale: number): void {
+               parentWin: window.Window, scale: number,
+               parentWineDim: [number, number] | null = null): void {
     const popupId = data.popupId;
     if (this.popups.has(popupId) || this.creating.has(popupId)) {
       hilog.warn(DOMAIN, TAG, '[POPUP] show #%{public}d: already exists/creating, skip', popupId);
       return;
     }
-    hilog.info(DOMAIN, TAG, '[POPUP] show #%{public}d parent=#%{public}d off=(%{public}d,%{public}d) %{public}dx%{public}d',
-      popupId, parentToplevel, data.x ?? 0, data.y ?? 0, data.w ?? 0, data.h ?? 0);
+    // 全屏 popup 判定: popup 尺寸==父窗口 Wine 尺寸 (游戏 exclusive 全屏的
+    // 渲染承载窗口, popup 尺寸即模拟分辨率; 普通菜单/tooltip 远小于父窗口,
+    // 不会误判)。铺满宿主屏幕, 画面由 renderer letterbox 拉伸。
+    const fullscreenPopup = !!parentWineDim &&
+      (data.w ?? 0) === parentWineDim[0] && (data.h ?? 0) === parentWineDim[1];
+    hilog.info(DOMAIN, TAG,
+      '[POPUP] show #%{public}d parent=#%{public}d off=(%{public}d,%{public}d) %{public}dx%{public}d fsPopup=%{public}s',
+      popupId, parentToplevel, data.x ?? 0, data.y ?? 0, data.w ?? 0, data.h ?? 0,
+      fullscreenPopup ? 'yes' : 'no');
 
     const entry = new PopupEntry();
     entry.popupId = popupId;
@@ -135,6 +147,7 @@ export class PopupWindowManager {
     entry.w = data.w ?? 0;
     entry.h = data.h ?? 0;
     entry.argb = data.argb === 1;
+    entry.fullscreenPopup = fullscreenPopup;
     this.creating.add(popupId);
 
     // 让 pages/WinePopup 的 aboutToAppear 同步取到 popupId (FIFO, 与 WineWindow 同模式)
@@ -188,9 +201,19 @@ export class PopupWindowManager {
       });
 
       try {
-        await subWin.resize(Math.max(1, Math.round(entry.w * scale)),
-                            Math.max(1, Math.round(entry.h * scale)));
-        await this.positionEntry(entry, parentWin, scale);
+        if (entry.fullscreenPopup) {
+          // 全屏 popup (游戏 exclusive 渲染承载窗口): 铺满宿主屏幕。
+          // 画面由 renderer 的 letterbox fit 拉伸 (frame 模拟分辨率 → 屏幕)。
+          const d = display.getDefaultDisplaySync();
+          await subWin.resize(d.width, d.height);
+          await subWin.moveWindowToGlobal(0, 0);
+          hilog.info(DOMAIN, TAG, '[POPUP] #%{public}d fullscreen popup → screen %{public}dx%{public}d',
+            popupId, d.width, d.height);
+        } else {
+          await subWin.resize(Math.max(1, Math.round(entry.w * scale)),
+                              Math.max(1, Math.round(entry.h * scale)));
+          await this.positionEntry(entry, parentWin, scale);
+        }
         await subWin.showWindow();
         hilog.info(DOMAIN, TAG, '[POPUP] #%{public}d shown', popupId);
       } catch (e) {
@@ -211,7 +234,11 @@ export class PopupWindowManager {
     if (!entry || !entry.subWin) return;
     entry.offX = data.x ?? entry.offX;
     entry.offY = data.y ?? entry.offY;
-    this.positionEntry(entry, parentWin, scale).catch(() => { /* ignore */ });
+    if (entry.fullscreenPopup) {
+      entry.subWin.moveWindowToGlobal(0, 0).catch(() => { /* ignore */ });
+    } else {
+      this.positionEntry(entry, parentWin, scale).catch(() => { /* ignore */ });
+    }
   }
 
   private resizePopup(data: PopupEventData, parentWin: window.Window, scale: number): void {
@@ -219,10 +246,16 @@ export class PopupWindowManager {
     if (!entry || !entry.subWin) return;
     entry.w = data.w ?? entry.w;
     entry.h = data.h ?? entry.h;
-    entry.subWin.resize(Math.max(1, Math.round(entry.w * scale)),
-                        Math.max(1, Math.round(entry.h * scale))).then(() => {
-      return this.positionEntry(entry, parentWin, scale);
-    }).catch(() => { /* ignore */ });
+    if (entry.fullscreenPopup) {
+      // 全屏 popup: 保持铺满宿主屏幕 (Wine 侧 resize 只是模拟分辨率变化)
+      const d = display.getDefaultDisplaySync();
+      entry.subWin.resize(d.width, d.height).catch(() => { /* ignore */ });
+    } else {
+      entry.subWin.resize(Math.max(1, Math.round(entry.w * scale)),
+                          Math.max(1, Math.round(entry.h * scale))).then(() => {
+        return this.positionEntry(entry, parentWin, scale);
+      }).catch(() => { /* ignore */ });
+    }
   }
 
   // -- popup_hide --
@@ -266,6 +299,11 @@ export class PopupWindowManager {
   repositionPopups(parentToplevel: number, parentWin: window.Window, scale: number): void {
     this.popups.forEach((entry) => {
       if (entry.parentToplevel !== parentToplevel || !entry.subWin) return;
+      // 全屏 popup 固定在屏幕 (0,0), 不跟随父窗口
+      if (entry.fullscreenPopup) {
+        entry.subWin.moveWindowToGlobal(0, 0).catch(() => { /* ignore */ });
+        return;
+      }
       this.positionEntry(entry, parentWin, scale).catch(() => { /* ignore */ });
     });
   }

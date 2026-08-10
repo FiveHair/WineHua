@@ -231,9 +231,10 @@ static void tl_set_fullscreen(wl_client* client, wl_resource* tlRes, wl_resource
         // 顺序决定论 (旧窗口压游戏, 见 ToplevelState::fsPriority 注释)
         ws->RaiseToplevel(sd->toplevelId);
     }
-    // 按 xdg-shell 协议回 configure: FULLSCREEN 状态 + 整个输出尺寸 (含任务栏区,
-    // 全屏应覆盖)。Wine 可保持自己的分辨率不变 (fullscreen 对任意尺寸兼容,
-    // 见 winewayland wayland_surface_config_is_compatible), 缩放由合成器完成
+    // 按 xdg-shell 协议回 configure: FULLSCREEN 状态 + 整个输出尺寸
+    // (含任务栏区, 全屏应覆盖)。Wine 可保持自己的分辨率不变 (fullscreen
+    // 对任意尺寸兼容, 见 winewayland wayland_surface_config_is_compatible),
+    // 缩放由合成器完成
     int32_t fw = ws->outputW_, fh = ws->outputH_;
     wl_array states;
     wl_array_init(&states);
