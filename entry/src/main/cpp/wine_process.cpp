@@ -1,5 +1,6 @@
 #include "wine_process.h"
 #include "wine_constants.h"
+#include "phone_adapter/phone_adapter.h"
 
 #include <unistd.h>
 #include <signal.h>
@@ -12,10 +13,12 @@
 #include <cerrno>
 #include <algorithm>
 #include <atomic>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 #include <chrono>
+#include <AbilityKit/native_child_process.h>
 
 #undef LOG_TAG
 #undef LOG_DOMAIN
@@ -54,17 +57,88 @@ static uint64_t TimestampMs() {
 // 前向声明
 static void EnsureMonitorRunning();
 
+// -- 进程后端: fork (手机) vs NCP (Pad/真机) --
+// 两种设备模式的进程操作差异集中在同一处:
+//   fork 后端 (手机): 子进程是 App 直系 fork, /proc 可见 — 判活/kill 用
+//                     POSIX 原语 (1.0.5 方案); 不触发 NCP 退出回调
+//   NCP 后端 (Pad/真机): appspawn 托管, 沙箱 /proc 对 NCP 不可见 — 判活/
+//                     kill 走系统 NCP API, 退出检测用 NCP 退出回调
+// 所有「判活/杀/等退出/注册回调」的分支都经 IsForkBackend() 选择,
+// 调用方无需感知设备模式; 新增模式只改这里。
+static bool IsForkBackend() {
+    return PhoneAdapter_IsPhoneMode();
+}
+
+// 杀子进程 (按后端分流): fork 后端原生 kill 有效; NCP 后端优先官方终止
+// API (沙箱内 kill(2) 可能受限/pid ns 不可见), 失败 fallback 到 SIGKILL —
+// SELF_FORK 模式子进程官方 API 明确不可终止, 恰由 fallback 覆盖
+void KillChildProcess(pid_t pid) {
+    if (IsForkBackend()) {
+        kill(pid, SIGKILL);
+        return;
+    }
+    auto rc = OH_Ability_KillChildProcess((int32_t)pid);
+    if (rc != NCP_NO_ERROR) {
+        kill(pid, SIGKILL);
+    }
+}
+
+// NCP 退出回调是否已注册 (注册后 ProcMon 轮询降级为纯 zombie 感知 —
+// 真实退出由系统回调权威上报, 轮询不再承担判死职责)
+static std::atomic<bool> gNcpExitCbRegistered{false};
+static std::atomic<bool> gProcHiddenLogged{false};
+
+// -- 进程退出标记 (NCP 退出回调记录, wine_launch 等 wineboot 退出用) --
+// 沙箱 /proc 对 NCP 不可见, 进程存活轮询不可用; NCP 退出回调是唯一权威
+// 退出信号。回调触发时记录 pid, IsPidExited 查询 (IsLaunchChildExited 的
+// NCP 分支)。手机 fork 模式不依赖此集合 (回调不触发, 走 /proc 判活)。
+static std::mutex gExitWaitMutex;
+static std::set<pid_t> gExitedPids;
+
+bool IsPidExited(pid_t pid) {
+    std::lock_guard<std::mutex> lock(gExitWaitMutex);
+    return gExitedPids.count(pid) > 0;
+}
+
 bool IsProcessAliveNotZombie(pid_t pid) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
     FILE* f = fopen(path, "r");
-    if (!f) return false;                       // /proc 消失 = 已退出
-    char buf[512];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    buf[n] = 0;
-    char* rp = strrchr(buf, ')');               // state 字段在最后一个 ')' 之后
-    return !(rp && rp[2] == 'Z');               // 僵尸 = 已退出
+    if (f) {
+        // stat 可读: 僵尸感知判定 (两种模式通用 — fork 子进程退出变僵尸,
+        // NCP 可见场景同理)
+        char buf[512];
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[n] = 0;
+        char* rp = strrchr(buf, ')');           // state 字段在最后一个 ')' 之后
+        return !(rp && rp[2] == 'Z');           // 僵尸 = 已退出
+    }
+    // stat 不可读, 按进程后端分流:
+    if (IsForkBackend()) {
+        // fork 后端 (手机): 子进程是 App 直系, /proc 可见 —
+        // fopen 失败 = 目录消失 = 已退出 (1.0.5 原判活)
+        return false;
+    }
+    // NCP 模式 (Pad/真机): 沙箱 /proc 对 NCP 进程完全不可见 (实测 errno=ENOENT),
+    // 绝不能据此判死, 活进程会被误判为已退出 (误弹初始化失败/闪退)。
+    // 一律按存活处理: 真实退出由 NCP 退出回调 (RegisterNativeChildProcessExitCallback)
+    // 权威上报。轮询只保留 stat 可读时的 zombie 感知。宁可僵尸短暂误判为活,
+    // 不可活进程误判为死。首次不可见时打一条诊断日志。
+    if (!gProcHiddenLogged.exchange(true)) {
+        OH_LOG_WARN(LOG_APP, "[Alive] /proc/%{public}d/stat unreadable errno=%{public}d; "
+                    "NCP visibility limited, rely on exit callback", pid, errno);
+    }
+    return true;
+}
+
+// 启动编排等待子进程退出: 按进程后端分流 —
+// fork 后端用 /proc 判活 (可见有效), NCP 后端用退出回调标记
+bool IsLaunchChildExited(pid_t pid) {
+    if (IsForkBackend()) {
+        return !IsProcessAliveNotZombie(pid);
+    }
+    return IsPidExited(pid);
 }
 
 void RegisterWineserver(pid_t pid) {
@@ -77,7 +151,7 @@ void RegisterWineserver(pid_t pid) {
      * 只是不作为会话锚点判定死法。 */
     pid_t existing = gWineserverPid.load(std::memory_order_acquire);
     if (existing > 0 && IsProcessAliveNotZombie(existing)) {
-        OH_LOG_INFO(LOG_APP, "[ProcReg] wineserver %{public}d alive, keep anchor; new spawn %{public}d will attach",
+        OH_LOG_WARN(LOG_APP, "[ProcReg] wineserver %{public}d alive, keep anchor; new spawn %{public}d will attach",
                     existing, pid);
         AddProcess(pid, "wineserver", -1);
         return;
@@ -85,6 +159,7 @@ void RegisterWineserver(pid_t pid) {
     gWineserverPid.store(pid);
     gShutdownRequested.store(false);
     gDesktopSessionEnded.store(false);
+    OH_LOG_WARN(LOG_APP, "[ProcReg] wineserver %{public}d registered as session anchor", pid);
     AddProcess(pid, "wineserver", -1);
 }
 
@@ -113,7 +188,7 @@ void MarkDesktopShellProcesses() {
             count++;
         }
     }
-    OH_LOG_INFO(LOG_APP, "[ProcReg] desktop shell processes marked: %{public}zu running", count);
+    OH_LOG_WARN(LOG_APP, "[ProcReg] desktop shell processes marked: %{public}zu running", count);
 }
 
 // -- 注册表辅助函数 --
@@ -143,7 +218,7 @@ WineProcessEntry* AddProcess(pid_t pid, const std::string& exeFullPath, int stdo
         .stdoutFd = stdoutFd,
         .readerActive = std::make_shared<std::atomic<bool>>(true)
     });
-    OH_LOG_INFO(LOG_APP, "[ProcReg] add pid=%{public}d name=%{public}s total=%{public}zu",
+    OH_LOG_WARN(LOG_APP, "[ProcReg] add pid=%{public}d name=%{public}s total=%{public}zu",
                 pid, basename.c_str(), gProcRegistry.size());
     EnsureMonitorRunning();
     // 通知 ArkTS 刷新进程列表: wine 内部自启的子进程 (走 broker 登记) 没有
@@ -159,7 +234,7 @@ void RemoveProcess(pid_t pid, int exitCode, const std::string& exitCodeSource) {
     std::lock_guard<std::mutex> lock(gProcMutex);
     for (auto& entry : gProcRegistry) {
         if (entry.pid == pid) {
-            OH_LOG_INFO(LOG_APP,
+            OH_LOG_WARN(LOG_APP,
                         "[ProcReg] complete pid=%{public}d name=%{public}s exit=%{public}d source=%{public}s",
                         pid, entry.exeBasename.c_str(), exitCode, exitCodeSource.c_str());
             entry.running = false;
@@ -178,10 +253,10 @@ void KillAllProcesses() {
     std::lock_guard<std::mutex> lock(gProcMutex);
     for (auto& entry : gProcRegistry) {
         if (entry.running) {
-            OH_LOG_INFO(LOG_APP, "[ProcReg] killAll pid=%{public}d name=%{public}s",
+            OH_LOG_WARN(LOG_APP, "[ProcReg] killAll pid=%{public}d name=%{public}s",
                         entry.pid, entry.exeBasename.c_str());
             *(entry.readerActive) = false;
-            kill(entry.pid, SIGKILL);
+            KillChildProcess(entry.pid);
             if (entry.stdoutFd >= 0) { close(entry.stdoutFd); entry.stdoutFd = -1; }
         }
     }
@@ -214,7 +289,7 @@ void NotifyWhenSessionDrained() {
             OH_LOG_ERROR(LOG_APP, "[ProcReg] drain wait timeout: process survived SIGKILL");
         }
         gWineserverPid.store(-1);
-        OH_LOG_INFO(LOG_APP, "[ProcReg] session drained in %{public}d ms, emit state:stopped",
+        OH_LOG_WARN(LOG_APP, "[ProcReg] session drained in %{public}d ms, emit state:stopped",
                     waitedMs);
         if (gStateTsfn) {
             napi_call_threadsafe_function(gStateTsfn, strdup("state:stopped"),
@@ -230,7 +305,7 @@ void LogProcessExit(const char* tag, pid_t pid, int status) {
         OH_LOG_ERROR(LOG_APP, "[%{public}s] CRASH pid=%{public}d signal=%{public}d(%{public}s) core=%{public}d",
                      tag, pid, sig, strsignal(sig), WCOREDUMP(status) ? 1 : 0);
     } else if (WIFEXITED(status)) {
-        OH_LOG_INFO(LOG_APP, "[%{public}s] process %{public}d exited code=%{public}d",
+        OH_LOG_WARN(LOG_APP, "[%{public}s] process %{public}d exited code=%{public}d",
                     tag, pid, WEXITSTATUS(status));
     } else {
         OH_LOG_WARN(LOG_APP, "[%{public}s] process %{public}d terminated status=0x%{public}x",
@@ -268,16 +343,87 @@ void sigchld_handler(int) {
     }
 }
 
+// -- 进程死亡收口 (ProcMon 轮询与 NCP 退出回调共用) --
+// 主 wineserver 死亡, 按死法分三种收口:
+// 1) gShutdownRequested (stopAll/reset 主动停止): StopAll 末尾的
+//    drain 会发 state:stopped, 这里不动
+// 2) gDesktopSessionEnded (桌面主动退出带动 wineserver 跟随退出,
+//    explorer 先走 wineserver 后走): 正常会话终结不是崩溃 — 扫尾
+//    残余进程 (winehua_keep 等) 后按正常停止发 state:stopped
+// 3) 其余 = 非预期死亡: 报 state:failed:wineserver (引擎故障)
+static void HandleProcessDeath(pid_t pid, int exitCode = -1, const char* source = "unknown") {
+    {
+        std::lock_guard<std::mutex> lock(gExitWaitMutex);
+        gExitedPids.insert(pid);
+    }
+    WineProcessEntry entry;
+    if (QueryProcessSnapshot(pid, &entry)) {
+        OH_LOG_WARN(LOG_APP, "[ProcMon] pid=%{public}d no longer alive name=%{public}s exit=%{public}d source=%{public}s",
+                    pid, entry.exeBasename.c_str(), exitCode, source);
+    } else {
+        OH_LOG_WARN(LOG_APP, "[ProcMon] pid=%{public}d no longer alive (not in registry) exit=%{public}d source=%{public}s",
+                    pid, exitCode, source);
+    }
+    RemoveProcess(pid, exitCode, source);
+    if (gStateTsfn) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "evt:proc-exited:%d", pid);
+        napi_call_threadsafe_function(gStateTsfn, strdup(msg), napi_tsfn_blocking);
+    }
+    if (pid == gWineserverPid.load(std::memory_order_acquire)) {
+        gWineserverPid.store(-1, std::memory_order_release);
+        if (gShutdownRequested.load(std::memory_order_acquire)) {
+            // 主动停止编排中, state:stopped 由 StopAll 的 drain 发
+        } else if (gDesktopSessionEnded.load(std::memory_order_acquire)) {
+            OH_LOG_WARN(LOG_APP, "[ProcMon] wineserver exited after desktop session end, clean stop");
+            KillAllProcesses();
+            NotifyWhenSessionDrained();
+        } else if (gStateTsfn) {
+            OH_LOG_ERROR(LOG_APP, "[ProcMon] wineserver died unexpectedly, emit state:failed:wineserver");
+            napi_call_threadsafe_function(gStateTsfn, strdup("state:failed:wineserver"),
+                                          napi_tsfn_blocking);
+        }
+    }
+}
+
+// -- NCP 子进程退出回调 (系统级, 绕开沙箱 /proc 不可见问题) --
+// NCP 子进程由 appspawn 创建, SIGCHLD 收不到它们的退出事件; 系统在子进程
+// 退出时回调本函数 (pid + signal)。这是退出检测的权威信号 — ProcMon 轮询
+// 的 /proc 判活在沙箱里对 NCP 不可靠 (可能全部误判), 只保留 zombie 感知。
+static void OnNcpChildExit(int32_t pid, int32_t signal) {
+    HandleProcessDeath((pid_t)pid, signal, "ncp-exit");
+}
+
+void RegisterNcpExitCallback() {
+    if (gNcpExitCbRegistered.load(std::memory_order_acquire)) return;
+    // 无条件注册 (napi Init 最早时机): 沙箱 /proc 对 NCP 进程不可见,
+    // 退出检测以系统回调为权威信号。手机 fork 模式注册后不触发
+    // (fork 子进程不走 NCP), 空转无害 — 模式分支只留在 spawn 之后的
+    // 判活/杀/等待操作里 (IsProcessAliveNotZombie / KillChildProcess /
+    // IsLaunchChildExited, 此时 IsForkBackend 已由 setPhoneMode 置位)。
+    auto rc = OH_Ability_RegisterNativeChildProcessExitCallback(OnNcpChildExit);
+    if (rc == NCP_NO_ERROR) {
+        gNcpExitCbRegistered.store(true, std::memory_order_release);
+        OH_LOG_WARN(LOG_APP, "[ProcReg] NCP exit callback registered (rc=0)");
+    } else {
+        // 注册失败: 保持 ProcMon 轮询全职责 (zombie 感知 + /proc 判死),
+        // 但 IsProcessAliveNotZombie 已保守化 — 宁可僵尸误活不可活进程误死
+        OH_LOG_ERROR(LOG_APP, "[ProcReg] NCP exit callback register FAILED rc=%{public}d", (int)rc);
+    }
+}
+
 // -- NCP 进程存活监控 --
 // NCP 子进程由 appspawn 创建，不是主进程的 fork() 子进程，
 // SIGCHLD 收不到它们的退出事件。通过 /proc/<pid> 轮询检测退出。
 // 判活必须 zombie 感知 (fork 模式子进程退出后 /proc 不立即消失),
 // 否则已退出的进程会被长期误判为存活。
+// 注: 沙箱 /proc 对 NCP 可能不可见 — 真实退出以 NCP 退出回调为准,
+// 轮询仅作僵尸感知兜底 (IsProcessAliveNotZombie 对不可见一律判活)。
 static std::atomic<bool> gMonitorRunning{false};
 static std::thread gMonitorThread;
 
 static void ProcessMonitorLoop() {
-    OH_LOG_INFO(LOG_APP, "[ProcMon] started");
+    OH_LOG_WARN(LOG_APP, "[ProcMon] started");
     while (gMonitorRunning.load(std::memory_order_relaxed)) {
         sleep(1);
 
@@ -293,37 +439,10 @@ static void ProcessMonitorLoop() {
         }
 
         for (pid_t pid : exitedPids) {
-            OH_LOG_INFO(LOG_APP, "[ProcMon] pid=%{public}d no longer alive", pid);
-            RemoveProcess(pid);
-            if (gStateTsfn) {
-                char msg[64];
-                snprintf(msg, sizeof(msg), "evt:proc-exited:%d", pid);
-                napi_call_threadsafe_function(gStateTsfn, strdup(msg), napi_tsfn_blocking);
-            }
-            // 主 wineserver 死亡, 按死法分三种收口:
-            // 1) gShutdownRequested (stopAll/reset 主动停止): StopAll 末尾的
-            //    drain 会发 state:stopped, 这里不动
-            // 2) gDesktopSessionEnded (桌面主动退出带动 wineserver 跟随退出,
-            //    explorer 先走 wineserver 后走): 正常会话终结不是崩溃 — 扫尾
-            //    残余进程 (winehua_keep 等) 后按正常停止发 state:stopped
-            // 3) 其余 = 非预期死亡: 报 state:failed:wineserver (引擎故障)
-            if (pid == gWineserverPid.load(std::memory_order_acquire)) {
-                gWineserverPid.store(-1, std::memory_order_release);
-                if (gShutdownRequested.load(std::memory_order_acquire)) {
-                    // 主动停止编排中, state:stopped 由 StopAll 的 drain 发
-                } else if (gDesktopSessionEnded.load(std::memory_order_acquire)) {
-                    OH_LOG_INFO(LOG_APP, "[ProcMon] wineserver exited after desktop session end, clean stop");
-                    KillAllProcesses();
-                    NotifyWhenSessionDrained();
-                } else if (gStateTsfn) {
-                    OH_LOG_ERROR(LOG_APP, "[ProcMon] wineserver died unexpectedly, emit state:failed:wineserver");
-                    napi_call_threadsafe_function(gStateTsfn, strdup("state:failed:wineserver"),
-                                                  napi_tsfn_blocking);
-                }
-            }
+            HandleProcessDeath(pid);
         }
     }
-    OH_LOG_INFO(LOG_APP, "[ProcMon] stopped");
+    OH_LOG_WARN(LOG_APP, "[ProcMon] stopped");
 }
 
 static void EnsureMonitorRunning() {

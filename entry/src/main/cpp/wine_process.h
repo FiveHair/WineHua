@@ -51,6 +51,10 @@ WineProcessEntry* AddProcess(pid_t pid, const std::string& exeFullPath, int stdo
 void RemoveProcess(pid_t pid, int exitCode = -1,
                    const std::string& exitCodeSource = "unknown");
 void KillAllProcesses();
+// 杀单个子进程 (按设备模式分流): fork 后端原生 kill; NCP 后端优先官方
+// 终止 API (沙箱内 kill(2) 可能受限), 失败 fallback SIGKILL。任务列表
+// 「结束进程」与 KillAllProcesses 共用
+void KillChildProcess(pid_t pid);
 
 // -- 主 wineserver 会话锚点 --
 // LaunchPadMode spawn wineserver 成功后登记: 加入进程注册表 (ProcMon 监视,
@@ -72,6 +76,15 @@ void MarkDesktopShellProcesses();
 // 后台 zombie 感知等待注册表进程 (含 wineserver) 全部死亡, 完成发一次
 // state:stopped — ArkTS 重启/重置/停止编排的继续条件 (stopAll 末尾调用)
 void NotifyWhenSessionDrained();
+// 注册 NCP 子进程退出回调 (App 初始化时调用一次): 沙箱 /proc 对 NCP 进程
+// 可能不可见, 轮询判活不可靠 — 退出检测以系统回调为权威信号。无条件注册:
+// 手机 fork 模式 (fork 子进程不走 NCP) 注册后不触发, 空转无害
+void RegisterNcpExitCallback();
+// 启动编排等待子进程退出 (wineboot 等待用), 按设备模式分流:
+// 手机 fork 模式走 /proc 判活 (可见有效); NCP 模式查退出回调标记
+bool IsLaunchChildExited(pid_t pid);
+// 查询进程是否已由 NCP 退出回调确认退出
+bool IsPidExited(pid_t pid);
 
 // fork 模式下子进程退出先变僵尸、/proc/<pid> 不消失（NCP 模式由 appspawn 立即 reap）。
 // 存活检测必须识别僵尸，否则把已退出的进程误判为存活 (wineboot 等待/ProcMon 共用)。

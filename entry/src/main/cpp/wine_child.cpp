@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/prctl.h>
 #include "wine_constants.h"
 #include "wine_env.h"
 #include <fcntl.h>
@@ -436,6 +437,11 @@ extern "C" void Main(NativeChildProcess_Args args)
     }
     argv[argc] = nullptr;
 
+    // 线程名 = argv[0] basename (prctl 最长 15 字符)。崩溃记录 (DfxSignalHandler
+    // threadName) 直接显示进程身份, 即使 hilog 日志丢失也能从 tombstone 认出是谁。
+    if (argc > 0 && argv[0] && argv[0][0])
+        prctl(PR_SET_NAME, basename_of_path(argv[0]));
+
     bool guestElfMode = argc >= 2 && !strcmp(argv[0], "__winehua_guest_elf__");
     bool hostElfMode = argc >= 2 && !strcmp(argv[0], "__winehua_host_elf__");
     if (guestElfMode || hostElfMode) {
@@ -664,7 +670,8 @@ extern "C" void Main(NativeChildProcess_Args args)
 // entryParams: "homeDir|binDir|wineserver|-f"... (homeDir 跳过)
 extern "C" void WineserverMain(NativeChildProcess_Args args)
 {
-    OH_LOG_INFO(LOG_APP, "[WineChild] WineserverMain() ENTER pid=%{public}d", getpid());
+    OH_LOG_INFO(LOG_APP, "[WineChild] WineserverMain() ENTER pid=%{public}d entryParams=%{public}s",
+                getpid(), args.entryParams ? args.entryParams : "(null)");
 
     const char* ep = args.entryParams ? args.entryParams : "";
     char* buf = strdup(ep);
@@ -727,6 +734,8 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
         argv2[2] = nullptr;
         argc2 = 2;
     }
+    // 线程名 = wineserver, 崩溃记录 threadName 直接可见
+    prctl(PR_SET_NAME, "wineserver");
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step4: argv argc=%{public}d argv[0]=%{public}s", argc2, argv2[0]);
 
 #ifdef __aarch64__
