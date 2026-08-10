@@ -888,11 +888,10 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
                           "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
                           "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8");
 #endif
-            if (DirExists(guestLibDir + "/dri"))
 #ifdef __x86_64__
-                env.push_back("LIBGL_DRIVERS_PATH=/data/storage/el1/bundle/libs/x86_64");
+            // LIBGL_DRIVERS_PATH 由下方 softpipe 块统一指向 el1, 不在此重复设置
 #else
-                env.push_back("LIBGL_DRIVERS_PATH=" + guestLibDir + "/dri");
+            if (DirExists(guestLibDir + "/dri")) env.push_back("LIBGL_DRIVERS_PATH=" + guestLibDir + "/dri");
 #endif
             if (DirExists(guestLibDir + "/egl")) env.push_back("EGL_DRIVERS_PATH=" + guestLibDir + "/egl");
         }
