@@ -99,6 +99,11 @@ EglRenderer* PluginManager::GetRendererForToplevel(uint32_t tid) {
     return rit->second.get();
 }
 
+EglRenderer* PluginManager::GetAnyRenderer() {
+    if (toplevelRenderers_.empty()) return nullptr;
+    return toplevelRenderers_.begin()->second.get();
+}
+
 void PluginManager::MoveRendererToToplevel(uint32_t oldId, uint32_t newId) {
     OH_LOG_INFO(LOG_APP, "[MW-Life] MoveRenderer tl %{public}u→%{public}u", oldId, newId);
     if (oldId == newId) { OH_LOG_WARN(LOG_APP, "[MW-Life] MoveRenderer SKIP: old==new"); return; }
