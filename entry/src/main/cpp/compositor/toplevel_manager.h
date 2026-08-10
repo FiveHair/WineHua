@@ -88,6 +88,9 @@ public:
         }
         // 桌面位置更新 (ARGB move: Wine 坐标权威 / move_grab: 绝对定位)
         void SetPosition(int sx, int sy) { x_ = sx; y_ = sy; }
+        // Wine 主动报告位置 (程序 SetWindowPos 的 geo 变化): 桌面坐标跟随
+        // + 快照更新。move grab 只改 x_/y_ 不改快照 → 拖动后不被旧 geo 弹回
+        void SetWinePosition(int sx, int sy) { wineX_ = sx; wineY_ = sy; }
         // 锚定桌面原点 (全屏/最大化: 合成按保比例缩放铺满, 不用浮动位置)
         void AnchorToOrigin() { x_ = 0; y_ = 0; }
 
@@ -128,7 +131,7 @@ public:
         uint32_t shmFormat_ = 1;        // wl_shm format (0=ARGB8888, 1=XRGB8888)
         bool hasPosition_ = false;      // 首次 commit 置位 (isFirstCommit 判定 / 移动守卫)
         int x_ = 0, y_ = 0;             // compositor 桌面位置 (含 move grab 偏移)
-        int wineX_ = 0, wineY_ = 0;     // Wine 坐标系位置 (首次 commit, 不变)
+        int wineX_ = 0, wineY_ = 0;     // Wine 坐标系位置 (首帧写, SetWinePosition 跟随更新)
         int lastReportedW_ = 0, lastReportedH_ = 0;  // 尺寸上报去重
         bool minimized_ = false;        // 桌面合成时跳过最小化窗口
         bool isBackground_ = false;     // 渲染层, 不接收输入 (被切换掉的旧 root)
