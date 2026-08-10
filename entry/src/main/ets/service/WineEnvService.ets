@@ -400,7 +400,7 @@ export class WineEnvService {
   // evt:* 作为瞬时事件转发给事件订阅方 (ProcessService 刷新 / 启动反馈);
   // 唯一例外: evt:desktop-ready 把 ready-degraded 补票升级为 ready (蓝图 §2.2)
   private onNativeState = (s: string): void => {
-    hilog.info(DOMAIN, 'wine', 'state: %{public}s', s);
+    hilog.warn(DOMAIN, 'wine', 'state: %{public}s', s);
     if (s.startsWith('state:')) {
       this.handleEngineState(s.substring(6));
     } else if (s.startsWith('evt:')) {
@@ -484,11 +484,11 @@ export class WineEnvService {
     const rm = this.ctx!.resourceManager;
     try {
       const rawFd = rm.getRawFdSync('wine-data.zip');
-      hilog.info(DOMAIN, 'wine', 'rawfile: wine-data.zip exists len=%{public}d', rawFd.length);
+      hilog.warn(DOMAIN, 'wine', 'rawfile: wine-data.zip exists len=%{public}d', rawFd.length);
       rm.closeRawFdSync('wine-data.zip');
       return true;
     } catch (_) {
-      hilog.info(DOMAIN, 'wine', 'rawfile: wine-data.zip not packaged');
+      hilog.warn(DOMAIN, 'wine', 'rawfile: wine-data.zip not packaged');
       return false;
     }
   }
@@ -596,23 +596,23 @@ export class WineEnvService {
   private async extractWineData(): Promise<void> {
     const marker = `${WINE_ROOT}/share/wine/wine.inf`;
     const packagedManifest = this.readRawfileText('wine-runtime-manifest.json');
-    hilog.info(DOMAIN, 'wine', 'extract: check marker=%{public}s', marker);
+    hilog.warn(DOMAIN, 'wine', 'extract: check marker=%{public}s', marker);
     if (!this.runtimeNeedsRefresh()) {
-      hilog.info(DOMAIN, 'wine', 'extract: runtime manifest matches');
+      hilog.warn(DOMAIN, 'wine', 'extract: runtime manifest matches');
       return;
     }
-    hilog.info(DOMAIN, 'wine', 'extract: runtime missing or changed, start managed refresh');
+    hilog.warn(DOMAIN, 'wine', 'extract: runtime missing or changed, start managed refresh');
 
     const rm = this.ctx!.resourceManager;
     const rawFd = rm.getRawFdSync('wine-data.zip');
 
     try {
       // 流式拷贝: getRawFdSync 获取 fd → 分块读取 → 写入临时文件
-      hilog.info(DOMAIN, 'wine', 'extract: rawFd fd=%{public}d offset=%{public}d length=%{public}d',
+      hilog.warn(DOMAIN, 'wine', 'extract: rawFd fd=%{public}d offset=%{public}d length=%{public}d',
         rawFd.fd, rawFd.offset, rawFd.length);
 
       const tmpZip = `${FILES_BASE}/wine-data.zip`;
-      hilog.info(DOMAIN, 'wine', 'extract: writing tmpZip=%{public}s (stream)', tmpZip);
+      hilog.warn(DOMAIN, 'wine', 'extract: writing tmpZip=%{public}s (stream)', tmpZip);
       const dst = fs.openSync(tmpZip, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
 
       const CHUNK = 4 * 1024 * 1024; // 4MB 分块
@@ -630,19 +630,19 @@ export class WineEnvService {
         totalWritten += n;
       }
       fs.closeSync(dst);
-      hilog.info(DOMAIN, 'wine', 'extract: stream copy ok, totalWritten=%{public}d', totalWritten);
+      hilog.warn(DOMAIN, 'wine', 'extract: stream copy ok, totalWritten=%{public}d', totalWritten);
 
       // files/wine 是受管运行时: 目录级原子刷新, 不碰 .wine / .wine-smoke prefix
       if (pathExists(WINE_ROOT)) removePathRecursive(WINE_ROOT);
       // 确保目标目录存在
       fs.mkdirSync(WINE_ROOT, true);
-      hilog.info(DOMAIN, 'wine', 'extract: calling decompressFile → %{public}s', WINE_ROOT);
+      hilog.warn(DOMAIN, 'wine', 'extract: calling decompressFile → %{public}s', WINE_ROOT);
       await zlib.decompressFile(tmpZip, WINE_ROOT, {});
-      hilog.info(DOMAIN, 'wine', 'extract: decompress ok');
+      hilog.warn(DOMAIN, 'wine', 'extract: decompress ok');
 
       // 验证
       if (fs.accessSync(marker)) {
-        hilog.info(DOMAIN, 'wine', 'extract: verified, marker exists');
+        hilog.warn(DOMAIN, 'wine', 'extract: verified, marker exists');
         if (packagedManifest) writeTextFile(`${WINE_ROOT}/.winehua-runtime-manifest.json`, packagedManifest);
       } else {
         hilog.warn(DOMAIN, 'wine', 'extract: marker still missing after decompress!');
@@ -712,7 +712,14 @@ export class WineEnvService {
           this.startRequestedGame();
           return;
         }
-      } catch (e) { /* prefix 还没初始化完成 */ }
+      } catch (e) {
+        if (i % 10 == 0) {
+          hilog.warn(DOMAIN, 'wine', 'waitForPrefix: checkWinePrefix threw at %{public}d s', i);
+        }
+      }
+      if (i > 0 && i % 10 == 0) {
+        hilog.warn(DOMAIN, 'wine', 'waitForPrefix: not ready at %{public}d s', i);
+      }
       await new Promise<void>(r => setTimeout(r, 1000));
     }
     // 超时，仍然尝试刷新一次
@@ -734,6 +741,8 @@ export class WineEnvService {
   // engineState 一并落成 'failed': 失败是终态, 否则 'stopping'/'starting'
   // 残留的 busy 判据会把所有按钮永久锁死 (软锁)
   private failInit(text: string): void {
+    hilog.error(DOMAIN, 'wine', 'failInit: %{public}s (engineState=%{public}s bgStart=%{public}s)',
+      text, this.engineState, this.bgStart);
     this.initFailed = true;
     this.initBusy = false;
     this.opBusy = false;
@@ -790,7 +799,7 @@ export class WineEnvService {
       const pickerHome = new fileUri.FileUri(documentSaveResult[0]).path;
       this.zHome = pickerHome.endsWith('/') ? pickerHome : `${pickerHome}/`;
     }
-    hilog.info(DOMAIN, 'wine', 'auto-init: Z home=%{public}s', this.zHome);
+    hilog.warn(DOMAIN, 'wine', 'auto-init: Z home=%{public}s', this.zHome);
     this.notify();
     return true;
   }
@@ -823,25 +832,25 @@ export class WineEnvService {
       }
       this.cleanPrefixPrepared = true;
       this.prefixReady = false;
-      hilog.info(DOMAIN, 'SmokeRunner', 'App-owned clean prefix reset completed');
+      hilog.warn(DOMAIN, 'SmokeRunner', 'App-owned clean prefix reset completed');
     }
     const gamesDir = `${this.zHome}games`;
     if (!ensureDirectory(gamesDir)) {
       this.failInit('创建 games 目录失败');
       return;
     }
-    hilog.info(DOMAIN, 'wine', 'auto-init: games directory=%{public}s', gamesDir);
+    hilog.warn(DOMAIN, 'wine', 'auto-init: games directory=%{public}s', gamesDir);
     // 检查是否需要解压 wine 数据文件:
     // - 数据缺失 (首启/重置后, wine.inf 不存在): 必须解压, 否则引擎起不来
     // - 数据存在但与 HAP 打包不一致 (升级): 不自动解压 — 静默换数据会与旧
     //   prefix 不兼容; 置 upgradePending 由用户主动选择应用 (完整重置)
-    hilog.info(DOMAIN, 'wine', 'auto-init: check marker=%{public}s', `${WINE_ROOT}/share/wine/wine.inf`);
+    hilog.warn(DOMAIN, 'wine', 'auto-init: check marker=%{public}s', `${WINE_ROOT}/share/wine/wine.inf`);
     if (!pathExists(`${WINE_ROOT}/share/wine/wine.inf`)) {
       this.setInitStatus('解压数据...', !this.bgStart);
-      hilog.info(DOMAIN, 'wine', 'auto-init: extracting wine data (missing)...');
+      hilog.warn(DOMAIN, 'wine', 'auto-init: extracting wine data (missing)...');
       await this.extractWineData();
     } else if (this.upgradeNeedsAttention() && !this.isAutomation()) {
-      hilog.info(DOMAIN, 'wine', 'auto-init: runtime outdated, NOT auto-extracting (user-initiated)');
+      hilog.warn(DOMAIN, 'wine', 'auto-init: runtime outdated, NOT auto-extracting (user-initiated)');
       // 中止初始化: 引擎保持未启动, 弹卡等用户决定 (应用=doReset 引擎静止
       // 无竞态; 稍后=dismiss 记跳过 sha 后补拉起, 同版本不再拦截)。
       // 状态复位必须完整: initBusy 不清 → 后续 doInit 防重入卡死; overlay/
@@ -862,7 +871,7 @@ export class WineEnvService {
       // (upgradeNeedsAttention=false) 也会走到这里, 若不区分会被静默
       // 应用用户明确跳过的更新 — 该场景应落空继续, 用旧数据启动
       this.setInitStatus('解压数据...', !this.bgStart);
-      hilog.info(DOMAIN, 'wine', 'auto-init: automation extracting wine data...');
+      hilog.warn(DOMAIN, 'wine', 'auto-init: automation extracting wine data...');
       await this.extractWineData();
     }
     /* C:\smoke 位于持久 prefix 内而非可替换的 files/wine 运行时里。
@@ -872,7 +881,7 @@ export class WineEnvService {
       hilog.error(DOMAIN, 'wine', 'auto-init: managed C:\\smoke synchronization failed');
       return;
     }
-    hilog.info(DOMAIN, 'wine', 'auto-init: starting Wine...');
+    hilog.warn(DOMAIN, 'wine', 'auto-init: starting Wine...');
     this.setInitStatus('启动服务...', !this.bgStart);
     testNapi.setHostShadowProfile(this.perfProfile);
     const ok: boolean = testNapi.startServer(this.sockPath);
@@ -939,6 +948,8 @@ export class WineEnvService {
   // 修历史 bug: 桌面存活时直接 doInit 会再 spawn 一套 wineserver/explorer
   // → 双桌面同时渲染, 界面卡死
   restartEngine(): void {
+    hilog.warn(DOMAIN, 'wine', 'restartEngine: engineState=%{public}s sessionAlive=%{public}s initFailed=%{public}s',
+      this.engineState, this.sessionAlive, this.initFailed);
     if (this.isBusy()) {
       return;
     }
@@ -978,11 +989,16 @@ export class WineEnvService {
     const deadline = Date.now() + 300000;
     while (this.engineState != 'ready' && Date.now() < deadline) {
       if (this.initFailed || this.engineState == 'failed') {
+        hilog.warn(DOMAIN, 'wine', 'ensureEngineReady: initFailed/failed during wait');
         return false;
       }
       await new Promise<void>((r) => setTimeout(r, 200));
     }
-    return this.engineState == 'ready';
+    const engineReady = this.engineState == 'ready';
+    if (!engineReady) {
+      hilog.warn(DOMAIN, 'wine', 'ensureEngineReady: timed out engineState=%{public}s', this.engineState);
+    }
+    return engineReady;
   }
 
   // 已就绪但无桌面会话时，先拉起桌面外壳（explorer desktop shell），
@@ -1015,11 +1031,17 @@ export class WineEnvService {
     const deadline = Date.now() + timeoutMs;
     while ((!this.sessionAlive || !this.desktopSurfaceReady) && Date.now() < deadline) {
       if (this.initFailed) {
+        hilog.warn(DOMAIN, 'wine', 'ensureDesktop: initFailed during wait');
         return false;
       }
       await new Promise<void>((r) => setTimeout(r, 150));
     }
-    return this.sessionAlive && this.desktopSurfaceReady;
+    const desktopOk = this.sessionAlive && this.desktopSurfaceReady;
+    if (!desktopOk) {
+      hilog.warn(DOMAIN, 'wine', 'ensureDesktop: timeout sessionAlive=%{public}s desktopSurfaceReady=%{public}s',
+        this.sessionAlive, this.desktopSurfaceReady);
+    }
+    return desktopOk;
   }
 
   // 停止完成判定 (阶段2 起为事件): native stopAll 在注册表进程全死

@@ -88,7 +88,7 @@ static napi_value StartServer(napi_env env, napi_callback_info info) {
     char path[512] = {};
     napi_get_value_string_utf8(env, args[0], path, sizeof(path), nullptr);
 
-    OH_LOG_INFO(LOG_APP, "[NAPI] startServer: %{public}s", path);
+    OH_LOG_WARN(LOG_APP, "[NAPI] startServer: %{public}s", path);
     // 确保 socket 父目录存在 (WINEPREFIX=.wine/)
     {
         std::string sockDir = path;
@@ -100,12 +100,12 @@ static napi_value StartServer(napi_env env, napi_callback_info info) {
     }
     gSockPath = path;
     bool ok = WaylandServer::GetInstance()->Start(path);
-    OH_LOG_INFO(LOG_APP, "[NAPI] startServer result: %{public}s", ok ? "OK" : "FAIL");
+    OH_LOG_WARN(LOG_APP, "[NAPI] startServer result: %{public}s", ok ? "OK" : "FAIL");
     // 确认 socket 文件存在
     if (ok) {
         struct stat st;
         int sr = stat(path, &st);
-        OH_LOG_INFO(LOG_APP, "[NAPI] wayland socket stat=%{public}d (errno=%{public}d)",
+        OH_LOG_WARN(LOG_APP, "[NAPI] wayland socket stat=%{public}d (errno=%{public}d)",
                     sr, sr == 0 ? 0 : errno);
     }
 
@@ -244,7 +244,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     setenv("WINEHUA_VIRGL_HOST_DESCRIPTOR_UPDATE_SERIALIZE",
            preciseDirtyDescriptorSerialized ? "1" : "0", 1);
     setenv("WINEHUA_VIRGL_HOST_PRESENT_MODE", presentMode, 1);
-    OH_LOG_INFO(LOG_APP,
+    OH_LOG_WARN(LOG_APP,
                 "[NAPI] host shadow profile=%{public}s mode=%{public}s "
                 "trace=%{public}s selector=%{public}s perf_summary=%{public}s "
                 "gpu_upload=%{public}s upload_wait=%{public}s "
@@ -308,11 +308,11 @@ static napi_value LaunchClient(napi_env env, napi_callback_info info) {
         p->homeDir = "/storage/Users/currentUser/Download";
     }
 
-    OH_LOG_INFO(LOG_APP,
+    OH_LOG_WARN(LOG_APP,
                 "[Launch] exe=%{public}s sock=%{public}s lib=%{public}s home=%{public}s prefix=%{public}s automation=%{public}s (async)",
                 p->exePath.c_str(), p->sockPath.c_str(), p->libPath.c_str(), p->homeDir.c_str(),
                 p->prefixDir.c_str(), p->automationMode ? "true" : "false");
-    OH_LOG_INFO(LOG_APP, "[Launch] desktop D3D backend=%{public}s lang=%{public}s",
+    OH_LOG_WARN(LOG_APP, "[Launch] desktop D3D backend=%{public}s lang=%{public}s",
                 p->d3dBackend.c_str(), p->wineLang.c_str());
 
     // 保证可执行
@@ -330,7 +330,7 @@ static napi_value LaunchClient(napi_env env, napi_callback_info info) {
     // 启动后台线程: wineserver -> wineboot --init
     std::thread(LaunchThreadFunc, p).detach();
 
-    OH_LOG_INFO(LOG_APP, "[Launch] background thread started, returning to JS");
+    OH_LOG_WARN(LOG_APP, "[Launch] background thread started, returning to JS");
 
     napi_value r;
     napi_create_int32(env, 0, &r);
@@ -351,7 +351,7 @@ static napi_value CheckWinePrefix(napi_env env, napi_callback_info info) {
     const std::string initMarker = prefix + "/.winehua-init-in-progress";
     bool ok = IsWinePrefixInitialized(prefix)
         && access(initMarker.c_str(), F_OK) != 0;
-    OH_LOG_INFO(LOG_APP, "[Wine] checkWinePrefix prefix=%{public}s initialized=%{public}s",
+    OH_LOG_WARN(LOG_APP, "[Wine] checkWinePrefix prefix=%{public}s initialized=%{public}s",
                 prefix.c_str(), ok ? "yes" : "no");
     napi_value r;
     napi_get_boolean(env, ok, &r);
@@ -401,7 +401,7 @@ static napi_value ResetWinePrefix(napi_env env, napi_callback_info info) {
         napi_get_value_string_utf8(env, args[0], mode, sizeof(mode), nullptr);
         if (!strcmp(mode, "clean")) prefix = WINE_SMOKE_PREFIX;
     }
-    OH_LOG_INFO(LOG_APP, "[NAPI] resetWinePrefix called prefix=%{public}s", prefix);
+    OH_LOG_WARN(LOG_APP, "[NAPI] resetWinePrefix called prefix=%{public}s", prefix);
     KillAllProcesses();
     bool ok = RmDir(prefix);
     if (mkdir(prefix, 0755) != 0 && errno != EEXIST) {
@@ -409,7 +409,7 @@ static napi_value ResetWinePrefix(napi_env env, napi_callback_info info) {
         OH_LOG_ERROR(LOG_APP, "[NAPI] mkdir %{public}s failed: %{public}s",
                      prefix, strerror(errno));
     }
-    OH_LOG_INFO(LOG_APP, "[NAPI] resetWinePrefix: %{public}s %{public}s",
+    OH_LOG_WARN(LOG_APP, "[NAPI] resetWinePrefix: %{public}s %{public}s",
                 prefix, ok ? "cleared and recreated" : "reset failed");
     napi_value result;
     napi_get_boolean(env, ok, &result);
@@ -666,7 +666,7 @@ static napi_value SetPhoneMode(napi_env env, napi_callback_info info) {
         bool on;
         napi_get_value_bool(env, args[0], &on);
         PhoneAdapter_SetPhoneMode(on);
-        OH_LOG_INFO(LOG_APP, "[MW-NAPI] setPhoneMode = %{public}s", on ? "true" : "false");
+        OH_LOG_WARN(LOG_APP, "[MW-NAPI] setPhoneMode = %{public}s", on ? "true" : "false");
     }
     return nullptr;
 }
@@ -881,9 +881,9 @@ static napi_value KillProcess(napi_env env, napi_callback_info info) {
 
     int32_t pid = 0;
     napi_get_value_int32(env, args[0], &pid);
-    OH_LOG_INFO(LOG_APP, "[NAPI] killProcess pid=%{public}d", pid);
+    OH_LOG_WARN(LOG_APP, "[NAPI] killProcess pid=%{public}d", pid);
 
-    kill(pid, SIGKILL);
+    KillChildProcess(pid);
     RemoveProcess(pid);
 
     napi_value r;
@@ -894,7 +894,14 @@ static napi_value KillProcess(napi_env env, napi_callback_info info) {
 // -- 模块注册 --
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
-    OH_LOG_INFO(LOG_APP, "[MW-NAPI]  Init called, env=%{public}p", env);
+    OH_LOG_WARN(LOG_APP, "[MW-NAPI]  Init called, env=%{public}p", env);
+
+    // 注册 NCP 子进程退出回调 (最早时机, 无条件): 沙箱 /proc 对 NCP 进程
+    // 不可见, 退出检测以系统回调为权威信号。手机 fork 模式注册后不触发
+    // (fork 子进程不走 NCP), 空转无害 — 故无需按模式分流, 模式分支只留在
+    // spawn 之后的判活/杀/等待操作里 (此时 IsForkBackend 已由 setPhoneMode
+    // 正确置位)
+    RegisterNcpExitCallback();
 
     napi_property_descriptor desc[] = {
         {"startServer",    nullptr, StartServer,    nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -946,7 +953,7 @@ static napi_value Init(napi_env env, napi_value exports) {
     // surfaceId 架构: 不再使用 libraryname='entry', XComponent 通过
     // 自定义 Controller 回调拿到 surfaceId, 由 createRenderer/renderer 管理。
     // 不再需要保存 gEnv/gExports, 不再依赖 XComponent exports 对象。
-    OH_LOG_INFO(LOG_APP, "[MW-NAPI] Init complete OK");
+    OH_LOG_WARN(LOG_APP, "[MW-NAPI] Init complete OK");
     return exports;
 }
 EXTERN_C_END
