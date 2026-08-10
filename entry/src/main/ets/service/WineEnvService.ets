@@ -363,8 +363,9 @@ export class WineEnvService {
     // 1) 自动化/游戏测试模式 (want 驱动无人值守): 无条件立即 doInit;
     // 2) 普通模式且 prefix 已就绪 (二次进入): 后台自动拉起引擎 (bgStart
     //    抑制 overlay, 用户无感), 就绪前点 exe 由 UI 侧 toast 拦截;
-    // 3) 普通模式无 prefix (首启): 自动初始化 — 首启解压 249MB 可达数分钟,
-    //    前台 overlay 阻塞至 prefix 就绪 (原懒初始化改为自动, 与 master 一致)
+    // 3) 普通模式无 prefix (首启): 懒初始化 — 首启解压 249MB 可达数分钟,
+    //    由引导按钮让用户显式启动 (main-ui 保留手动初始化, 与 core-extract
+    //    的自动初始化保持设计差异; 合并时注意不要吸收对侧分支)
     if (this.automationMode || this.gameTestMode) {
       setTimeout(() => this.doInit(), 0);
     } else if (this.prefixReady) {
@@ -386,11 +387,8 @@ export class WineEnvService {
       setTimeout(() => {
         this.autoStartIfIdle();
       }, 0);
-    } else {
-      // 首启无 prefix: 自动 doInit (原懒初始化等用户点"初始化 Wine",
-      // 改为与 master 一致的冷启动自动初始化)
-      setTimeout(() => this.doInit(), 0);
     }
+    // 首启无 prefix: 懒初始化 — 不自动 doInit, 由引导按钮显式启动
   }
 
   // 自动化/游戏模式专用的状态文案直写 (SmokeRunner/game 自管进度文案;
