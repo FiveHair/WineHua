@@ -39,6 +39,11 @@ public:
 
     // 辅助: toplevelId -> EglRenderer 查找 (InputManager 坐标转换使用)
     EglRenderer* GetRendererForToplevel(uint32_t tid);
+    // Desktop 合成模式: 取当前登记的唯一 renderer（输入坐标映射兜底）。
+    // RootCompositing 下所有 renderer 都渲染桌面根，letterbox 与登记 id
+    // 无关；桌面根重建/前台窗口"提升"导致按 id 查不到 renderer 时用它
+    // 仍能得到正确的 viewport 映射。
+    EglRenderer* GetAnyRenderer();
     // Desktop 模式: root 切换时更新渲染器的 toplevel 映射
     void MoveRendererToToplevel(uint32_t oldId, uint32_t newId);
     size_t GetRendererCount() const { return toplevelRenderers_.size(); }
