@@ -21,11 +21,13 @@ export default class EntryAbility extends UIAbility {
   private contentPage: string = 'pages/Index';
 
   private defaultDxvkBackend(): string {
-    /* Modern 2.6 remains an explicit diagnostic choice. Its current 920
-     * result still loses alpha foliage textures and can end in DEVICE_LOST;
-     * automatic sessions must keep the verified Legacy 1.10.3 path until
-     * those two failures have independent device evidence. */
-    return 'dxvk_legacy';
+    /* This is an evidence allowlist, not a Host-to-Guest capability inference.
+     * The bundled Guest Mesa/DXVK payload is fixed by the HAP manifest, while
+     * the product/build identity below pins the audited Host driver. A system
+     * update therefore falls back to 1.10.3 until that identity is qualified. */
+    const qualified920 = deviceInfo.productModel === 'VYG-AL00' &&
+      deviceInfo.incrementalVersion === '26.0.0.32';
+    return qualified920 ? 'dxvk_modern_2_6' : 'dxvk_legacy';
   }
 
   private resolveDxvkBackend(value: string): string {
@@ -187,7 +189,7 @@ export default class EntryAbility extends UIAbility {
       Math.min(1000, Math.floor(requestedClickClientYPermille)));
     const requestedPerfProfile = value('winehua.perf_profile',
       d3dBackend === 'vkd3d_limited_500k' ? 'shadow-precise' :
-        (mode === '' || d3dBackend === 'dxvk_legacy' ?
+        (mode === '' || d3dBackend === 'dxvk_legacy' || d3dBackend === 'dxvk_modern_2_6' ?
           'shadow-precise-dirty-ring-inline-upload-coverage-sort' : 'baseline'));
     const perfProfile = ['direct-fence-wait', 'no-remote-sync', 'no-dynamic-flush', 'fence-feedback',
       'shadow-none', 'shadow-trace', 'shadow-to-host-explicit', 'shadow-precise',

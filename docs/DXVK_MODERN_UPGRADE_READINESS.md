@@ -1,6 +1,6 @@
 # WineHua DXVK Modern Upgrade Readiness
 
-> Updated: 2026-08-07
+> Updated: 2026-08-10
 
 > Purpose: record the independent DXVK and VKD3D capability decisions. DXVK
 > 2.6.2 is already adapted and game-validated on Maleoon 920; this document
@@ -237,7 +237,27 @@ game result or justify describing 2.6.2 as less compatible than 1.10.x. A new
 capability hash, Host driver update, Venus update, or Mesa update invalidates
 the qualification and requires rerunning the matrix.
 
-## 8. VKD3D boundary
+## 8. Known Modern workload limitation
+
+The 920 Modern profile has a known limitation in
+`Z:\\games\\dx11_test\\dx11_test\\InstancingFX11\\InstancingFX11.exe`:
+
+- the qualified Modern base plus the isolated VKD3D swapchain bridge
+  (`977a3d78`) keeps the ordinary 2.6.2 path free of the later Instancing
+  experiments; the last visible workload result had vegetation but incomplete
+  alpha foliage/leaf geometry;
+- later experimental Modern changes were able to turn this workload into a
+  black screen and, in one run, a first-present `VK_ERROR_DEVICE_LOST` followed
+  by a Venus ring fatal error;
+- the ordinary DXVK 2.6.2 smoke suite and other validated D3D11 workloads still
+  pass on the same 920 device.
+
+This is recorded as a workload-specific Modern/Venus/Maleoon compatibility
+issue, not as a reason to downgrade the normal 920 DXVK path or to claim that
+DXVK 2.6.2 is globally unsupported. The failed follow-up experiments remain
+in local Git stashes and are not part of the qualified runtime.
+
+## 9. VKD3D boundary
 
 VKD3D is a separate D3D12 project, not a consequence of upgrading DXVK. DXVK
 2.6.2 qualification proves a D3D9/10/11 translation path only. The current
@@ -245,7 +265,22 @@ VKD3D-Proton 2.6 limited-500K profile has its own capability matrix, descriptor
 ceiling, smoke, demo, and sample evidence. Failure to qualify a newer VKD3D
 profile does not downgrade DXVK 2.6.2.
 
-## 9. Decision record
+VKD3D-Proton 2.6 exposes the legacy `IWineDXGISwapChainFactory` interface. The
+Modern 2.6.2 DXGI overlay must retain the narrowly scoped `977a3d78` bridge
+which queries that IID after the normal `IDXGIVkSwapChainFactory` query fails.
+This is an ABI compatibility bridge, not a rendering workaround. On Maleoon
+920, the same x64 1000-frame D3D12 smoke produced the following A/B evidence:
+
+- Modern DXGI without the bridge: D3D12 device and feature queries succeeded,
+  but `CreateSwapChainForHwnd` returned `DXGI_ERROR_UNSUPPORTED` and rendered
+  0/1000 frames;
+- Legacy 1.10.3 DXGI with the same VKD3D DLL: 1000/1000 frames passed at
+  37.956 FPS, including animation, buffer-copy/readback, and fence checks;
+- the qualified product combination is VKD3D-Proton 2.6 plus Modern DXGI with
+  the legacy-factory bridge; it must pass the same authoritative 1000-frame
+  test after every DXGI update.
+
+## 10. Decision record
 
 ```text
 920 D3D11:             WineHua DXVK 2.6.2, adapted and game-validated
