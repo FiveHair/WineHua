@@ -71,7 +71,7 @@ struct Index {
     });
     proc.bindEnv(env);
     // 引擎初始化 (幂等): automation/game 模式自动 doInit; prefix 就绪自动
-    // 拉起 (含升级检测拦截); 首启懒初始化等用户点"初始化 Wine"
+    // 拉起 (含升级检测拦截); 首启无 prefix 自动 doInit (与 master 一致)
     env.init(getContext(this));
     mirror();
   }
