@@ -151,6 +151,11 @@ public:
     void SetDesktopRootToplevelId(uint32_t id) { desktopRootToplevelId_ = id; }
     uint32_t GetDesktopRootToplevelId() const { return desktopRootToplevelId_; }
     void SetDesktopRootRecognitionEnabled(bool enabled) { desktopRootMgr_.SetRecognitionEnabled(enabled); }
+    /* 首启 wineboot 期间抑制窗口创建事件 (PC 窗口模式): wineboot 的
+     * "Setting up Wine" 等待窗不创建独立 OHOS 窗口 — 与 Pad 桌面模式对齐
+     * (初始化阶段 desktop root 未出现, 窗口天然不可见)。仅首启 wineboot
+     * 生命周期内置位, wineboot 完成后恢复 (wine_launch.cpp)。 */
+    void SetToplevelEventSuppressed(bool on) { toplevelEventSuppressed_ = on; }
     void PromotePendingDesktopRoot() {
         uint32_t id = desktopRootMgr_.PromotePending();
         if (id) PluginManager::GetInstance()->MoveRendererToToplevel(0, id);
@@ -262,6 +267,9 @@ private:
 
     StateCb stateCb_;
     ToplevelCb toplevelCb_;
+    // 首启 wineboot 期间置位 (wine_launch.cpp): 抑制 created/argb_created
+    // 派发, PC 窗口模式下 wineboot 初始化等待窗不创建独立 OHOS 窗口
+    bool toplevelEventSuppressed_ = false;
     std::atomic<bool> firstFrame_{false};
 
     // Desktop 合成模式策略 (唯一模式存储位, DesktopCompositor 持引用随动)

@@ -218,6 +218,15 @@ bool WaylandServer::ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy) {
 }
 
 void WaylandServer::FireToplevelEvent(uint32_t id, const char* event, const char* jsonData) {
+    /* 首启 wineboot 抑制窗口创建事件 (PC 窗口模式): 抑制 created/argb_created
+     * 后 ArkTS 不启动 WineWindowAbility, wineboot 等待窗不出现在系统桌面。
+     * 功能不受影响 — wine.inf 安装不依赖窗口显示; wineboot 退出的 destroyed
+     * 事件照常派发, ArkTS 对未知 toplevel id 的销毁容忍。 */
+    if (toplevelEventSuppressed_ &&
+        (!strcmp(event, "created") || !strcmp(event, "argb_created"))) {
+        OH_LOG_INFO(LOG_APP, "[MW] suppress %{public}s tl=%{public}u (wineboot init)", event, id);
+        return;
+    }
     OH_LOG_INFO(LOG_APP, "[MW] FireToplevel id=%{public}u event=%{public}s data=%{public}s", id, event, jsonData);
     if (toplevelCb_) toplevelCb_(id, event, jsonData);
     /* 桌面根出现 = 引擎消息通道的 evt:desktop-ready: LaunchPadMode 的 15s

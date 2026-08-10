@@ -439,6 +439,10 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         }
         auto* ws = WaylandServer::GetInstance();
         ws->SetDesktopRootRecognitionEnabled(false);
+        // 首启 wineboot 期间抑制窗口创建事件 (PC 窗口模式): 初始化等待窗
+        // 不创建独立 OHOS 窗口 — 与 Pad 桌面模式 (初始化阶段 root 未渲染,
+        // 窗口天然不可见) 对齐。wineboot 完成后恢复。
+        ws->SetToplevelEventSuppressed(true);
         // wineboot creates shell-owned helper windows while initializing a fresh
         // prefix.  Keep those helpers on the desktop path even when the smoke
         // suite itself uses managed windows; otherwise the first clean-prefix
@@ -508,6 +512,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         OH_LOG_WARN(LOG_APP, "[Launch-Async] wineboot completed (%{public}d s)", aliveMs / 1000);
         unlink(initMarker.c_str());
         ws->SetDesktopRootRecognitionEnabled(true);
+        ws->SetToplevelEventSuppressed(false);
         ws->PromotePendingDesktopRoot();
     } else {
         /* 二启 (prefix 已初始化): 显式播种 wineboot boot 事件。
