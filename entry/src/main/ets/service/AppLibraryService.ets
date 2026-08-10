@@ -492,6 +492,30 @@ export class AppLibraryService {
     return -1;
   }
 
+  // 在 Wine 内打开目录: 以 explorer.exe 启动指定目录 (Windows 路径),
+  // 弹出 Wine 侧的文件管理器窗口。复用 launch 的环境/后端编排,
+  // 仅 exe 与 argv 不同。目录可来自 C: 或 Z:
+  openInWine(dirPath: string): number {
+    const env = WineEnvService.getInstance();
+    const d3dBackend = env.getD3dBackend();
+    const environment: Record<string, string> = {};
+    // 与 launch 同款语言兜底注入 (explorer 新实例独立进程, 不走桌面继承)
+    environment['LANG'] = `${env.getWineLang()}.UTF-8`;
+    environment['LC_ALL'] = `${env.getWineLang()}.UTF-8`;
+    const winDir = this.toWindowsPath(dirPath, env.zHome);
+    const result = testNapi.runWineProgram({
+      windowsExePath: 'C:\\windows\\system32\\explorer.exe',
+      argv: [winDir],
+      environment: environment,
+      workingDirectory: winDir,
+      prefixMode: 'reuse',
+      d3dBackend: d3dBackend,
+      presentBackend: d3dBackend == 'dxvk_legacy' ? 'venus_broker_present' : 'virgl_compositor',
+      automationMode: false
+    }) as ProcessInfo;
+    return (result && result.pid > 0) ? result.pid : -1;
+  }
+
   // 记录启动时刻 ("最近使用"分类的排序依据)。仅受理成功才记 — 受理失败
   // /闪退不代表用户真的"用"了它; 库外路径 (文件页直接启动未入库 exe) 跳过
   private markLaunched(path: string): void {

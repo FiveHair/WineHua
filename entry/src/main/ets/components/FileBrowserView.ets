@@ -41,6 +41,13 @@ interface ClipItem {
   cut: boolean;
 }
 
+// 待导入文件条目 (picker 选中后过滤, 复制前固化, 避免复制期间依赖可变的 uri 数组)
+interface ImportItem {
+  uri: string;      // picker 授权 URI
+  name: string;     // 文件名
+  exe: boolean;     // .exe 后缀 → 复制后自动入库
+}
+
 // 重命名输入对话框 (与应用库 RenameDialog 同款模式, 文件名校验在 onDone 侧)
 @CustomDialog
 struct FileRenameDialog {
@@ -96,6 +103,9 @@ export struct FileBrowserView {
   @State atRootList: boolean = true;
   // 页内剪贴板 (@State 驱动标题栏"粘贴"按钮显隐)
   @State clipItem: ClipItem | null = null;
+  // 导入进行中 (true = 覆盖层提示, 防用户在复制期间切目录/重复导入)
+  @State importing: boolean = false;
+  @State importMsg: string = '';
   // 外部定位目录请求 (Index 注入, 应用库"打开所在目录"联动); 消费后自清空
   @Link @Watch('onFilesDirRequest') filesDirRequest: string;
 
@@ -504,15 +514,6 @@ export struct FileBrowserView {
     }
   }
 
-  // fd 静默关闭 (导入复制中途抛异常时 finally 兜底, 防 fd 泄漏)
-  private closeQuietly(f: fs.File | null): void {
-    if (!f) {
-      return;
-    }
-    try {
-      fs.closeSync(f);
-    } catch (_) {}
-  }
   // 系统文件管理器打开目录 (参考 HiSH SharedFolderContent.openInFileManager):
   // 显式拉起 com.huawei.hmos.filemanager/MainAbility, fileUri 参数定位目录。
   // 只用于 Z: (共享存储); C: 是应用沙箱, 系统文件管理器无权也不该展示
@@ -536,67 +537,233 @@ export struct FileBrowserView {
     }
   }
 
-  // 导入 (设计 4.4): 系统文件选择器选 exe/lnk → 拷入 Z:\ 根; exe 自动入库
-  // (后缀不在 picker 侧过滤 — 依赖系统对冷门后缀的筛选有翻车风险, 改为
-  // 选中后校验, 不合格逐项跳过并提示)
-  private importFiles(): void {
-    const zRoot = this.zRoot();
-    if (!zRoot) {
-      this.toast('Z: 目录不可用');
+  // 导入菜单 (顶栏"导入"点击弹出, 与应用库"扫描"同款): 文件/文件夹都导入
+  // 到当前浏览目录
+  @Builder
+  importMenu() {
+    Menu() {
+      MenuItem({ content: '导入文件' })
+        .onChange(() => {
+          this.importFiles();
+        })
+      MenuItem({ content: '导入文件夹' })
+        .onChange(() => {
+          this.importFolder();
+        })
+    }
+  }
+
+  // 导入 (设计 4.4): 系统文件选择器选文件/文件夹 → 拷入当前浏览目录。
+  // 不限后缀/类型 — 压缩包/安装包/数据目录等任意内容都有导入需求;
+  // exe 额外自动入库。文件夹走目录选择器 + 递归复制。
+  // 复制全走异步 fs API (fs.copyFile 吃路径) — 不阻塞 UI; 期间弹覆盖层提示
+  private async importFiles(): Promise<void> {
+    const dest = this.curDir;
+    if (!dest) {
+      this.toast('当前目录不可用');
       return;
     }
     const docPicker = new picker.DocumentViewPicker(getContext(this));
-    docPicker.select({ maxSelectNumber: 9 }).then((uris: string[]) => {
-      if (!uris || uris.length == 0) {
-        return;
-      }
-      let copied = 0;
-      let skipped = 0;
-      for (const uri of uris) {
-        let name = '';
-        try {
-          name = new fileUri.FileUri(uri).name;
-        } catch (_) {
-          skipped++;
-          continue;
-        }
-        const lower = name.toLowerCase();
-        if (!lower.endsWith('.exe') && !lower.endsWith('.lnk')) {
-          skipped++;
-          continue;
-        }
-        const dst = zRoot + '/' + name;
-        if (this.pathExists(dst)) {
-          skipped++;
-          continue;
-        }
-        let srcFile: fs.File | null = null;
-        let dstFile: fs.File | null = null;
-        try {
-          // picker 授权的是 URI, openSync 直接吃 URI; 目标走沙箱路径
-          srcFile = fs.openSync(uri, fs.OpenMode.READ_ONLY);
-          dstFile = fs.openSync(dst,
-            fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-          fs.copyFileSync(srcFile.fd, dstFile.fd);
-          copied++;
-          if (lower.endsWith('.exe')) {
-            this.lib.add(dst);
-          }
-        } catch (e) {
-          hilog.error(DOMAIN, TAG, 'import copy fail: %{public}s', JSON.stringify(e));
-          skipped++;
-        } finally {
-          this.closeQuietly(srcFile);
-          this.closeQuietly(dstFile);
-        }
-      }
-      this.toast(`已导入 ${copied} 个文件` + (skipped > 0 ? `，跳过 ${skipped} 个` : ''));
-      if (!this.atRootList && this.curDir == zRoot) {
-        this.listDir(this.curDir);
-      }
-    }).catch((e: Object) => {
+    let uris: string[] = [];
+    try {
+      uris = await docPicker.select({ maxSelectNumber: 9 });
+    } catch (e) {
       hilog.error(DOMAIN, TAG, 'picker fail: %{public}s', JSON.stringify(e));
-    });
+      return;
+    }
+    if (!uris || uris.length == 0) {
+      return;
+    }
+    // 先收集合法的待拷文件 (同名冲突/解析失败跳过), 再进入复制阶段 —
+    // 避免中途被选中文件拖住时 picker 已关闭、用户无从得知进度
+    const items: ImportItem[] = [];
+    let skipped = 0;
+    for (const uri of uris) {
+      let name = '';
+      try {
+        name = new fileUri.FileUri(uri).name;
+      } catch (_) {
+        skipped++;
+        continue;
+      }
+      const lower = name.toLowerCase();
+      const dst = dest + '/' + name;
+      if (this.pathExists(dst)) {
+        skipped++;
+        continue;
+      }
+      items.push({ uri, name, exe: lower.endsWith('.exe') });
+    }
+    if (items.length == 0) {
+      this.toast(skipped > 0 ? '所选文件均为同名或无法解析' : '未选择文件');
+      return;
+    }
+    this.importing = true;
+    this.importMsg = `正在导入 ${items.length} 个文件…`;
+    let copied = 0;
+    for (const item of items) {
+      let srcFile: fs.File | null = null;
+      let dstFile: fs.File | null = null;
+      try {
+        // picker 授权的 file://docs URI 只能经 fs.open 解析 (文档明确支持 URI);
+        // fs.copyFile 直接吃 URI 会按本地路径解析 → 13900002 No such file
+        srcFile = await fs.open(item.uri, fs.OpenMode.READ_ONLY);
+        dstFile = await fs.open(dest + '/' + item.name,
+          fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+        await fs.copyFile(srcFile.fd, dstFile.fd);
+        copied++;
+        if (item.exe) {
+          this.lib.add(dest + '/' + item.name);
+        }
+      } catch (e) {
+        hilog.error(DOMAIN, TAG, 'import copy fail: %{public}s', JSON.stringify(e));
+      } finally {
+        if (srcFile) {
+          try { await fs.close(srcFile); } catch (_) {}
+        }
+        if (dstFile) {
+          try { await fs.close(dstFile); } catch (_) {}
+        }
+      }
+    }
+    this.importing = false;
+    this.toast(`已导入 ${copied} 个文件` +
+      (copied < items.length ? `，失败 ${items.length - copied} 个` : '') +
+      (skipped > 0 ? `，跳过 ${skipped} 个` : ''));
+    this.listDir(this.curDir);
+  }
+
+  // 导入文件夹: 目录选择器选目录 → 递归复制整棵子树到当前浏览目录
+  private async importFolder(): Promise<void> {
+    const dest = this.curDir;
+    if (!dest) {
+      this.toast('当前目录不可用');
+      return;
+    }
+    const docPicker = new picker.DocumentViewPicker(getContext(this));
+    let uris: string[] = [];
+    try {
+      uris = await docPicker.select({ maxSelectNumber: 1, selectMode: picker.DocumentSelectMode.FOLDER });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'folder picker fail: %{public}s', JSON.stringify(e));
+      return;
+    }
+    if (!uris || uris.length == 0) {
+      return;
+    }
+    const uri = uris[0];
+    let name = '';
+    try {
+      name = new fileUri.FileUri(uri).name;
+    } catch (_) {
+      this.toast('无法读取所选文件夹');
+      return;
+    }
+    const dst = dest + '/' + name;
+    if (this.pathExists(dst)) {
+      this.toast(`当前目录已存在同名文件夹 ${name}`);
+      return;
+    }
+    try {
+      fs.mkdirSync(dst);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'import folder mkdir fail: %{public}s', JSON.stringify(e));
+      this.toast('导入文件夹失败');
+      return;
+    }
+    this.importing = true;
+    this.importMsg = `正在导入文件夹 ${name}…`;
+    let copied = 0;
+    try {
+      copied = await this.copyTree(uri, dst);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'import folder copy fail: %{public}s', JSON.stringify(e));
+    }
+    this.importing = false;
+    this.toast(`已导入文件夹 ${name}（${copied} 个文件）`);
+    this.listDir(this.curDir);
+  }
+
+  // 递归复制目录树 (异步 fs API, 不阻塞 UI): srcUri 为 picker 授权目录 URI,
+  // dstPath 为已创建的沙箱目标目录。返回复制的文件数 (子目录不计入)
+  private async copyTree(srcUri: string, dstPath: string): Promise<number> {
+    let copied = 0;
+    let names: string[] = [];
+    try {
+      names = await fs.listFile(srcUri);
+    } catch (e) {
+      // 授权 URI 下个别子目录无权限时, 跳过该目录而非整体失败
+      hilog.error(DOMAIN, TAG, 'copyTree list fail: %{public}s', JSON.stringify(e));
+      return 0;
+    }
+    for (const n of names) {
+      const srcChild = srcUri + '/' + n;
+      const dstChild = dstPath + '/' + n;
+      let srcFile: fs.File | null = null;
+      let dstFile: fs.File | null = null;
+      try {
+        const st = await fs.stat(srcChild);
+        if (st.isDirectory()) {
+          await fs.mkdir(dstChild);
+          copied += await this.copyTree(srcChild, dstChild);
+        } else {
+          // 源是 file://docs URI 拼接, 同样必须 fs.open 解析后再按 fd 复制
+          srcFile = await fs.open(srcChild, fs.OpenMode.READ_ONLY);
+          dstFile = await fs.open(dstChild,
+            fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+          await fs.copyFile(srcFile.fd, dstFile.fd);
+          copied++;
+        }
+      } catch (e) {
+        hilog.error(DOMAIN, TAG, 'copyTree item fail: %{public}s', JSON.stringify(e));
+      } finally {
+        if (srcFile) {
+          try { await fs.close(srcFile); } catch (_) {}
+        }
+        if (dstFile) {
+          try { await fs.close(dstFile); } catch (_) {}
+        }
+      }
+    }
+    return copied;
+  }
+
+  // 引擎就绪编排 (launchExe / openInWine 共用): 未就绪先拉起引擎 (懒初始化,
+  // 首启可达数分钟, toast 预告), 已就绪但无桌面会话先拉起桌面 — 避免程序
+  // 只有自己窗口没有桌面。返回 true = 可以放行后续启动
+  private async ensureRunReady(): Promise<boolean> {
+    if (this.env.engineState != 'ready') {
+      // 编排/后台自动启动进行中: 明确提示稍后再试, 不抢跑
+      if (this.env.isBusy()) {
+        this.toast('Wine 正在启动中，稍后再试');
+        return false;
+      }
+      this.toast('正在启动 Wine 引擎...');
+      const ready = await this.env.ensureEngineReady();
+      if (!ready) {
+        this.toast('Wine 引擎启动失败，可到设置页重启引擎后重试');
+        return false;
+      }
+    }
+    if (!this.env.sessionAlive) {
+      const ok = await this.env.ensureDesktop();
+      if (!ok) {
+        this.toast('桌面启动失败，可到环境页重启引擎后重试');
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // 在 Wine 中打开当前目录: 拉起 explorer 弹出 Wine 侧文件管理器窗口
+  private async openInWine(): Promise<void> {
+    if (!(await this.ensureRunReady())) {
+      return;
+    }
+    const pid = this.lib.openInWine(this.curDir);
+    if (pid <= 0) {
+      this.toast('打开失败，可到环境页切换渲染策略后重试');
+    }
   }
 
   // exe 启动统一入口 (行内按钮与长按菜单同判据): 引擎未启动则先按需拉起
@@ -604,27 +771,8 @@ export struct FileBrowserView {
   // 启动反馈里 (文件页无加载态)。overrides = 自定义启动临时参数 (渲染策略+
   // 兼容模式档位, 不持久化), 行内"启动"按钮不传 = 跟随全局
   private async launchExe(path: string, overrides?: LaunchOverrides): Promise<void> {
-    if (this.env.engineState != 'ready') {
-      // 编排/后台自动启动进行中: 明确提示稍后再试, 不抢跑;
-      // 否则拉起引擎 (首启可达数分钟, toast 预告)
-      if (this.env.isBusy()) {
-        this.toast('Wine 正在启动中，稍后再试');
-        return;
-      }
-      this.toast('正在启动 Wine 引擎...');
-      const ready = await this.env.ensureEngineReady();
-      if (!ready) {
-        this.toast('Wine 引擎启动失败，可到设置页重启引擎后重试');
-        return;
-      }
-    }
-    // 已就绪但无桌面会话：先拉起桌面（与应用库启动同规则），避免程序只有自己窗口没有桌面
-    if (!this.env.sessionAlive) {
-      const ok = await this.env.ensureDesktop();
-      if (!ok) {
-        this.toast('桌面启动失败，可到环境页重启引擎后重试');
-        return;
-      }
+    if (!(await this.ensureRunReady())) {
+      return;
     }
     const pid = this.lib.launch(path, overrides);
     if (pid <= 0) {
@@ -790,6 +938,9 @@ export struct FileBrowserView {
           }
           Text(this.displayPath())
             .fontColor($r('app.color.text_tertiary'))
+            // 与按钮统一 32 高: 根列表("此设备" 无按钮)与目录内(一排按钮)
+            // 两种状态行高一致, 切换不跳变
+            .height(32)
             .margin({ left: 10 }).layoutWeight(1)
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
           if (this.clipItem && !this.atRootList) {
@@ -811,14 +962,23 @@ export struct FileBrowserView {
                 this.openInFileManager(this.curDir);
               })
           }
+          // 在 Wine 中打开: 拉起 Wine 侧 explorer 浏览当前目录 (C:/Z: 皆可)
+          if (!this.atRootList) {
+            Button('在Wine中打开')
+              .height(32)
+              .margin({ left: 8 })
+              .backgroundColor($r('app.color.control_bg'))
+              .onClick(() => {
+                this.openInWine();
+              })
+          }
           // "导入"只在进入目录后出现 — 首页(根选择)顶行保持干净, 仅留路径文本
           if (!this.atRootList) {
             Button('导入')
               .height(32)
               .margin({ left: 8 })
-              .onClick(() => {
-                this.importFiles();
-              })
+              // 与应用库"扫描"同款弹出菜单 (bindMenu + Builder), 文件/文件夹二选一
+              .bindMenu(this.importMenu(), { modalMode: ModalMode.TARGET_WINDOW })
           }
         }
         .width('100%').padding({ left: 14, right: 14, top: 10, bottom: 6 })
@@ -873,6 +1033,23 @@ export struct FileBrowserView {
         // 引擎未就绪共享引导 (idle/failed/busy/准备中 各态自渲染),
         // 替代原单行空态 ("需要先初始化 Wine 环境" 无动作入口)
         EngineGuide()
+      }
+
+      // 导入进行中覆盖层: 半透明遮罩 + 进度提示, 防止复制期间切目录/重复导入
+      if (this.importing) {
+        Column({ space: 14 }) {
+          LoadingProgress()
+            .width(48).height(48)
+            .color($r('app.color.accent'))
+          Text(this.importMsg)
+            .fontSize(14)
+            .fontColor($r('app.color.text_primary'))
+        }
+        .width('100%').height('100%')
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor($r('app.color.overlay_mask'))
+        .position({ x: 0, y: 0 })
+        .zIndex(10)
       }
     }
     .width('100%').height('100%')
