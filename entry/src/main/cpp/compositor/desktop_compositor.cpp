@@ -171,8 +171,10 @@ std::vector<DesktopCompositor::CompositorLayer> DesktopCompositor::BuildLayerLis
         // 该窗口的 subsurface 层 (按 subsurfaceLayers_ 原顺序, zIndex 紧随
         // 父窗口)。位置已 Resolve 为桌面坐标; zcActive 由 zeroCopySurfaceKeys_
         // 派生 (合成/输入跳过, GPU 内容由 egl_renderer 绘制)。
+        // 弹出式菜单 (isExternal, 跨窗口 offset) 不跟随父窗口 — 统一置顶,
+        // 见尾部追加循环。
         for (const auto& sl : subsurfaceLayers_) {
-            if (sl.parentToplevel != childId) continue;
+            if (sl.parentToplevel != childId || sl.isExternal) continue;
             CompositorLayer subLayer;
             subLayer.type = CompositorLayer::Type::Subsurface;
             subLayer.zIndex = zIndex++;
@@ -191,10 +193,15 @@ std::vector<DesktopCompositor::CompositorLayer> DesktopCompositor::BuildLayerLis
         }
     }
 
-    // 未跟随 toplevel 的 subsurface (parent==root / 不在 z-order): 追加尾部,
-    // 保持旧置顶语义 (任务栏等外部层, 避免沉底回归)。
+    // 尾部置顶层: parent==root / 不在 z-order 的旧外部层 (任务栏等,
+    // 避免沉底回归) + 所有弹出式菜单 (isExternal)。
+    // 菜单恒置顶语义: 菜单挂的父窗口可能是普通应用窗口 (任务栏按钮右键
+    // 菜单 owner 是应用窗口), 若跟随父窗口 z-order, 会被置顶 pin 的任务栏
+    // 挡住 — 所有菜单都应叠在任务栏上方 (Windows popup 语义, 2026-08 实测)。
+    // 渲染与输入共用本列表 (单一数据源), 置顶后点击菜单的命中同步优先。
     for (const auto& sl : subsurfaceLayers_) {
-        if (sl.parentToplevel == rootId || !tmgr_.IsInZOrder(sl.parentToplevel)) {
+        if (sl.parentToplevel == rootId || sl.isExternal ||
+            !tmgr_.IsInZOrder(sl.parentToplevel)) {
             CompositorLayer subLayer;
             subLayer.type = CompositorLayer::Type::Subsurface;
             subLayer.zIndex = zIndex++;
