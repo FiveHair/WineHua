@@ -114,7 +114,10 @@ static bool EnsureDirRecursive(const std::string& path, mode_t mode)
     return EnsureDir(path, mode);
 }
 
-static bool EnsureExternalPePrefixSkeleton(const std::string& prefixDir)
+static bool CopyFileIfNeeded(const std::string& src, const std::string& dst);
+
+static bool EnsureExternalPePrefixSkeleton(const std::string& binDir,
+                                           const std::string& prefixDir)
 {
     // The external-PE runtime resolves 64-bit Windows binaries from
     // x86_64-windows instead of copying them into drive_c.  wineboot therefore
@@ -131,6 +134,18 @@ static bool EnsureExternalPePrefixSkeleton(const std::string& prefixDir)
     bool ok = true;
     for (const char* suffix : suffixes)
         ok = EnsureDirRecursive(prefixDir + suffix, 0777) && ok;
+
+    /* Shell explorer resolves programs supplied after /desktop through the
+     * Windows search path, not the external x86_64-windows PE directory.
+     * Keep the one desktop-only helper in the native system32 location so a
+     * missing helper cannot make wineserver close an otherwise valid shell. */
+    const std::string keepSrc = binDir + "/winehua_keep.exe";
+    const std::string keepDst = prefixDir + "/drive_c/windows/system32/winehua_keep.exe";
+    if (!CopyFileIfNeeded(keepSrc, keepDst)) {
+        OH_LOG_ERROR(LOG_APP, "[Launch-Async] desktop keep helper missing or stale: %{public}s -> %{public}s",
+                     keepSrc.c_str(), keepDst.c_str());
+        ok = false;
+    }
 
     OH_LOG_INFO(LOG_APP, "[Launch-Async] external-PE prefix skeleton %{public}s",
                 ok ? "ready" : "failed");
@@ -431,7 +446,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
     // Prefix registry and user data survive runtime upgrades, while the
     // syswow64 PE files are managed copies. Validate them before wineserver
     // starts so an interrupted prior refresh cannot leave a zero-length DLL.
-    if (!EnsureExternalPePrefixSkeleton(p->prefixDir) ||
+    if (!EnsureExternalPePrefixSkeleton(p->winehuaBin, p->prefixDir) ||
         !EnsureWow64Files(p->winehuaBin, p->prefixDir)) {
         OH_LOG_ERROR(LOG_APP, "[Launch-Async] external-PE prefix preparation failed");
         if (gStateTsfn)
@@ -657,7 +672,8 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         /* 附带 winehua_keep.exe: 加入 shell desktop 并持久运行,
          * 避免最后一个用户应用退出后 wineserver 自动关闭桌面.
          * 仅 Pad 桌面模式需要, Phone 模式走单窗口, 无需此逻辑. */
-        snprintf(desktopArg, sizeof(desktopArg), "/desktop=shell,%dx%d|winehua_keep.exe", dw, dh);
+        snprintf(desktopArg, sizeof(desktopArg),
+                 "/desktop=shell,%dx%d|C:\\windows\\system32\\winehua_keep.exe", dw, dh);
 
         // 构造 env: 基线 + 刷新图形状态 + DXVK overlay + 桌面稳定性配置.
         // 这相当于之前 AppendDesktopD3dEntryEnv 的逻辑，收敛到 broker env channel。
