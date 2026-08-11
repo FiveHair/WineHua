@@ -133,19 +133,33 @@ export JOBS
 # 生成 meson cross file (路径依赖 ROOT, 不能硬编码)
 gen_cross_file() {
     local cross="$BUILD_DIR/ohos-x86_64-cross.txt"
+    # pkg-config wrapper: --with-path 替换默认搜索路径 (宿主系统 /usr/lib/pkgconfig
+    # 会混入 x11.pc 等 → 交叉构建误用宿主库探测)
+    local pcwrap="$BUILD_DIR/pkg-config-cross.sh"
+    cat > "$pcwrap" << PWEOF
+#!/bin/sh
+# PKG_CONFIG_LIBDIR 替换默认搜索路径 (--with-path 只是追加, 宿主 /usr/lib 仍混入)
+export PKG_CONFIG_LIBDIR="$SYSROOT_EXT_PC:$SYSROOT_EXT/usr/lib/x86_64-linux-ohos/pkgconfig:$SYSROOT/usr/lib/pkgconfig"
+exec "$PKG_CONFIG_BIN" "\$@"
+PWEOF
+    chmod +x "$pcwrap"
     cat > "$cross" << XEOF
 [binaries]
 c = '$OHOS_SDK/native/llvm/bin/clang'
 cpp = '$OHOS_SDK/native/llvm/bin/clang++'
 ar = '$OHOS_SDK/native/llvm/bin/llvm-ar'
 strip = '$OHOS_SDK/native/llvm/bin/llvm-strip'
-pkg-config = '$PKG_CONFIG_BIN'
+pkg-config = '$pcwrap'
 wayland-scanner = '$WAYLAND_SCANNER'
+# 交叉装的 python 工具 (与架构无关, 宿主可直接执行) — meson 默认不搜 cross 前缀 bin
+glib-mkenums = '$SYSROOT_EXT/usr/bin/glib-mkenums'
+gdbus-codegen = '$SYSROOT_EXT/usr/bin/gdbus-codegen'
 
 [built-in options]
 c_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC']
 c_link_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-fuse-ld=lld', '-L$SYSROOT_EXT_LIB']
-pkg_config_path = ['$SYSROOT_EXT/usr/lib/pkgconfig', '$SYSROOT/usr/lib/pkgconfig']
+# pkgconfigdir = libdir/pkgconfig (x86_64-linux-ohos 子目录), 与 /usr/lib/pkgconfig 都要
+pkg_config_path = ['$SYSROOT_EXT/usr/lib/pkgconfig', '$SYSROOT_EXT/usr/lib/x86_64-linux-ohos/pkgconfig', '$SYSROOT/usr/lib/pkgconfig']
 
 [properties]
 # 不设 sys_root: 编译器 --sysroot 已在 c_args/c_link_args 中，
