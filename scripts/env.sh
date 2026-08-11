@@ -164,6 +164,10 @@ pkg_config_path = ['$SYSROOT_EXT/usr/lib/pkgconfig', '$SYSROOT_EXT/usr/lib/x86_6
 [properties]
 # 不设 sys_root: 编译器 --sysroot 已在 c_args/c_link_args 中，
 # sysroot-ext 的 .pc 使用绝对路径，无需额外拼接。
+# 强制宿主不能执行交叉产物 (build/host 同为 x86_64 linux 时 meson 会误判
+# "能跑" → cc.run() 真的执行 OHOS ELF 失败; 与 HiSH deps/libglib 一致的做法),
+# 使 meson.can_run_host_binaries() 返回 false, gnulib 检测自动走 else 分支。
+needs_exe_wrapper = true
 
 [host_machine]
 system = 'linux'

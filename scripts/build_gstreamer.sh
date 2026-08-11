@@ -105,19 +105,17 @@ fi
 # ── 2. glib 2.78 (meson) ──
 if [ ! -f "$SYSROOT_EXT_LIB/libglib-2.0.so.0" ]; then
     log "--- 构建 glib ---"
-    # gnulib works 检测: meson 误判 can_run_host_binaries=true (宿主与 target
-    # 同为 x86_64 linux), 实际宿主无 OHOS loader 执行失败 → 强制走 else 分支
-    # (works=true, 不依赖 cc.run)。frexp/frexpl 两处。
-    for d in gl_cv_func_frexp_works gl_cv_func_frexpl_works; do
-        f="$GLIB_SRC/glib/gnulib/$d/meson.build"
-        grep -q 'if false  # OHOS cross' "$f" || \
-            sed -i 's/if meson.can_run_host_binaries()/if false  # OHOS cross: 宿主不能执行 OHOS ELF/' "$f"
-    done
+    # gnulib works 检测: cross file 的 needs_exe_wrapper=true 使
+    # meson.can_run_host_binaries() 返回 false, 检测自动走 else 分支
+    # (works=true, 不依赖 cc.run), 无需 sed 源码。
     # -Werror=format=2 含 format-security: G_DBUS_ERROR 宏的 format 参数非字面量
-    # 触发 (gdebugcontrollerdbus.c) → 追加 -Wno-error=format-security 豁免
-    f="$GLIB_SRC/meson.build"
-    grep -q "no-error=format-security" "$f" || \
-        sed -i "s/'-Werror=unused-result',/'-Werror=unused-result',\n    '-Wno-error=format-security',\n    '-Wno-error=format-nonliteral',/" "$f"
+    # 触发 (gdebugcontrollerdbus.c) → 以 patch 方式追加 -Wno-error 豁免。
+    # 改动仅 2 行, 不值得提交 submodule (开分支/push/指针更新), patch 随构建走。
+    PATCH="$SCRIPT_DIR/patches/glib-format-security.patch"
+    if ! git -C "$GLIB_SRC" apply --reverse --check "$PATCH" 2>/dev/null; then
+        git -C "$GLIB_SRC" apply "$PATCH"
+        log "  已应用 patch: $(basename "$PATCH")"
+    fi
     build="$BUILD_DIR/glib_build"
     rm -rf "$build"
     # --wrap-mode=nodownload: 防 wrap 下载 (pcre2/zlib/libffi 已由 .pc 提供, 不触发)
