@@ -70,6 +70,24 @@ assemble_pad() {
         _pick_lib_pad "libxkbregistry.so.0.0.0"      "libxkbregistry.so.0"
         _pick_lib_pad "libxml2.so.2.12.0"            "libxml2.so.2"
         _pick_lib_pad "libffi.so.8.1.4"              "libffi.so.8"
+        # GnuTLS 链 (schannel TLS 后端)
+        _pick_lib_pad "libgnutls.so.30.37.1"         "libgnutls.so.30"   "libgnutls.so"
+        _pick_lib_pad "libnettle.so.8.11"            "libnettle.so.8"
+        _pick_lib_pad "libhogweed.so.6.11"           "libhogweed.so.6"
+        _pick_lib_pad "libgmp.so.10.4.1"             "libgmp.so.10"
+        _pick_lib_pad "libtasn1.so.6.6.4"            "libtasn1.so.6"
+        _pick_lib_pad "libunistring.so.5.2.0"        "libunistring.so.5"
+        _pick_lib_pad "libm.so"                      "libm.so"
+        # GStreamer 链 (winegstreamer 后端)
+        for so in libglib-2.0.so.0 libgobject-2.0.so.0 libgmodule-2.0.so.0 libgio-2.0.so.0 \
+                  libgthread-2.0.so.0 libpcre2-8.so.0 libintl.so libm.so \
+                  libgstreamer-1.0.so.0 libgstbase-1.0.so.0 libgstcontroller-1.0.so.0 \
+                  libgstnet-1.0.so.0 libgstvideo-1.0.so.0 libgstaudio-1.0.so.0 \
+                  libgsttag-1.0.so.0 libgstpbutils-1.0.so.0 libgstallocators-1.0.so.0 \
+                  libgstapp-1.0.so.0 libgstfft-1.0.so.0 libgstriff-1.0.so.0 \
+                  libgstrtp-1.0.so.0 libgstrtsp-1.0.so.0 libgstsdp-1.0.so.0; do
+            _pick_lib_pad "$so" "$so"
+        done
         log "    交叉编译依赖 → libs/x86_64/"
 
         # libc.so → libs/x86_64/
@@ -155,8 +173,28 @@ assemble_pad() {
         _pick_lib_pad_rf "libxkbregistry.so.0.0.0"      "libxkbregistry.so.0"
         _pick_lib_pad_rf "libxml2.so.2.12.0"            "libxml2.so.2"
         _pick_lib_pad_rf "libffi.so.8.1.4"              "libffi.so.8"
+        # GnuTLS 链 (schannel TLS 后端, x86_64 guest) → rawfile
+        _pick_lib_pad_rf "libgnutls.so.30.37.1"         "libgnutls.so.30"   "libgnutls.so"
+        _pick_lib_pad_rf "libnettle.so.8.11"            "libnettle.so.8"
+        _pick_lib_pad_rf "libhogweed.so.6.11"           "libhogweed.so.6"
+        _pick_lib_pad_rf "libgmp.so.10.4.1"             "libgmp.so.10"
+        _pick_lib_pad_rf "libtasn1.so.6.6.4"            "libtasn1.so.6"
+        _pick_lib_pad_rf "libunistring.so.5.2.0"        "libunistring.so.5"
+        # libm.so: 补 OHOS 缺失的 frexpl/ldexpl (glib long double 数学)
+        # 系统 libm.so 是空壳, 必须用我们的版本 (含 math 符号需 libc 兜底)
+        _pick_lib_pad_rf "libm.so"                      "libm.so"
+        # GStreamer 链 (winegstreamer 后端: glib + gstreamer core + gst-libs)
+        for so in libglib-2.0.so.0 libgobject-2.0.so.0 libgmodule-2.0.so.0 libgio-2.0.so.0 \
+                  libgthread-2.0.so.0 libpcre2-8.so.0 libintl.so libm.so \
+                  libgstreamer-1.0.so.0 libgstbase-1.0.so.0 libgstcontroller-1.0.so.0 \
+                  libgstnet-1.0.so.0 libgstvideo-1.0.so.0 libgstaudio-1.0.so.0 \
+                  libgsttag-1.0.so.0 libgstpbutils-1.0.so.0 libgstallocators-1.0.so.0 \
+                  libgstapp-1.0.so.0 libgstfft-1.0.so.0 libgstriff-1.0.so.0 \
+                  libgstrtp-1.0.so.0 libgstrtsp-1.0.so.0 libgstsdp-1.0.so.0; do
+            _pick_lib_pad_rf "$so" "$so"
+        done
 
-        # libfreetype → bin/ (box64 按名 dlopen 搜索路径: .)
+        # libgnutls → bin/ (box64 按名 dlopen 搜索路径: .)
         cp "$wine_data/bin/x86_64-unix/libfreetype.so.6" "$wine_data/bin/"
         cp "$wine_data/bin/x86_64-unix/libfreetype.so" "$wine_data/bin/"
 
