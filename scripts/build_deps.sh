@@ -14,6 +14,8 @@ bash "$SCRIPT_DIR/build_wayland.sh"
 bash "$SCRIPT_DIR/build_xkbcommon.sh"
 # GnuTLS 链 (Wine schannel TLS 后端: gmp/nettle/libtasn1/libunistring/gnutls)
 bash "$SCRIPT_DIR/build_gnutls.sh"
+# GStreamer 链 (Wine winegstreamer 后端: pcre2/glib/gstreamer/gst-plugins-base)
+bash "$SCRIPT_DIR/build_gstreamer.sh"
 # XKB 键盘布局数据 (xkeyboard-config, Wine 键盘驱动依赖, 架构无关)
 bash "$SCRIPT_DIR/build_xkbconfig.sh"
 

@@ -188,7 +188,9 @@ build_wineserver() {
     fi
     if [ $need_rebuild -eq 0 ]; then
         # 确保 libwineserver.so 已复制到 NATIVE_LIBS
+        # (目录可能被其他架构构建清掉, 需重建 — 见 entry/libs/x86_64 缺失 bug)
         if [ -f "$out/libwineserver.so" ] && [ ! -f "$NATIVE_LIBS/libwineserver.so" ]; then
+            mkdir -p "$NATIVE_LIBS"
             cp "$out/libwineserver.so" "$NATIVE_LIBS/"
         fi
         return
