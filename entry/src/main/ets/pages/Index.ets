@@ -1693,6 +1693,16 @@ struct Index {
           .margin({ bottom: 6 })
 
         if (this.d3dBackend === 'vkd3d_limited_500k') {
+          // Keep the primary action immediately below the backend selector.
+          // On landscape phones the diagnostic text can extend beyond the
+          // viewport, but the user must still be able to start the isolated
+          // smoke test without relying on an inaccessible off-screen button.
+          Button('运行 DX12 准确 Smoke（1000 帧）')
+            .width('100%').height(36).backgroundColor('#764')
+            .enabled(!this.initInProgress && this.vkd3dSmokePhase !== 'preparing' &&
+              this.vkd3dSmokePhase !== 'running')
+            .onClick(this.startVkd3dSmoke)
+            .margin({ bottom: 8 })
           Text(`Default mixed route: D3D12 -> VKD3D; D3D11/DXGI -> ${this.dxvkBackend === 'dxvk_modern_2_6' ? 'DXVK 2.6.2' : 'DXVK 1.10.3'}; x64 D3D12, 500,000 descriptor limit.`)
             .fontSize(11).fontColor('#d9a').maxLines(3)
             .width('100%').margin({ bottom: 6 })
@@ -1706,12 +1716,6 @@ struct Index {
           Text(this.vkd3dSmokeDetail)
             .fontSize(11).fontColor('#bbb').maxLines(6)
             .width('100%').margin({ bottom: 6 })
-          Button('运行 DX12 准确 Smoke（1000 帧）')
-            .width('100%').height(36).backgroundColor('#764')
-            .enabled(!this.initInProgress && this.vkd3dSmokePhase !== 'preparing' &&
-              this.vkd3dSmokePhase !== 'running')
-            .onClick(this.startVkd3dSmoke)
-            .margin({ bottom: 8 })
         }
 
         // -- 快速操作 --

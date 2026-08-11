@@ -119,15 +119,15 @@ index 72fbb39c..be3d475f 100644
          TRACE("Returning pointer %p.\n", *data);
      }
 
-+    /* Mark upload allocations as CPU-written even when an application keeps
-+     * the D3D12 resource persistently mapped and never calls Unmap. Venus uses
-+     * this explicit flush as write intent and publishes the current contents
-+     * immediately before queue submission. Readback heaps are deliberately
++    /* Register the complete upload resource suballocation even when an
++     * application keeps it persistently mapped and never calls Unmap. Venus
++     * republishes these resource ranges before queue submission instead of
++     * copying the complete VkDeviceMemory allocator. Readback heaps remain
 +     * excluded so stale Guest shadow data cannot overwrite Host GPU writes. */
 +    if (vkd3d_winehua_force_coherent_map_sync()
 +            && resource->heap_properties.Type == D3D12_HEAP_TYPE_UPLOAD)
 +    {
-+        const D3D12_RANGE write_intent_range = {0, 1};
++        const D3D12_RANGE write_intent_range = {0, (SIZE_T)resource->desc.Width};
 +        d3d12_resource_flush_range(resource, sub_resource, &write_intent_range);
 +    }
 +
