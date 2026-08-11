@@ -5,14 +5,14 @@ Subject: [PATCH 1/5] probe: recover validated VKD3D 2.6 500K profile
 
 ---
  libs/vkd3d/meta.c                    |  15 +-
- libs/vkd3d/resource.c                |  37 ++-
+ libs/vkd3d/resource.c                |  44 +++-
  libs/vkd3d/state.c                   |  40 ++-
  libs/vkd3d/vkd3d_private.h           |   8 +
  meson.build                          |   8 +
  meson_options.txt                    |   1 +
  tests/meson.build                    |   9 +
  tests/vkd3d_limited_500k_microtest.c | 417 +++++++++++++++++++++++++++
- 8 files changed, 523 insertions(+), 12 deletions(-)
+ 8 files changed, 530 insertions(+), 12 deletions(-)
  create mode 100644 tests/vkd3d_limited_500k_microtest.c
 
 diff --git a/libs/vkd3d/meta.c b/libs/vkd3d/meta.c
@@ -101,7 +101,21 @@ index 72fbb39c..be3d475f 100644
      return true;
  }
 
-@@ -1627,6 +1651,18 @@ static HRESULT STDMETHODCALLTYPE d3d12_resource_Map(d3d12_resource_iface *iface,
+@@ -1549,6 +1573,13 @@ static void d3d12_resource_invalidate_range(struct d3d12_resource *resource,
+     const struct vkd3d_vk_device_procs *vk_procs = &resource->device->vk_procs;
+     VkMappedMemoryRange mapped_range;
+
++    /* UPLOAD heaps cannot be GPU write destinations. Their Guest shadow is
++     * therefore already authoritative, and copying the Host mapping back on
++     * every persistent Map would only overwrite newer CPU upload data. */
++    if (vkd3d_winehua_force_coherent_map_sync()
++            && resource->heap_properties.Type == D3D12_HEAP_TYPE_UPLOAD)
++        return;
++
+     if (!d3d12_resource_get_mapped_memory_range(resource, subresource, read_range, &mapped_range))
+         return;
+
+@@ -1627,6 +1658,18 @@ static HRESULT STDMETHODCALLTYPE d3d12_resource_Map(d3d12_resource_iface *iface,
          TRACE("Returning pointer %p.\n", *data);
      }
 
@@ -120,7 +134,7 @@ index 72fbb39c..be3d475f 100644
      d3d12_resource_invalidate_range(resource, sub_resource, read_range);
      return S_OK;
  }
-@@ -5857,6 +5893,17 @@ HRESULT d3d12_descriptor_heap_create(struct d3d12_device *device,
+@@ -5857,6 +5900,17 @@ HRESULT d3d12_descriptor_heap_create(struct d3d12_device *device,
          return E_INVALIDARG;
      }
 

@@ -138,7 +138,7 @@ export default class EntryAbility extends UIAbility {
         'BOX64_DYNAREC_STRONGMEM',
         'BOX64_AVX'
       ];
-      const allowedKey = key === 'VKD3D_DEBUG' ||
+      const allowedKey = key === 'VKD3D_DEBUG' || key === 'VKD3D_LOG_FILE' ||
         /^(WINEDEBUG|DXVK_|VKD3D_TEST_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$/.test(key) ||
         allowedBox64Keys.indexOf(key) >= 0;
       if (!allowedKey ||

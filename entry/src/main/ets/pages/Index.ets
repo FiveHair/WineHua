@@ -1015,15 +1015,23 @@ struct Index {
     environment['BOX64_DYNAREC_WEAKBARRIER'] = '0';
     environment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
     environment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
-    /* The vtest bridge has distinct Host and Guest mappings. Venus feedback
-     * slots cannot establish a readback dependency here; use the direct
-     * device-fence wait below instead of polling an invalid feedback value. */
-    environment['VN_PERF'] =
-      'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
-    environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
-    environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'precise';
     const diagnosticVkd3d = this.isVkd3dExperiment() ||
       this.perfProfileText === 'shadow-precise-direct-fence';
+    /* The vtest bridge has distinct Host and Guest mappings, so feedback
+     * slots cannot establish a readback dependency here. Product VKD3D uses
+     * renderer events and falls back to local polling; a blocking Host wait
+     * on the single primary ring can otherwise sit ahead of the submit that
+     * signals the same fence. Gate C keeps the direct wait as an explicit,
+     * isolated synchronization diagnostic. */
+    environment['VN_PERF'] =
+      'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
+    environment['VN_WINEHUA_EVENT_FENCE_WAIT'] = diagnosticVkd3d ? '0' : '1';
+    environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = diagnosticVkd3d ? '1' : '0';
+    // Temporary bounded tracing for the VKD3D fence/event transport audit.
+    environment['VN_WINEHUA_PERF_SUMMARY'] = '1';
+    environment['WINEHUA_VTEST_PRESENT_PERF_SUMMARY'] = '1';
+    environment['VKR_WINEHUA_PERF_SUMMARY'] = '1';
+    environment['VKR_WINEHUA_SHADOW_FROM_HOST'] = 'precise';
     if ((this.experimentMode &&
       this.smokeRequest.experimentId.indexOf('vkd3d-500k-') === 0) ||
       requiresVkd3dRuntime) {
@@ -1033,6 +1041,9 @@ struct Index {
       environment['WINEDLLOVERRIDES'] = requiresVkd3dRuntime ? 'd3d12=n' : 'd3d12=n,b';
       environment['VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC'] = '1';
       environment['VN_WINEHUA_PERSISTENT_MAP_SYNC'] = '1';
+      /* Flush commands stay ordered before QueueSubmit on the primary ring,
+       * but do not wait for one Host reply per mapped upload allocation. */
+      environment['VN_WINEHUA_ASYNC_MEMORY_FLUSH'] = '1';
       environment['VN_WINEHUA_PERSISTENT_MAP_SYNC_TRACE'] = diagnosticVkd3d ? '1' : '0';
       /* A frame emits several ring submissions inside the normal 1 ms
        * notification-coalescing interval. If the Host becomes idle between
@@ -1048,7 +1059,10 @@ struct Index {
       }
     }
     if (diagnosticVkd3d) environment['WINEDEBUG'] = '+loaddll,+module';
-    return environment;
+    // Capability/runtime defaults are assembled after d3dLaunchEnvironment().
+    // Reapply explicit Want diagnostics last so a requested A/B value is not
+    // silently replaced by the product profile above.
+    return this.applyD3dEnvironmentOverrides(environment);
   }
 
   private isVkd3dExperiment(): boolean {
