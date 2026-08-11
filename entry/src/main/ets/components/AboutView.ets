@@ -6,7 +6,7 @@ import { WineEnvService } from '../service/WineEnvService';
 
 const WINE_PREFIX = '/data/storage/el2/base/files/.wine';
 
-// 关于页 (主界面第 5 导航 tab): 万花 (WineHua) 功能简介 + 英文名 + 版本号 /
+// 关于页 (主界面第 5 导航 tab): 纳百窗 (WineHua) 功能简介 + 英文名 + 版本号 /
 // 开源组件 / 开源仓库 / 贡献者 / 系统信息。原设置页尾部小"关于"卡片摘出并扩充
 // (见 SettingsView 注释); "系统信息"折叠区也整体从设置页搬入并丰富设备信息,
 // 便于用户反馈问题时做诊断。
@@ -86,14 +86,14 @@ export struct AboutView {
   build() {
     Scroll() {
       Column({ space: 14 }) {
-        // ══ 卡 1: 关于万花 (标题与其他块一致; 正文=名称+版本号; 下为功能简介) ══
+        // ══ 卡 1: 关于纳百窗 (标题与其他块一致; 正文=名称+版本号; 下为功能简介) ══
         Column({ space: 8 }) {
-          Text('关于万花')
+          Text('关于纳百窗')
             .fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.text_primary'))
             .width('100%')
           Row() {
-            Text('万花（WineHua）')
+            Text('纳百窗（WineHua）')
               .fontSize(14)
               .fontColor($r('app.color.text_primary'))
               .layoutWeight(1)
