@@ -131,7 +131,8 @@ $(foreach a,arm64-v8a x86_64,$(eval $(call host_vulkan_rule,$(a))))
 .PHONY: deps
 deps: $(STAMPS)/deps
 
-$(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_gnutls.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
+$(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_gnutls.sh $(SCRIPTS)/build_gstreamer.sh \
+	$(SCRIPTS)/build_ohos_guest_gfx.sh \
 	$(SCRIPTS)/build_ohos_guest_vulkan.sh $(ROOT)/smoke/guest_vulkan_smoke.c \
 	$(ROOT)/smoke/venus_sampled_image_probe.c \
 	$(ROOT)/smoke/venus_depth_cube_probe.inc \
