@@ -125,6 +125,11 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
     if (!r && WaylandServer::GetInstance()->Policy().RootCompositing()) {
         uint32_t rootId = WaylandServer::GetInstance()->GetDesktopRootToplevelId();
         if (rootId != tl) r = PluginManager::GetInstance()->GetRendererForToplevel(rootId);
+        // 兜底: RootCompositing 下 renderer 永远渲染桌面根，letterbox 映射与
+        // 登记 id 无关；桌面根重建瞬间或前台窗口"提升"后按 id 查不到
+        // renderer 时，取当前登记的唯一 renderer 仍能得到正确的 viewport
+        // 映射（否则坐标全部坍缩为 (0,0)，触摸/鼠标不可用）。
+        if (!r) r = PluginManager::GetInstance()->GetAnyRenderer();
     }
     if (!r) {
         OH_LOG_WARN(LOG_APP, "[Input] CoordTransform: no renderer for tl=%{public}u", tl);
