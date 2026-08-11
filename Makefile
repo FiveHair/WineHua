@@ -131,7 +131,8 @@ $(foreach a,arm64-v8a x86_64,$(eval $(call host_vulkan_rule,$(a))))
 .PHONY: deps
 deps: $(STAMPS)/deps
 
-$(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
+$(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_gnutls.sh $(SCRIPTS)/build_gstreamer.sh \
+	$(SCRIPTS)/build_ohos_guest_gfx.sh \
 	$(SCRIPTS)/build_ohos_guest_vulkan.sh $(ROOT)/smoke/guest_vulkan_smoke.c \
 	$(ROOT)/smoke/venus_sampled_image_probe.c \
 	$(ROOT)/smoke/venus_depth_cube_probe.inc \
@@ -173,6 +174,14 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
 	    [ "$$guest_vulkan_ready" = "1" ] && \
 	    ! [ "$(SCRIPTS)/build_ohos_guest_gfx.sh" -nt $@ ] && \
 	    ! [ "$(SCRIPTS)/build_ohos_guest_vulkan.sh" -nt $@ ] && \
+	    ! [ "$(SCRIPTS)/build_gnutls.sh" -nt $@ ] && \
+	    ! [ "$(SCRIPTS)/build_deps.sh" -nt $@ ] && \
+	    ! [ "$(SCRIPTS)/build_libffi.sh" -nt $@ ] && \
+	    ! [ "$(SCRIPTS)/build_freetype.sh" -nt $@ ] && \
+	    ! [ "$(SCRIPTS)/build_wayland.sh" -nt $@ ] && \
+	    ! [ "$(SCRIPTS)/build_xkbcommon.sh" -nt $@ ] && \
+	    ! [ "$(SCRIPTS)/build_xkbconfig.sh" -nt $@ ] && \
+	    ! [ "$(ROOT)/smoke/guest_vulkan_smoke.c" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/guest_vulkan_smoke.c" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_sampled_image_probe.c" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_depth_cube_probe.inc" -nt $@ ] && \
@@ -226,6 +235,7 @@ wine: $(STAMPS)/wine-$(CONFIG)
 
 $(STAMPS)/wine-$(CONFIG): $(SCRIPTS)/build_wine.sh $(SCRIPTS)/env.sh $(STAMPS)/deps FORCE | $(STAMPS)
 	@if [ -f $@ ] && [ -f $(WINE_SENTINEL) ] && \
+	    ! [ "$(SCRIPTS)/build_wine.sh" -nt $@ ] && \
 	    ! find $(ROOT)/thirdparty/wine \
 	           -newer $@ -type f \
 	           \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \

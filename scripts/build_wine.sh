@@ -71,10 +71,12 @@ build_ohos_unix() {
     mkdir -p "$BUILD_DIR/wine-ohos"
     cd "$BUILD_DIR/wine-ohos"
 
-    # 检查是否需要重新 configure (FreeType/Wayland/Vulkan 启用状态变更)
+    # 检查是否需要重新 configure (FreeType/Wayland/Vulkan/GnuTLS/GStreamer 启用状态变更)
     if [ ! -f "Makefile" ] || ! grep -q '#define SONAME_LIBFREETYPE' include/config.h 2>/dev/null \
        || ! grep -q '#define SONAME_LIBWAYLAND_CLIENT' include/config.h 2>/dev/null \
-       || ! grep -q '#define SONAME_LIBVULKAN "libvulkan.so.1"' include/config.h 2>/dev/null; then
+       || ! grep -q '#define SONAME_LIBVULKAN "libvulkan.so.1"' include/config.h 2>/dev/null \
+       || ! grep -q '#define SONAME_LIBGNUTLS' include/config.h 2>/dev/null \
+       || ! grep -q '#define SONAME_LIBGSTREAMER_1_0' include/config.h 2>/dev/null; then
         export FREETYPE_CFLAGS="-I$SYSROOT_EXT_INC/freetype2"
         export FREETYPE_LIBS="-L$SYSROOT_EXT_LIB -lfreetype"
         export ac_cv_header_ft2build_h=yes
@@ -92,6 +94,18 @@ build_ohos_unix() {
         # sysroot. Wine only dlopens it at runtime, so provide the canonical
         # soname explicitly instead of linking the cross build against it.
         export ac_cv_lib_soname_vulkan="libvulkan.so.1"
+        # GnuTLS 交叉编译缓存 (schannel TLS 后端, 由 build_gnutls.sh 编入 sysroot-ext)
+        export GNUTLS_CFLAGS="-I$SYSROOT_EXT_INC"
+        export GNUTLS_LIBS="-L$SYSROOT_EXT_LIB -lgnutls"
+        export ac_cv_header_gnutls_gnutls_h=yes
+        export ac_cv_lib_soname_gnutls="libgnutls.so.30"
+        # GStreamer 交叉编译缓存 (winegstreamer 后端, 由 build_gstreamer.sh 编入 sysroot-ext)
+        # configure 探测 gstreamer-1.0/video/audio/tag 4 个 .pc (PKG_CONFIG_PATH 已含)。
+        # 注意: 不设 GSTREAMER_CFLAGS/LIBS env — autoconf 惯例 env 优先于 pkg-config
+        # 探测, 设了会覆盖 4 包合并的完整链接列表 (winegstreamer 链接缺 glib 符号)
+        export ac_cv_header_gst_gst_h=yes
+        export ac_cv_lib_gstreamer_1_0_gst_pad_new=yes
+        export ac_cv_lib_soname_gstreamer_1_0="libgstreamer-1.0.so.0"
         export WAYLAND_CLIENT_CFLAGS="-I$SYSROOT_EXT_INC"
         export WAYLAND_CLIENT_LIBS="-L$SYSROOT_EXT_LIB -lwayland-client"
         export XKBCOMMON_CFLAGS="-I$SYSROOT_EXT_INC"
@@ -174,7 +188,9 @@ build_wineserver() {
     fi
     if [ $need_rebuild -eq 0 ]; then
         # 确保 libwineserver.so 已复制到 NATIVE_LIBS
+        # (目录可能被其他架构构建清掉, 需重建 — 见 entry/libs/x86_64 缺失 bug)
         if [ -f "$out/libwineserver.so" ] && [ ! -f "$NATIVE_LIBS/libwineserver.so" ]; then
+            mkdir -p "$NATIVE_LIBS"
             cp "$out/libwineserver.so" "$NATIVE_LIBS/"
         fi
         return
