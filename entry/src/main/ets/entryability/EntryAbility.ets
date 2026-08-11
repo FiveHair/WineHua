@@ -4,6 +4,7 @@ import { window } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { WineWindowManager } from '../service/WineWindowManager';
 import testNapi from 'libentry.so';
+import { runAfterPhoneLandscape } from '../common/PhoneLandscape';
 
 const DOMAIN = 0x0000;
 
@@ -300,29 +301,7 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
   }
 
-  onWindowStageCreate(windowStage: window.WindowStage): void {
-    // Main window is created, set main page for this ability
-    hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
-
-    // 手机走 fork-shim，必须在 Index.doInit 的首次 NCP 调用前设置。
-    testNapi.setPhoneMode(deviceInfo.deviceType === 'phone');
-
-    // Phone desktop is rendered in a full-window XComponent. Let the system
-    // rotate that window with the sensor; its surface callback propagates the
-    // resulting size to Wine before the next frame is composited.
-    if (deviceInfo.deviceType === 'phone') {
-      try {
-        const mainWindow = windowStage.getMainWindowSync();
-        mainWindow.setPreferredOrientation(window.Orientation.AUTO_ROTATION).then(() => {
-          hilog.info(DOMAIN, 'testTag', 'phone auto-rotation enabled');
-        }).catch((err: Error) => {
-          hilog.warn(DOMAIN, 'testTag', 'phone auto-rotation failed: %{public}s', JSON.stringify(err));
-        });
-      } catch (err) {
-        hilog.warn(DOMAIN, 'testTag', 'phone auto-rotation setup failed: %{public}s', JSON.stringify(err));
-      }
-    }
-
+  private initializeWindowStage(windowStage: window.WindowStage): void {
     // 初始化多窗口管理器
     WineWindowManager.getInstance().init(windowStage, this.context);
 
@@ -337,6 +316,25 @@ export default class EntryAbility extends UIAbility {
         mainWin.setWindowDecorVisible(false);
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
+    });
+  }
+
+  onWindowStageCreate(windowStage: window.WindowStage): void {
+    // Main window is created, set main page for this ability
+    hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
+
+    // 手机走 fork-shim，必须在 Index.doInit 的首次 NCP 调用前设置。
+    testNapi.setPhoneMode(deviceInfo.deviceType === 'phone');
+    if (deviceInfo.deviceType !== 'phone') {
+      this.initializeWindowStage(windowStage);
+      return;
+    }
+
+    runAfterPhoneLandscape(windowStage, () => {
+      hilog.info(DOMAIN, 'testTag', 'phone landscape ready; initializing Wine');
+      this.initializeWindowStage(windowStage);
+    }, (message: string) => {
+      hilog.warn(DOMAIN, 'testTag', 'phone landscape gate %{public}s', message);
     });
   }
 

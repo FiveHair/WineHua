@@ -4,6 +4,7 @@ import { window } from '@kit.ArkUI';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import testNapi from 'libentry.so';
 import { WineWindowManager } from '../service/WineWindowManager';
+import { runAfterPhoneLandscape } from '../common/PhoneLandscape';
 
 const DOMAIN = 0x0000;
 const TAG = 'DWA';
@@ -22,20 +23,7 @@ export default class DesktopAbility extends UIAbility {
     }
   }
 
-  onWindowStageCreate(windowStage: window.WindowStage): void {
-    hilog.info(DOMAIN, TAG, '[DWA] onWindowStageCreate tl=%{public}d', this.toplevelId);
-    if (deviceInfo.deviceType === 'phone') {
-      try {
-        const mainWindow = windowStage.getMainWindowSync();
-        mainWindow.setPreferredOrientation(window.Orientation.AUTO_ROTATION).then(() => {
-          hilog.info(DOMAIN, TAG, '[DWA] phone auto-rotation enabled');
-        }).catch((e: BusinessError) => {
-          hilog.warn(DOMAIN, TAG, '[DWA] phone auto-rotation failed: %{public}s', JSON.stringify(e));
-        });
-      } catch (e) {
-        hilog.warn(DOMAIN, TAG, '[DWA] phone auto-rotation setup failed: %{public}s', JSON.stringify(e));
-      }
-    }
+  private loadDesktopContent(windowStage: window.WindowStage): void {
     windowStage.loadContent('pages/DesktopWindow', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, TAG, '[DWA] loadContent FAILED: %{public}s', JSON.stringify(err));
@@ -60,6 +48,21 @@ export default class DesktopAbility extends UIAbility {
       } catch (e) {
         hilog.error(DOMAIN, TAG, '[DWA] immersive ERR: %{public}s', JSON.stringify(e));
       }
+    });
+  }
+
+  onWindowStageCreate(windowStage: window.WindowStage): void {
+    hilog.info(DOMAIN, TAG, '[DWA] onWindowStageCreate tl=%{public}d', this.toplevelId);
+    if (deviceInfo.deviceType !== 'phone') {
+      this.loadDesktopContent(windowStage);
+      return;
+    }
+
+    runAfterPhoneLandscape(windowStage, () => {
+      hilog.info(DOMAIN, TAG, '[DWA] phone landscape ready; creating desktop surface');
+      this.loadDesktopContent(windowStage);
+    }, (message: string) => {
+      hilog.warn(DOMAIN, TAG, '[DWA] phone landscape gate %{public}s', message);
     });
   }
 
