@@ -68,6 +68,12 @@ GUEST_GFX_SENTINEL := $(BUILD_DIR)/guest_gfx/$(GUEST_ARCH)/winehua-guest-gfx.env
 GUEST_VULKAN_SENTINEL := $(BUILD_DIR)/guest_vulkan/$(GUEST_ARCH)/manifest.json
 WINE_MONO_SENTINEL := $(BUILD_DIR)/wine-ohos/share/wine/mono/wine-mono-11.1.0-x86.msi
 HOST_VULKAN_SOURCE := $(ROOT)/smoke/venus_heaven_material_replay.c
+GRAPHICS_PROBE_SOURCES := \
+	$(ROOT)/smoke/winehua_vulkan_pso_storm.c \
+	$(ROOT)/smoke/winehua_d3d12_persistent_upload.c \
+	$(ROOT)/smoke/pso_storm.vert.spv \
+	$(ROOT)/smoke/pso_storm.frag.spv
+NATIVEBUFFER_PROBE_SOURCE := $(ROOT)/smoke/winehua_ohos_nativebuffer_vulkan_probe.cpp
 
 # Guest runtime build scripts can also be invoked directly while iterating on
 # Mesa/Venus. Track their manifests as assemble inputs so a subsequent
@@ -362,6 +368,8 @@ assemble-$(1): $$(STAMPS)/$(1)/assemble
 
 $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFACTS) $(DXVK_MODERN_ARTIFACTS) \
 	$(VKD3D_PROTON_ARTIFACTS) \
+	$(SCRIPTS)/build_graphics_probes.sh $(SCRIPTS)/build_ohos_nativebuffer_probe.sh \
+	$(GRAPHICS_PROBE_SOURCES) $(NATIVEBUFFER_PROBE_SOURCE) \
 	$(ROOT)/smoke/winehua_d3d8_smoke.c \
 	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
 	$(ROOT)/smoke/winehua_gpu_diagnostics.c \

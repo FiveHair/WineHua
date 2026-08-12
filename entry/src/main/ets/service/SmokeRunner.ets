@@ -233,6 +233,8 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     'x64/winehua_d3d8_smoke.exe', 'x64/winehua_d3d_switch_cube.exe',
     'x64/winehua_gpu_diagnostics.exe',
     'x64/winehua_win32_driver.exe', 'x64/winehua_dxvk26_requirements.exe',
+    'x64/winehua_vulkan_pso_storm.exe',
+    'x64/winehua_d3d12_persistent_upload.exe',
     'x64/winehua_d3d12_smoke.exe',
     'x64/triangle.exe', 'x64/gears.exe',
     'x86/winehua_audio_smoke.exe', 'x86/winehua_graphics_smoke.exe',
@@ -243,6 +245,7 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     'assets/venus_storage_write.spv', 'assets/venus_storage_read.spv',
     'assets/venus_image_fetch.spv', 'assets/venus_combined_sample.spv',
     'assets/venus_separated_sample.spv',
+    'assets/pso_storm.vert.spv', 'assets/pso_storm.frag.spv',
   ];
   /* DXVK is a WineHua runtime overlay, not part of C:\\smoke.  Remove the
    * four files from older payloads, but only inside this managed directory. */
@@ -402,6 +405,7 @@ export class SmokeRunner {
     /* Gate A never loads vkd3d. These probes only observe the same Vulkan
      * layers a future D3D12 runtime would use. */
     const includeVkd3dCapability = this.request.suite === 'vkd3d-capability';
+    const includeVkd3dProbes = this.request.suite === 'vkd3d-probes';
     const includeDxvkLong = this.request.suite === 'dxvk-long';
     const includeDxvkModernLong = this.request.suite === 'dxvk-modern-long';
     const includeDxvkReplay = this.request.suite === 'dxvk-replay';
@@ -703,6 +707,18 @@ export class SmokeRunner {
       tests.push({ id: 'wine-vkd3d-capability-x64', architecture: 'x64',
         executable: 'winehua_vulkan_smoke.exe', seconds: 0, timeoutMs: 90000 });
     }
+    if (includeVkd3dProbes) {
+      /* These are opt-in stress and memory-contract diagnostics. The x64 PSO
+       * storm exercises Wine Vulkan/Venus directly, the D3D12 probe uses the
+       * isolated managed VKD3D runtime, and the Host probe remains outside
+       * Wine under the signed Host Vulkan asset root. */
+      tests.push({ id: 'vulkan-pso-storm-x64', architecture: 'x64',
+        executable: 'winehua_vulkan_pso_storm.exe', seconds: 0, timeoutMs: 300000 });
+      tests.push({ id: 'd3d12-persistent-upload-x64', architecture: 'x64',
+        executable: 'winehua_d3d12_persistent_upload.exe', seconds: 0, timeoutMs: 180000 });
+      tests.push({ id: 'ohos-nativebuffer-vulkan-host', architecture: 'host-probe',
+        executable: 'winehua_ohos_nativebuffer_vulkan_probe', seconds: 0, timeoutMs: 120000 });
+    }
     if (includeGpuDiagnostics) {
       /* This runs through the Legacy overlay deliberately. The program then
        * proves its loaded DLL paths and reports Modern eligibility separately. */
@@ -769,7 +785,7 @@ export class SmokeRunner {
 
   private finalStatus(result: SmokeResult): boolean {
     return result.status === 'PASS' || result.status === 'FAIL' || result.status === 'SKIP' ||
-      result.status === 'UNSUPPORTED';
+      result.status === 'UNSUPPORTED' || result.status === 'PARTIAL';
   }
 
   private failureResult(spec: SmokeTestSpec, stage: string, message: string,
@@ -834,6 +850,10 @@ export class SmokeRunner {
               await sleep(8000);
             }
             const parsed = JSON.parse(text) as SmokeSuiteTestResult;
+            parsed.runId = parsed.runId || this.request.runId;
+            parsed.testId = spec.id;
+            parsed.stage = parsed.stage || 'complete';
+            parsed.message = parsed.message || 'probe completed and wrote an authoritative result';
             parsed.exitCodeSource = 'result';
             return parsed;
           }
@@ -891,6 +911,32 @@ export class SmokeRunner {
     const resultPath = `${this.resultDirectory}/${spec.id}.json`;
     if (pathExists(resultPath)) fs.unlinkSync(resultPath);
     this.onStatus(`Smoke: ${spec.id}`);
+
+    if (spec.architecture === 'host-probe') {
+      const executablePath = `${HOST_VULKAN_ROOT}/bin/${spec.executable}`;
+      if (!pathExists(`${HOST_VULKAN_ROOT}/manifest.json`) || !pathExists(executablePath))
+        return this.failureResult(spec, 'startup', 'managed Host probe is missing', null);
+      const hostProcess = testNapi.runHostProgram({
+        executablePath: executablePath,
+        /* NativeBuffer probe accepts its output path as the only positional
+         * argument. Do not pass the generic Wine smoke flags here. */
+        argv: [resultPath],
+        environment: {
+          'WINEHUA_SMOKE_RUN_ID': this.request.runId,
+          'WINEHUA_SMOKE_TEST_ID': spec.id
+        },
+        workingDirectory: HOST_VULKAN_ROOT,
+        automationMode: true
+      }) as ProcessInfo;
+      if (!hostProcess.found || hostProcess.pid <= 0)
+        return this.failureResult(spec, 'startup', 'runHostProgram failed to return a PID', hostProcess);
+      return this.waitForFinal(spec, resultPath, hostProcess);
+    }
+
+    if (spec.id === 'd3d12-persistent-upload-x64' &&
+      !stageManagedVkd3dRuntime(this.request.prefixMode))
+      return this.failureResult(spec, 'startup',
+        'managed VKD3D runtime staging requires the clean test prefix', null);
 
     if (spec.architecture === 'host-native') {
       const executablePath = `${HOST_VULKAN_ROOT}/bin/${spec.executable}`;
@@ -1296,6 +1342,8 @@ export class SmokeRunner {
     const isWineVulkan = spec.executable === 'winehua_vulkan_smoke.exe';
     const isVkd3dCapability = spec.id === 'wine-vkd3d-capability-x64';
     const isVkd3dCapabilityPe = spec.id === 'vkd3d-capability-pe-x64';
+    const isPsoStorm = spec.id === 'vulkan-pso-storm-x64';
+    const isPersistentUpload = spec.id === 'd3d12-persistent-upload-x64';
     const isDxvk26Requirements = spec.executable === 'winehua_dxvk26_requirements.exe';
     const isGpuDiagnostics = spec.executable === 'winehua_gpu_diagnostics.exe';
     const isWineVulkanPresent = isWineVulkan && spec.id.indexOf('present') >= 0;
@@ -1306,7 +1354,7 @@ export class SmokeRunner {
       spec.executable === 'winehua_d3d_switch_cube.exe');
     const isDxvkModern = isDxvk && spec.id.indexOf('dxvk-modern-') === 0;
     let process: ProcessInfo;
-    if (isWineVulkan || isDxvk || isDxvk26Requirements) {
+    if (isWineVulkan || isDxvk || isDxvk26Requirements || isPsoStorm || isPersistentUpload) {
       const guestVulkanLibrary = `${GUEST_VULKAN_ROOT}/lib`;
       const guestVulkanIcd = `${GUEST_VULKAN_ROOT}/share/vulkan/icd.d/venus_icd.x86_64.json`;
       const box64LibraryPath = `${guestVulkanLibrary}:${WINE_ROOT}/bin/guest_gfx/lib:` +
@@ -1518,19 +1566,29 @@ export class SmokeRunner {
           smokeEnvironment['DXVK_STATE_CACHE'] = '0';
         if (spec.id.indexOf('dxvk-combined') >= 0)
           smokeEnvironment['WINEHUA_D3D11_COMBINED_SAMPLER'] = '1';
+      const probeArguments = isPsoStorm ?
+        ['--pipelines', '5120', '--threads', '8',
+          '--vertex', 'C:\\smoke\\assets\\pso_storm.vert.spv',
+          '--fragment', 'C:\\smoke\\assets\\pso_storm.frag.spv',
+          '--result', windowsResult] :
+        isPersistentUpload ?
+          ['--frames', '600', '--write-bytes', '65536', '--heap-bytes', '67108864',
+            '--result', windowsResult] :
+          ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
+            '--result', windowsResult, isPresent ? '--present' : '--offscreen',
+            ...(isVkd3dCapabilityPe ? ['--vkd3d-capability'] : []),
+            ...(isVkd3dCapability ? ['--capability-audit'] : []),
+            ...(isPresent ? ['--seconds', `${spec.seconds}`] : [])];
       process = testNapi.runWineProgram({
         windowsExePath: `C:\\smoke\\${spec.architecture}\\${spec.executable}`,
-        argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
-          '--result', windowsResult, isPresent ? '--present' : '--offscreen',
-          ...(isVkd3dCapabilityPe ? ['--vkd3d-capability'] : []),
-          ...(isVkd3dCapability ? ['--capability-audit'] : []),
-          ...(isPresent ? ['--seconds', `${spec.seconds}`] : [])],
+        argv: probeArguments,
         environment: smokeEnvironment,
         /* DXVK lives in the WineHua runtime overlay, so the smoke process
          * still runs from its ordinary managed application directory. */
         workingDirectory: `C:\\smoke\\${spec.architecture}`,
         prefixMode: this.request.prefixMode,
-        d3dBackend: isDxvk ? (isDxvkModern ? 'dxvk_modern_2_6' : 'dxvk_legacy') : 'wined3d',
+        d3dBackend: isPersistentUpload ? 'vkd3d_limited_500k' :
+          (isDxvk ? (isDxvkModern ? 'dxvk_modern_2_6' : 'dxvk_legacy') : 'wined3d'),
         presentBackend: isPresent ? 'venus_broker_present' : 'venus_offscreen',
         automationMode: true
       }) as ProcessInfo;
@@ -1639,12 +1697,13 @@ export class SmokeRunner {
       completedTimestampMs: Date.now(),
       tests: results
     };
+    const suitePassed = summary.status === 'PASS';
     const text = JSON.stringify(summary, null, 2);
     writeAtomic(`${stableDirectory}/suite-summary.json`, text);
     writeAtomic(`${this.resultDirectory}/suite-summary.json`, text);
     hilog.info(DOMAIN, "SmokeRunner",
       "summary run=%{public}s suite=%{public}s status=%{public}s tests=%{public}d",
       this.request.runId, this.request.suite, summary.status, results.length);
-    this.onStatus(passed ? 'Smoke: PASS' : 'Smoke: FAIL');
+    this.onStatus(suitePassed ? 'Smoke: PASS' : 'Smoke: FAIL');
   }
 }

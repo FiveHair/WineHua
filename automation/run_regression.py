@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import time
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -57,7 +58,7 @@ SUITES = (
     "dxvk", "dxvk-long", "dxvk-dynamic",
     "gpu-diagnostics", "dxvk26-requirements",
     "dxvk-modern-baseline", "dxvk-modern-long",
-    "capabilities", "vkd3d-capability", "all", "long",
+    "capabilities", "vkd3d-capability", "vkd3d-probes", "all", "long",
 )
 
 REQUIRED_PAYLOAD = (
@@ -70,6 +71,9 @@ REQUIRED_PAYLOAD = (
     "smoke/x64/winehua_d3d11_smoke.exe", "smoke/x86/winehua_d3d11_smoke.exe",
     "smoke/x64/winehua_gpu_diagnostics.exe", "smoke/x86/winehua_gpu_diagnostics.exe",
     "smoke/x64/winehua_dxvk26_requirements.exe", "smoke/x86/winehua_dxvk26_requirements.exe",
+    "smoke/x64/winehua_vulkan_pso_storm.exe",
+    "smoke/x64/winehua_d3d12_persistent_upload.exe",
+    "smoke/assets/pso_storm.vert.spv", "smoke/assets/pso_storm.frag.spv",
     "dxvk/manifest.json",
     "dxvk/legacy/x64/d3d11.dll", "dxvk/legacy/x64/dxgi.dll",
     "dxvk/legacy/x86/d3d11.dll", "dxvk/legacy/x86/dxgi.dll",
@@ -78,6 +82,7 @@ REQUIRED_PAYLOAD = (
     "bin/guest_vulkan/lib/libvulkan.so.1",
     "bin/guest_vulkan/lib/libvulkan_virtio.so",
     "bin/guest_vulkan/share/vulkan/icd.d/venus_icd.x86_64.json",
+    "bin/host_vulkan/bin/winehua_ohos_nativebuffer_vulkan_probe",
 )
 
 CANONICAL_CAPABILITY_FIELDS = (
@@ -317,10 +322,38 @@ def get_artifact_metadata(output_directory: Path) -> dict:
     if raw_hash != embedded_hash:
         raise RuntimeError("HAP embedded wine-data.zip hash does not match assembled payload")
 
-    smoke_list = sh_capture("unzip", "-l", str(RAWFILE_ZIP))
-    for required in REQUIRED_PAYLOAD:
-        if required not in smoke_list:
-            raise RuntimeError(f"Payload missing {required}")
+    probe_hashes = {}
+    with zipfile.ZipFile(RAWFILE_ZIP) as payload:
+        payload_names = set(payload.namelist())
+        missing = [required for required in REQUIRED_PAYLOAD
+                   if required not in payload_names]
+        if missing:
+            raise RuntimeError("Payload missing required files: " + ", ".join(missing))
+
+        smoke_manifest = json.loads(payload.read("smoke/manifest.json"))
+        for relative in (
+                "x64/winehua_vulkan_pso_storm.exe",
+                "x64/winehua_d3d12_persistent_upload.exe",
+                "assets/pso_storm.vert.spv",
+                "assets/pso_storm.frag.spv"):
+            expected = smoke_manifest.get("files", {}).get(relative)
+            actual = hashlib.sha256(payload.read(f"smoke/{relative}")).hexdigest()
+            if not expected or expected != actual:
+                raise RuntimeError(
+                    f"Smoke manifest hash mismatch for {relative}: "
+                    f"expected={expected or 'MISSING'} actual={actual}")
+            probe_hashes[f"smoke/{relative}"] = actual
+
+        host_manifest = json.loads(payload.read("bin/host_vulkan/manifest.json"))
+        host_relative = "bin/winehua_ohos_nativebuffer_vulkan_probe"
+        expected = host_manifest.get("files", {}).get(host_relative)
+        actual = hashlib.sha256(payload.read(
+            f"bin/host_vulkan/{host_relative}")).hexdigest()
+        if not expected or expected != actual:
+            raise RuntimeError(
+                f"Host manifest hash mismatch for {host_relative}: "
+                f"expected={expected or 'MISSING'} actual={actual}")
+        probe_hashes[f"bin/host_vulkan/{host_relative}"] = actual
 
     guest_arch = sh_capture_shell(
         f"unzip -p '{RAWFILE_ZIP}' bin/guest_gfx/lib/libEGL.so.1 | file -")
@@ -346,6 +379,7 @@ def get_artifact_metadata(output_directory: Path) -> dict:
         "dirtySummary": dirty.splitlines() if dirty else [],
         "guestArchitecture": guest_arch,
         "hostArchitecture": host_arch,
+        "probeSha256": probe_hashes,
     }
     write_json(output_directory / "artifact.json", metadata)
     return metadata
@@ -1114,6 +1148,10 @@ def main() -> int:
         matrix = [("host-vulkan", "reuse"), ("venus", "reuse")]
     elif args.suite == "vkd3d-capability":
         matrix = [("host-vulkan", "reuse"), ("vkd3d-capability", "reuse")]
+    elif args.suite == "vkd3d-probes":
+        # The D3D12 probe stages d3d12.dll only into the app-owned clean test
+        # prefix. This never modifies the user's normal .wine tree.
+        matrix = [("vkd3d-probes", "clean")] * args.runs
     else:
         matrix = [(args.suite, args.prefix)] * args.runs
 
