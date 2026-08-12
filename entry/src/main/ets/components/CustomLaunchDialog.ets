@@ -1,26 +1,74 @@
 import { SegmentButton, SegmentButtonOptions } from '@kit.ArkUI';
 
+// Windows 版本选项 (下拉): label 为显示名, value 为 wine 侧 version_names 表
+// 合法值 (ntdll/version.c 精确 wcscmp, 全小写), 与 winecfg 下拉同款列表
+// (win20/30/31 为 DOS 时代, winecfg 也不列, 这里同样不列)。
+// 第一项"跟随全局" value 为空 = 不注入。
+// ArkTS 对象字面量需显式类型, 故抽 interface
+interface WinverOption {
+  label: string;
+  value: string;
+}
+
+const WINVER_OPTIONS: WinverOption[] = [
+  // 第 0 项固定为「跟随全局」: winverIdx 初值 0 → 每次 open 默认选中它
+  { label: '跟随全局', value: '' },
+  // 新 → 旧排列 (最新在前, winecfg 同款浏览习惯)
+  { label: 'Windows 11', value: 'win11' },
+  { label: 'Windows 10', value: 'win10' },
+  { label: 'Windows 8.1', value: 'win81' },
+  { label: 'Windows 8', value: 'win8' },
+  { label: 'Windows 7', value: 'win7' },
+  { label: 'Windows Server 2008 R2', value: 'win2008r2' },
+  { label: 'Windows Server 2008', value: 'win2008' },
+  { label: 'Windows Vista', value: 'vista' },
+  { label: 'Windows Server 2003', value: 'win2003' },
+  { label: 'Windows XP 64-Bit', value: 'winxp64' },
+  { label: 'Windows XP', value: 'winxp' },
+  { label: 'Windows 2000', value: 'win2000' },
+  { label: 'Windows NT 4.0', value: 'nt40' },
+  { label: 'Windows NT 3.51', value: 'nt351' },
+  { label: 'Windows ME', value: 'winme' },
+  { label: 'Windows 98', value: 'win98' },
+  { label: 'Windows 95', value: 'win95' },
+];
+
 // 自定义启动对话框 (应用库/文件页右键菜单「自定义启动」弹出): 临时选择
-// 渲染策略 + 兼容模式档位, 点「启动」按所选参数启动一次 — 不写入持久化配置。
-// 两套选择第一项都是「跟随全局」= 不覆盖 (启动时映射为 undefined 传 onLaunch)。
+// 渲染策略 + 兼容模式档位 + Windows 版本, 点「启动」按所选参数启动一次 —
+// 不写入持久化配置。
+// 每套选择第一项都是「跟随全局」= 不覆盖 (启动时映射为 undefined 传 onLaunch)。
 // 兼容模式为 Box64 动态翻译档位 (仅 ARM 设备生效, x86_64 原生跑无效果)。
-// 每次 open 都是新实例, @State 初值 [0] 自动回到跟随全局。
+// Windows 版本注入 WINEHUA_WINDOWS_VERSION 环境变量, 逐进程生效 (两架构都
+// 有效)。版本项多 (18), SegmentButton 上限 5 个按钮放不下, 用 Select 下拉
+// (winecfg 同款交互)。
+// 每次 open 都是新实例, @State 初值自动回到跟随全局。
 @CustomDialog
 export struct CustomLaunchDialog {
   controller?: CustomDialogController;
   exeName: string = '';   // 标题 "自定义启动 · <exe>"
   onLaunch: (graphics?: 'dxvk' | 'wined3d',
-             compatMode?: 'compat' | 'balanced' | 'perf') => void = () => {};
+             compatMode?: 'compat' | 'balanced' | 'perf',
+             winver?: string) => void = () => {};
   // 渲染策略: 0=跟随全局 1=dxvk 2=wined3d
   @State graphicsSel: number[] = [0];
   // 兼容模式: 0=跟随全局 1=兼容优先 2=均衡 3=性能优先
   @State compatSel: number[] = [0];
+  // Windows 版本: 按钮显示文本 (选中菜单项后按钮文本自动更新, 回写本状态)。
+  // 用 .value() 驱动而不是 .selected(索引): selected 只设"初始选中态/高亮",
+  // 不更新按钮显示文本 (收起状态空白); value 才是按钮文本 (HiSH 同款用法)
+  @State winverLabel: string = WINVER_OPTIONS[0].label;
+  // Select 展示项 (只取 label; 值映射走 WINVER_OPTIONS 按 label 查找)
+  private winverOptions: SelectOption[] = WINVER_OPTIONS.map(
+    (o: WinverOption): SelectOption => ({ value: o.label }));
 
   private doLaunch(): void {
     const g = this.graphicsSel[0] ?? 0;
     const c = this.compatSel[0] ?? 0;
+    const opt = WINVER_OPTIONS.find((o: WinverOption) => o.label == this.winverLabel);
+    const winver = opt?.value || undefined;
     this.onLaunch(g == 1 ? 'dxvk' : g == 2 ? 'wined3d' : undefined,
-      c == 1 ? 'compat' : c == 2 ? 'balanced' : c == 3 ? 'perf' : undefined);
+      c == 1 ? 'compat' : c == 2 ? 'balanced' : c == 3 ? 'perf' : undefined,
+      winver);
     this.controller?.close();
   }
 
@@ -67,6 +115,23 @@ export struct CustomLaunchDialog {
           }
         })
         Text('Box64 动态翻译档位')
+          .fontSize(11)
+          .fontColor($r('app.color.text_tertiary'))
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+
+      Column({ space: 8 }) {
+        Text('Windows 版本')
+          .fontSize(13)
+          .fontColor($r('app.color.text_secondary'))
+        Select(this.winverOptions)
+          .value(this.winverLabel)
+          .width('100%')
+          .onSelect((index: number) => {
+            this.winverLabel = WINVER_OPTIONS[index].label;
+          })
+        Text('注入 WINEHUA_WINDOWS_VERSION, 仅本次启动生效')
           .fontSize(11)
           .fontColor($r('app.color.text_tertiary'))
       }

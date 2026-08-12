@@ -18,11 +18,18 @@ const SCAN_MAX_DEPTH = 6;
 const SCAN_MAX_EXE = 200;
 
 // 自定义启动临时参数 (弹窗选一次, 不持久化): graphics 渲染策略覆盖,
-// compatMode 兼容模式档位; 字段全可选, 缺省 = 跟随全局 (不注入覆盖)。
-// ArkTS 禁止内联对象字面量作类型声明, 故抽成显式 interface
+// compatMode 兼容模式档位, winver Windows 版本; 字段全可选, 缺省 =
+// 跟随全局 (不注入覆盖)。ArkTS 禁止内联对象字面量作类型声明, 故抽成显式 interface
 export interface LaunchOverrides {
   graphics?: 'dxvk' | 'wined3d';
   compatMode?: 'compat' | 'balanced' | 'perf';
+  // Windows 版本 (wine 侧 ntdll/version.c version_names 表的合法值, 如
+  // 'win95'/'winxp'/'win7'/'win10'/'win11', 全小写精确匹配):
+  // winehua 定制版 version_init 优先读环境变量 WINEHUA_WINDOWS_VERSION
+  // (移植自 CrossOver CX_WINDOWS_VERSION 补丁), 逐进程生效、不影响已运行
+  // 进程, 无需改注册表 (注册表是 prefix 全局的, 临时改会让之后启动的其他
+  // 程序串版本)
+  winver?: string;
 }
 
 export interface AppEntry {
@@ -473,6 +480,12 @@ export class AppLibraryService {
     } else if (compatMode == 'perf') {
       environment['BOX64_DYNAREC_SAFEFLAGS'] = '0';
       environment['BOX64_DYNAREC_FORWARD'] = '2048';
+    }
+    // Windows 版本覆盖: 注入 WINEHUA_WINDOWS_VERSION (ntdll/version_init 优先读
+    // 它, 回落注册表), 只作用于本进程; 两架构都生效 (版本逻辑在 ntdll 层)
+    const winver = overrides?.winver;
+    if (winver) {
+      environment['WINEHUA_WINDOWS_VERSION'] = winver;
     }
     const winPath = this.toWindowsPath(path, env.zHome);
     const result = testNapi.runWineProgram({

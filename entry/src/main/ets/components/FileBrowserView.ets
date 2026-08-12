@@ -780,16 +780,18 @@ export struct FileBrowserView {
     }
   }
 
-  // 自定义启动 (右键菜单 exe 分支): 弹窗选渲染策略 + 兼容模式档位 → 按临时
-  // 参数启动一次 (不持久化)。onLaunch 里 launchExe(fullPath, { graphics, compatMode })
+  // 自定义启动 (右键菜单 exe 分支): 弹窗选渲染策略 + 兼容模式档位 + Windows
+  // 版本 → 按临时参数启动一次 (不持久化)。onLaunch 里 launchExe(fullPath,
+  // { graphics, compatMode, winver }) 透传弹窗选择
   private customLaunch(entry: FileEntry): void {
     const path = this.fullPath(entry.name);
     this.customLaunchController = new CustomDialogController({
       builder: CustomLaunchDialog({
         exeName: entry.name,
         onLaunch: (graphics?: 'dxvk' | 'wined3d',
-                   compatMode?: 'compat' | 'balanced' | 'perf') => {
-          this.launchExe(path, { graphics: graphics, compatMode: compatMode });
+                   compatMode?: 'compat' | 'balanced' | 'perf',
+                   winver?: string) => {
+          this.launchExe(path, { graphics: graphics, compatMode: compatMode, winver: winver });
         }
       }),
       autoCancel: true
