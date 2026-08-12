@@ -156,6 +156,11 @@ jobs:
           if ! command -v wget >/dev/null 2>&1; then
             packages+=(wget)
           fi
+          # makeinfo (texinfo): gmp make all 会重新生成 doc/gmp.info,
+          # 干净 checkout 时间戳旧必触发, 缺则 deps 阶段 Error 127
+          if ! command -v makeinfo >/dev/null 2>&1; then
+            packages+=(texinfo)
+          fi
           if [ "${#packages[@]}" -gt 0 ]; then
             echo "Installing missing CI packages: ${packages[*]}"
             apt-get update
