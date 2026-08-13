@@ -294,6 +294,11 @@ assemble_pad() {
     i686-w64-mingw32-gcc -O2 -s -mwindows -o \
         "$smoke_dir/x86/winehua_d3d_switch_cube.exe" "$cube_source" \
         -ld3d9 -ld3d11 -ldxgi -ld3dcompiler -luuid -lshell32 -luser32 -lgdi32 -lm
+    # i386 PE 导入库: 旧双树布局在 wine-i386-pe, 统一构建树在 wine-ohos
+    # (与下方 smoke32 的 fallback 惯例一致)
+    local vulkan1_import_x86="$BUILD_DIR/wine-i386-pe/dlls/vulkan-1/i386-windows/libvulkan-1.a"
+    [ ! -f "$vulkan1_import_x86" ] && \
+        vulkan1_import_x86="$BUILD_DIR/wine-ohos/dlls/vulkan-1/i386-windows/libvulkan-1.a"
     local diagnostics_source="$WINEHUA/smoke/winehua_gpu_diagnostics.c"
     x86_64-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -mwindows -I"$DXVK_SRC/include" -o \
         "$smoke_dir/x64/winehua_gpu_diagnostics.exe" "$diagnostics_source" \
@@ -301,7 +306,7 @@ assemble_pad() {
         -ld3d11 -ldxgi -lversion -luuid -lshell32 -luser32 -lgdi32
     i686-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -mwindows -I"$DXVK_SRC/include" -o \
         "$smoke_dir/x86/winehua_gpu_diagnostics.exe" "$diagnostics_source" \
-        "$BUILD_DIR/wine-i386-pe/dlls/vulkan-1/i386-windows/libvulkan-1.a" \
+        "$vulkan1_import_x86" \
         -ld3d11 -ldxgi -lversion -luuid -lshell32 -luser32 -lgdi32
     local d3d8_source="$WINEHUA/smoke/winehua_d3d8_smoke.c"
     x86_64-w64-mingw32-gcc -O2 -s -mwindows -o \
@@ -320,7 +325,7 @@ assemble_pad() {
         "$BUILD_DIR/wine-ohos/dlls/vulkan-1/x86_64-windows/libvulkan-1.a"
     i686-w64-mingw32-gcc -O2 -s -Wall -Wextra -Werror -I"$DXVK_SRC/include" -o \
         "$smoke_dir/x86/winehua_dxvk26_requirements.exe" "$dxvk26_requirements_source" \
-        "$BUILD_DIR/wine-i386-pe/dlls/vulkan-1/i386-windows/libvulkan-1.a"
+        "$vulkan1_import_x86"
     local win32_driver_source="$WINEHUA/smoke/winehua_win32_driver.c"
     x86_64-w64-mingw32-gcc -O2 -s -municode -mwindows -o \
         "$smoke_dir/x64/winehua_win32_driver.exe" "$win32_driver_source" \
