@@ -1,10 +1,12 @@
 import { promptAction, SegmentButton, SegmentButtonOptions } from '@kit.ArkUI';
 import { fileUri, picker } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { deviceInfo } from '@kit.BasicServicesKit';
 import { WineEnvService } from '../service/WineEnvService';
 import { FontImportService } from '../service/FontImportService';
 import { LogExportService } from '../service/LogExportService';
 import { DisplaySettingsService } from '../service/DisplaySettingsService';
+import { DesktopModeService, MODE_VIRTUAL, MODE_FUSION } from '../service/DesktopModeService';
 
 // 设置页 (设计 4.6, 环境已并入): 显示 (置顶) / 环境管理 (Wine 引擎 · Windows 字体 ·
 // 会话维护 · 危险区)。原环境页 (EnvPanel) 三卡整体并入本页; 原"关于"卡片与
@@ -31,6 +33,10 @@ export struct SettingsView {
   @State wineLang: string = 'zh_CN';
   @State restartHint: boolean = false;
   @State langRestartHint: boolean = false;
+  // 桌面模式分段选中项 (仅 PC): 0=融合模式 1=虚拟桌面, 与 desktopMode 同步
+  @State desktopModeSel: number[] = [0];
+  @State desktopMode: string = MODE_FUSION;
+  @State desktopModeRestartHint: boolean = false;
   // 字体导入进行中 (镜像 WineEnvService.fontImporting): 按钮使能 + 文案
   @State fontImporting: boolean = false;
   // -- 显示 --
@@ -55,6 +61,15 @@ export struct SettingsView {
     const langSel = this.wineLang == 'en_US' ? 1 : 0;
     if (this.langSel[0] != langSel) {
       this.langSel = [langSel];
+    }
+    // 桌面模式镜像 (仅 PC 生效; Pad/phone 恒虚拟桌面, 设置项不渲染)
+    const desktopMode = DesktopModeService.getInstance().mode;
+    if (desktopMode != this.desktopMode) {
+      this.desktopMode = desktopMode;
+      const modeSel = desktopMode == MODE_FUSION ? 0 : 1;
+      if (this.desktopModeSel[0] != modeSel) {
+        this.desktopModeSel = [modeSel];
+      }
     }
     this.fontImporting = FontImportService.getInstance().fontImporting;
   }
@@ -102,6 +117,23 @@ export struct SettingsView {
     }
     this.env.setWineLangPreference(lang);
     this.langRestartHint = true;
+  }
+
+  // 桌面模式切换 (仅 PC): 写配置, 重启 Wine 引擎后生效 (explorer 是否启动/
+  // 合成器策略在引擎启动时按此值判定, 运行中切换不影响当前会话)
+  private selectDesktopMode(mode: string): void {
+    if (mode == this.desktopMode) {
+      return;
+    }
+    DesktopModeService.getInstance().setMode(mode);
+    this.desktopMode = mode;
+    this.desktopModeRestartHint = true;
+  }
+
+  // 设置项可见性: 功能仅对 PC 可用 (Pad/phone 恒虚拟桌面, 无融合模式可切)
+  private isPcDevice(): boolean {
+    const t = deviceInfo.deviceType;
+    return t !== 'tablet' && t !== 'phone';
   }
 
   private confirmReset(): void {
@@ -231,6 +263,36 @@ export struct SettingsView {
               .fontColor($r('app.color.state_warn'))
               .width('100%')
           }
+
+          // 桌面模式 (仅 PC): 融合模式 = 每个程序独立 OHOS 窗口 (多窗口, 默认);
+          // 虚拟桌面 = 独立窗口承载 Wine 桌面
+          if (this.isPcDevice()) {
+            Text('桌面模式')
+              .fontSize(13)
+              .fontColor($r('app.color.text_secondary'))
+              .width('100%')
+            SegmentButton({
+              options: SegmentButtonOptions.capsule({
+                buttons: [{ text: '融合模式' }, { text: '虚拟桌面' }],
+                multiply: false
+              }),
+              selectedIndexes: $desktopModeSel,
+              onItemClicked: (index: number) => {
+                this.selectDesktopMode(index == 0 ? MODE_FUSION : MODE_VIRTUAL);
+              }
+            })
+            .width('100%')
+            Text('虚拟桌面: Wine 桌面在独立窗口运行; 融合模式: 每个程序独立窗口')
+              .fontSize(12)
+              .fontColor($r('app.color.text_tertiary'))
+              .width('100%')
+            if (this.desktopModeRestartHint) {
+              Text('桌面模式已更改, 重启 Wine 引擎后生效')
+                .fontSize(12)
+                .fontColor($r('app.color.state_warn'))
+                .width('100%')
+            }
+          }
         }
         .width('100%')
         .padding(14)
@@ -327,6 +389,7 @@ export struct SettingsView {
             .onClick(() => {
               this.restartHint = false;
               this.langRestartHint = false;
+              this.desktopModeRestartHint = false;
               this.env.restartEngine();
             })
           Button('强制停止 Wine 引擎')

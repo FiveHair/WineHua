@@ -3,6 +3,7 @@
     "pages/Index",
     "pages/HostVulkanSmoke",
     "pages/WineWindow",
-    "pages/WinePopup"
+    "pages/WinePopup",
+    "pages/VirtualDesktop"
   ]
 }

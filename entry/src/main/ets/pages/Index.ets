@@ -42,6 +42,8 @@ struct Index {
   // root 销毁 (会话停止) 翻回 false 回到启动器
   @State desktopActive: boolean = false;
   @State desktopRootId: number = 0;
+  // PC 虚拟桌面: 独立窗口存活 (镜像 WineWindowManager.isDesktopWindowActive)
+  @State desktopWindowActive: boolean = false;
   @State @Watch('onLauncherVisibleChange') launcherVisible: boolean = true;
   // -- 桌面悬浮窗 (Pad): 默认右上角缩略显示, 可拖动挪位 --
   // 位置用 position 绝对坐标 (vp, 相对根 Stack 左上角), 不用 align+offset:
@@ -91,6 +93,7 @@ struct Index {
 
   private env: WineEnvService = WineEnvService.getInstance();
   private proc: ProcessService = ProcessService.getInstance();
+  private wm: WineWindowManager = WineWindowManager.getInstance();
   private tabsController: TabsController = new TabsController();
   // 五导航图标 (与 tabBarItem/sideNavItem 的 index 一一对应):
   // 应用库/运行中/文件/设置/关于 — 系统符号, 替代纯文字导航
@@ -118,10 +121,17 @@ struct Index {
     };
     env.subscribe(mirror);
     // 启动程序自动回桌面: 桌面已激活时新程序被受理 (evt:launch-accepted) → 切回桌面层。
-    // 走事件而非状态串: 状态机不再携带 pid 前缀, 也避免 process-updated 误触发
+    // 走事件而非状态串: 状态机不再携带 pid 前缀, 也避免 process-updated 误触发。
+    // PC 虚拟桌面: 启动程序时自动打开虚拟桌面独立窗口 (openDesktopWindow 有
+    // starting/active 双守卫, 重复触发无副作用) — 桌面在独立窗口, 不隐藏启动器
     env.subscribeEvents((evt: string) => {
       if (evt.startsWith('launch-accepted') && this.desktopActive) {
-        this.setLauncherVisible(false);
+        if (this.wm.isSeparateDesktopWindow()) {
+          this.wm.openDesktopWindow();
+        } else {
+          // Pad: 隐藏启动器, 桌面内嵌全屏
+          this.setLauncherVisible(false);
+        }
       }
     });
     // 桌面状态订阅: desktopActive false→true 时保持启动器可见 — 桌面以
@@ -131,6 +141,8 @@ struct Index {
     wm.subscribe(() => {
       this.desktopActive = wm.desktopActive;
       this.desktopRootId = wm.getDesktopRootId();
+      // PC 虚拟桌面: 独立窗口存活状态镜像 (悬浮窗显隐: VDA 存活 → 悬浮窗隐藏)
+      this.desktopWindowActive = wm.isDesktopWindowActive();
       if (!this.desktopActive) {
         // 桌面 root 销毁 (会话停止/退出): 翻回启动器, 否则 DesktopLayer
         // 卸载后只剩黑屏
@@ -170,26 +182,55 @@ struct Index {
         tbmw.on('windowTitleButtonRectChange', (r: window.TitleButtonRect) => {
           this.titleBarRightPadding = (r && r.width > 0) ? r.width + 4 : 14;
         });
+        // 窗口 resize (2in1 拖动改尺寸): 刷新悬浮窗钳制/定位基准与比例
+        tbmw.on('windowSizeChange', (size: window.Size) => {
+          if (size.width > 0) {
+            this.screenW = px2vp(size.width);
+            this.screenH = px2vp(size.height);
+            this.floatH = Math.round(Index.FLOAT_W * this.screenH / this.screenW);
+          }
+        });
       }
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'titleButtonRect query failed: %{public}s', JSON.stringify(e));
     }
     // 按当前 launcherVisible 应用一次沉浸 (初始 true = 显示状态栏)
     this.applyImmersiveMode();
-    // 悬浮窗拖动钳制的屏幕尺寸 (vp) + 初始位置右上角
+    // 悬浮窗拖动钳制尺寸 (vp) + 初始位置右上角 — 用窗口尺寸而非屏幕尺寸:
+    // position 相对 Index 页面 (窗口) 定位, PC/2in1 窗口可能非全屏,
+    // 按屏幕尺寸计算会超出窗口边界 (悬浮窗整体在窗口外不可见)。
+    // Pad 窗口=全屏, 两者一致, 行为不变。
     try {
-      const d = display.getDefaultDisplaySync();
-      this.screenW = px2vp(d.width);
-      this.screenH = px2vp(d.height);
+      const tbmw = WineWindowManager.getInstance().getMainWindow();
+      if (tbmw) {
+        const props = tbmw.getWindowProperties();
+        const wRect = props.windowRect;
+        if (wRect && wRect.width > 0) {
+          this.screenW = px2vp(wRect.width);
+          this.screenH = px2vp(wRect.height);
+        }
+      }
     } catch (e) {
-      hilog.warn(DOMAIN, TAG, 'screen size query failed: %{public}s', JSON.stringify(e));
-      this.screenW = 640;
-      this.screenH = 400;
+      hilog.warn(DOMAIN, TAG, 'window size query failed: %{public}s', JSON.stringify(e));
+    }
+    if (this.screenW <= 0) {
+      // 兜底: 窗口信息取不到时回退屏幕尺寸
+      try {
+        const d = display.getDefaultDisplaySync();
+        this.screenW = px2vp(d.width);
+        this.screenH = px2vp(d.height);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'screen size query failed: %{public}s', JSON.stringify(e));
+        this.screenW = 640;
+        this.screenH = 400;
+      }
     }
     // 悬浮窗高度随屏幕比例折算: 与桌面帧比例一致, 消除 letterbox 黑边
     this.floatH = Math.round(Index.FLOAT_W * this.screenH / this.screenW);
     this.floatPosX = this.screenW - Index.FLOAT_W - Index.FLOAT_MARGIN_RIGHT;
     this.floatPosY = Index.FLOAT_MARGIN_TOP;
+    hilog.info(DOMAIN, TAG, '[Index] float init: win=%{public}dx%{public}d screenW=%{public}d floatPos=(%{public}d,%{public}d) floatH=%{public}d',
+      this.screenW, this.screenH, this.screenW, this.floatPosX, this.floatPosY, this.floatH);
   }
 
   // 返回键: 一律走系统默认 (退出 app)。悬浮窗模式不再回全屏桌面 —
@@ -222,8 +263,13 @@ struct Index {
 
   private onLauncherVisibleChange(): void {
     // 镜像给 DesktopLayer 判据: 启动器可见时窗口退出全屏, XComponent 高度
-    // 波动, 桌面 root 不应跟随 resize (否则热重启桌面高度残留错误值)
-    WineWindowManager.getInstance().setDesktopLauncherVisible(this.launcherVisible);
+    // 波动, 桌面 root 不应跟随 resize (否则热重启桌面高度残留错误值)。
+    // PC 虚拟桌面模式: Index 不挂 DesktopLayer, 该值归独立窗口所有
+    // (VirtualDesktop 页面置 false), 启动器显隐切换不能回写覆盖。
+    const wm = WineWindowManager.getInstance();
+    if (!wm.isSeparateDesktopWindow()) {
+      wm.setDesktopLauncherVisible(this.launcherVisible);
+    }
     this.applyImmersiveMode();
   }
 
@@ -373,7 +419,8 @@ struct Index {
 
         // 引擎启动入口不在标题栏: 首启由 EngineGuide 引导, 二次进入后台
         // 自动拉起, 失败/降级由 EngineGuide 与设置页承接
-        // 进全屏桌面只经悬浮窗点击 / 启动程序自动全屏 — 不再提供标题栏"回桌面"按钮
+        // 进桌面只经悬浮窗点击 (Pad 内嵌全屏 / PC 打开独立窗口) —
+        // 不再提供标题栏按钮
       }
       .width('100%')
       .padding({ left: 14, right: this.titleBarRightPadding, top: 10, bottom: 10 })
@@ -458,16 +505,23 @@ struct Index {
     .width('100%').height('100%')
     .visibility(this.launcherVisible ? Visibility.Visible : Visibility.Hidden)
     // Layer 1: 桌面层容器 — 悬浮窗态 (launcherVisible) = FLOAT_W×floatH 缩略
-    // 窗浮于启动器右上角 (点击任意处进全屏 / 按住拖动挪位); 全屏态 = 铺满全屏。
+    // 窗浮于启动器右上角 (点击任意处进桌面 / 按住拖动挪位); 全屏态 = 铺满全屏。
     // 缩略显示依赖 renderer letterbox (ComputeFitRect) 等比缩放全屏 Wine 帧,
     // floatH 按屏幕比例折算保证小窗与桌面帧同比例 (无 letterbox 黑边);
     // 悬浮态 desktopLauncherVisible=true 让 DesktopLayer.onSurfaceChanged 跳过
     // root resize, Wine 桌面分辨率保持全屏不被小窗带歪。
-    if (this.desktopActive && this.desktopRootId > 0) {
+    // - Pad/phone: 桌面内嵌, 悬浮窗 ↔ 全屏两态 (现状)
+    // - PC 虚拟桌面: 桌面本体在独立 VirtualDesktopAbility 窗口, 初始化完毕
+    //   即呈现悬浮窗 (不自动弹独立窗口, desktop_root 只置 desktopActive),
+    //   点击悬浮窗 openDesktopWindow 打开独立窗口; VDA 存活期间悬浮窗隐藏
+    //   (desktopWindowActive=true), 关窗后悬浮窗复现。
+    //   PC 悬浮窗不带手柄/虚拟键盘悬浮按钮 (有物理键鼠), 提示条/拖动同 Pad
+    if (this.desktopActive && this.desktopRootId > 0 &&
+      (!this.wm.isSeparateDesktopWindow() || !this.desktopWindowActive)) {
       Stack() {
         DesktopLayer({ floating: this.launcherVisible })
         // 悬浮态交互层: 全尺寸透明, Block 拦截不穿透到桌面 XComponent —
-        // 轻点 onClick 进全屏, 按住 PanGesture 拖动 (FloatingBar 同款手势并存)
+        // 轻点 onClick 进桌面 (Pad 内嵌全屏 / PC 打开独立窗口), 按住 PanGesture 拖动
         if (this.launcherVisible) {
           Stack() {
             Row({ space: 4 }) {
@@ -484,7 +538,13 @@ struct Index {
           }
           .width('100%').height('100%')
           .onClick(() => {
-            this.setLauncherVisible(false);
+            if (this.wm.isSeparateDesktopWindow()) {
+              // PC: 打开虚拟桌面独立窗口 (悬浮窗由 desktopWindowActive 隐藏)
+              this.wm.openDesktopWindow();
+            } else {
+              // Pad: 隐藏启动器, 桌面内嵌全屏
+              this.setLauncherVisible(false);
+            }
           })
           .gesture(
             PanGesture()

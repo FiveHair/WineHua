@@ -1,0 +1,137 @@
+import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { window } from '@kit.ArkUI';
+import { WineWindowManager } from '../service/WineWindowManager';
+
+const DOMAIN = 0x0000;
+const TAG = 'VDA';
+
+// PC 虚拟桌面窗口 (独立 Ability): 承载 desktop root 的 XComponent。
+// 与 WineWindowAbility 的区别: 无 toplevelId (root 单例), 不 setPendingToplevel;
+// 窗口用系统默认初始大小, 保留系统标题栏 (可拖动/缩放/最小化/关闭);
+// "虚拟桌面按屏幕大小初始化"由 Wine 桌面分辨率保证 (setOutputSize)。
+// 生命周期对齐 master DesktopAbility (registerDesktopAbility + ctx 模式):
+//   - 手动拉起: 初始化完毕主界面呈现悬浮窗桌面, 点击悬浮窗 →
+//     WineWindowManager.openDesktopWindow → startAbility
+//   - 用户关窗 (✕): markDesktopWindowClosed — 引擎会话后台继续, 主界面
+//     悬浮窗重新出现 (master 版 onDestroy 会 destroyToplevel 杀 root,
+//     本窗口关窗不杀 — PC 虚拟桌面要求"关窗后台运行", 与 Pad 全屏桌面
+//     (关不掉)语义不同)
+//   - root 销毁 (会话结束/热重启): WineWindowManager 持 ctx terminateSelf
+export default class VirtualDesktopAbility extends UIAbility {
+  private cleanedUp: boolean = false;
+  // 沉浸最大化进行中 (windowStatusChange 防递归, 见 onWindowStageCreate)
+  private immersiveMaximized: boolean = false;
+
+  onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    hilog.info(DOMAIN, TAG, '[VDA] onCreate launchReason=%{public}d', launchParam.launchReason);
+    try {
+      // 注册 ctx (root 销毁时 manager 直接 terminateSelf 关窗) + 存活标记
+      WineWindowManager.getInstance().registerDesktopWindow(this.context);
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, '[VDA] ERR onCreate registerDesktopWindow: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  onWindowStageCreate(windowStage: window.WindowStage): void {
+    hilog.info(DOMAIN, TAG, '[VDA] onWindowStageCreate cleanedUp=%{public}s',
+      this.cleanedUp ? 'yes' : 'no');
+    if (this.cleanedUp) {
+      hilog.warn(DOMAIN, TAG, '[VDA] ERR already cleaned up, skipping onWindowStageCreate');
+      return;
+    }
+    try {
+      const mainWindow = windowStage.getMainWindowSync();
+      if (!mainWindow) {
+        hilog.error(DOMAIN, TAG, '[VDA] ERR getMainWindowSync NULL');
+        return;
+      }
+      mainWindow.setWindowTitle('Wine 桌面');
+      // 窗口用系统默认初始大小 — "虚拟桌面按屏幕大小初始化"由 Wine 桌面
+      // 分辨率保证 (WineWindowManager.init 的 setOutputSize = 屏幕/scale),
+      // 窗口只是显示口: 任何尺寸下 renderer letterbox (ComputeFitRect)
+      // 等比缩放呈现, 全屏化 (系统最大化) 恰好 1:1 无黑边。
+      // 不在此 resize 到屏幕: 满屏窗口会盖住系统任务栏, 且窗口尺寸与
+      // 桌面分辨率解耦后, 用户缩放窗口不影响 Wine 桌面布局。
+
+      // 用户关窗 (✕/系统手势): 引擎会话后台继续, 仅清窗口标记
+      // (root 销毁关窗由 WineWindowManager 持 ctx terminateSelf, 不在此处理)
+      mainWindow.on('windowEvent', (eventType: number) => {
+        hilog.info(DOMAIN, TAG, '[VDA] windowEvent type=%{public}d', eventType);
+        if (eventType === window.WindowEventType.WINDOW_DESTROYED) {
+          this.cleanup();
+        }
+      });
+
+      // 最大化 → 沉浸全屏, 与游戏全屏同款路径: win.maximize() 无参数 =
+      // ENTER_IMMERSIVE (铺满屏幕、自动隐藏 dock/状态栏/标题栏, hover 热区
+      // 系统自动唤出, 还原入口由系统标题栏/dock 提供)。
+      // 还原 → win.recover() 回普通窗口。
+      // WindowStatusType (API≥14): 2=MAXIMIZE 4=FLOATING(普通自由窗口)。
+      // 实测: 点最大化按钮发 2, 还原发 4。immersiveMaximized 防递归:
+      // maximize()/recover() 自身会触发状态回调, 标志位保证只执行一次。
+      mainWindow.on('windowStatusChange', (statusType: number) => {
+        hilog.info(DOMAIN, TAG, '[VDA] windowStatusChange status=%{public}d immersive=%{public}s',
+          statusType, this.immersiveMaximized ? 'yes' : 'no');
+        if (statusType === 2 && !this.immersiveMaximized) {
+          this.immersiveMaximized = true;
+          mainWindow.maximize().then(() => {
+            hilog.info(DOMAIN, TAG, '[VDA] maximize(ENTER_IMMERSIVE) OK');
+          }).catch((e: Error) => {
+            hilog.warn(DOMAIN, TAG, '[VDA] maximize failed: %{public}s', JSON.stringify(e));
+            this.immersiveMaximized = false;
+          });
+        } else if (statusType === 4 && this.immersiveMaximized) {
+          this.immersiveMaximized = false;
+          mainWindow.recover().then(() => {
+            hilog.info(DOMAIN, TAG, '[VDA] recover OK');
+          }).catch((e: Error) => {
+            hilog.warn(DOMAIN, TAG, '[VDA] recover failed: %{public}s', JSON.stringify(e));
+          });
+        }
+      });
+
+      hilog.info(DOMAIN, TAG, '[VDA] -> loadContent pages/VirtualDesktop...');
+      windowStage.loadContent('pages/VirtualDesktop', (err) => {
+        if (err.code) {
+          hilog.error(DOMAIN, TAG, '[VDA] ERR loadContent FAILED: %{public}s', JSON.stringify(err));
+          return;
+        }
+        hilog.info(DOMAIN, TAG, '[VDA] loadContent OK');
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, '[VDA] ERR onWindowStageCreate EXCEPTION: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  onForeground(): void {
+    hilog.info(DOMAIN, TAG, '[VDA] onForeground');
+  }
+
+  onBackground(): void {
+    hilog.info(DOMAIN, TAG, '[VDA] onBackground');
+  }
+
+  onDestroy(): void {
+    hilog.info(DOMAIN, TAG, '[VDA] onDestroy (cleanedUp=%{public}s)', this.cleanedUp ? 'yes' : 'no');
+    if (!this.cleanedUp) {
+      this.cleanup();
+    }
+  }
+
+  private cleanup(): void {
+    if (this.cleanedUp) {
+      hilog.warn(DOMAIN, TAG, '[VDA] cleanup: already cleaned, skip');
+      return;
+    }
+    this.cleanedUp = true;
+    hilog.info(DOMAIN, TAG, '[VDA] cleanup START');
+    try {
+      // 引擎会话继续后台运行, 仅清窗口标记 (重开入口由启动器提供)
+      WineWindowManager.getInstance().markDesktopWindowClosed();
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, '[VDA] ERR cleanup markDesktopWindowClosed: %{public}s', JSON.stringify(e));
+    }
+    hilog.info(DOMAIN, TAG, '[VDA] cleanup DONE');
+  }
+}
