@@ -316,7 +316,23 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
     if (selectedProfile == "shadow-precise-dirty-ring-inline-upload-descriptor-serialized") {
         UpsertEnvLine(env, "VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=1");
     }
-    UpsertEnvLine(env, "VN_WINEHUA_STRONG_RING_BARRIER=1");
+    // 值可被 launch 环境显式覆盖 (A/B 实验), 默认仍开 strong ring barrier
+    const std::string strongRing =
+        FindLaunchEnvironmentValue(params, "VN_WINEHUA_STRONG_RING_BARRIER");
+    UpsertEnvLine(env, "VN_WINEHUA_STRONG_RING_BARRIER=" +
+                  (strongRing.empty() ? "1" : strongRing));
+    if (params.d3dBackend == "dxvk_modern_2_6") {
+        // Modern 2.6 profile 的诊断 trace 默认全关, 只透传调用方显式值
+        const char* traceKeys[] = {
+            "DXVK_WINEHUA_TRACE_SAMPLED",
+            "DXVK_WINEHUA_TRACE_FLOW",
+            "DXVK_WINEHUA_TRACE_API",
+        };
+        for (const char* key : traceKeys) {
+            const std::string value = FindLaunchEnvironmentValue(params, key);
+            UpsertEnvLine(env, std::string(key) + "=" + (value.empty() ? "0" : value));
+        }
+    }
     if (guestPerf) {
         UpsertEnvLine(env, "VN_WINEHUA_PERF_SUMMARY=1");
         UpsertEnvLine(env, "VN_WINEHUA_PERF_LOG=/storage/Users/currentUser/Download/app.hackeris.winehua/winehua_guest_ring_perf.log");
@@ -382,9 +398,12 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
     }
 
     // -- wineserver via NCP --
-    // wineserver 走 WineserverMain 入口 (wine_child.cpp), __env= 覆盖会被解析
+    // wineserver 走 WineserverMain 入口 (wine_child.cpp), __env= 覆盖会被解析。
+    // NCP 不继承主进程环境, 必须把选中的 prefix 显式传入, 避免 clean smoke
+    // 的 wineserver 落回默认 .wine。
     {
-        std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin + "|wineserver|-f|-p";
+        std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin +
+            "|wineserver|-f|-p|__env=WINEPREFIX=" + p->prefixDir;
         OH_LOG_WARN(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
         NativeChildProcess_Args wsArgs = {};
         wsArgs.entryParams = const_cast<char*>(wsEntryParams.c_str());
@@ -414,6 +433,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         napi_call_threadsafe_function(gStateTsfn, strdup("state:starting:wineboot"), napi_tsfn_blocking);
 
     gBrokerHomeDir = p->homeDir;
+    gBrokerPrefixDir = p->prefixDir;
     StartBrokerServer();
     setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
 

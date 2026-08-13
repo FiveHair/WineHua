@@ -124,6 +124,13 @@ struct ProbeCaps {
     bool transformFeedback = false;
     bool shaderInt8 = false;
     bool timelineSemaphore = false;
+    bool timelineRoundTripAttempted = false;
+    bool timelineRoundTripPassed = false;
+    VkResult timelineCreateResult = VK_NOT_READY;
+    VkResult timelineSubmitResult = VK_NOT_READY;
+    VkResult timelineWaitResult = VK_NOT_READY;
+    VkResult timelineCounterResult = VK_NOT_READY;
+    uint64_t timelineObservedValue = 0;
     bool synchronization2 = false;
     bool dynamicRendering = false;
     bool maintenance4 = false;
@@ -194,6 +201,14 @@ std::string MakeResult(const std::string& runId, const char* status, const char*
         << "    \"shaderInt16\": " << (caps.features.shaderInt16 ? "true" : "false") << ",\n"
         << "    \"shaderInt64\": " << (caps.features.shaderInt64 ? "true" : "false") << ",\n"
         << "    \"timelineSemaphore\": " << (caps.timelineSemaphore ? "true" : "false") << ",\n"
+        << "    \"timelineRoundTrip\": {\"attempted\":"
+        << (caps.timelineRoundTripAttempted ? "true" : "false")
+        << ",\"passed\":" << (caps.timelineRoundTripPassed ? "true" : "false")
+        << ",\"createResult\":" << caps.timelineCreateResult
+        << ",\"submitResult\":" << caps.timelineSubmitResult
+        << ",\"waitResult\":" << caps.timelineWaitResult
+        << ",\"counterResult\":" << caps.timelineCounterResult
+        << ",\"observedValue\":" << caps.timelineObservedValue << "},\n"
         << "    \"synchronization2\": " << (caps.synchronization2 ? "true" : "false") << ",\n"
         << "    \"dynamicRendering\": " << (caps.dynamicRendering ? "true" : "false") << ",\n"
         << "    \"maintenance4\": " << (caps.maintenance4 ? "true" : "false") << ",\n"
@@ -272,6 +287,7 @@ public:
         const char* failure = nullptr;
         bool unsupported = false;
         if (!InitInstance(failure, unsupported) || !InitDevice(failure, unsupported) ||
+            !RunTimelineRoundTrip(failure, unsupported) ||
             !CreateSwapchain(failure, unsupported) || !CreateCommands(failure)) {
             PublishResult(runId_, unsupported ? "UNSUPPORTED" : "FAIL",
                           failure ? failure : "Host Vulkan initialization failed", caps_, metrics_, true);
@@ -415,7 +431,9 @@ private:
         const char* enabled[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_OHOS_SURFACE_EXTENSION_NAME};
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
         app.pApplicationName = "WineHua Host Vulkan Smoke";
-        app.apiVersion = std::min(caps_.loaderApiVersion, VK_API_VERSION_1_1);
+        // Negotiate the same Vulkan generation as Venus so its advertised
+        // timeline semaphore capability is exercised natively as well.
+        app.apiVersion = std::min(caps_.loaderApiVersion, VK_API_VERSION_1_3);
         VkInstanceCreateInfo create{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
         create.pApplicationInfo = &app;
         create.enabledExtensionCount = 2;
@@ -492,17 +510,84 @@ private:
             queues.push_back(queue);
         }
         const char* extension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        VkPhysicalDeviceVulkan12Features vulkan12{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        if (caps_.timelineSemaphore)
+            vulkan12.timelineSemaphore = VK_TRUE;
         VkDeviceCreateInfo create{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         create.queueCreateInfoCount = static_cast<uint32_t>(queues.size());
         create.pQueueCreateInfos = queues.data();
         create.enabledExtensionCount = 1;
         create.ppEnabledExtensionNames = &extension;
+        create.pNext = caps_.timelineSemaphore ? &vulkan12 : nullptr;
         if (vkCreateDevice(physical_, &create, nullptr, &device_) != VK_SUCCESS) {
             failure = "vkCreateDevice failed";
             return false;
         }
         vkGetDeviceQueue(device_, caps_.graphicsQueueFamily, 0, &graphicsQueue_);
         vkGetDeviceQueue(device_, caps_.presentQueueFamily, 0, &presentQueue_);
+        return true;
+    }
+
+    bool RunTimelineRoundTrip(const char*& failure, bool& unsupported)
+    {
+        caps_.timelineRoundTripAttempted = true;
+        if (!caps_.timelineSemaphore) {
+            failure = "Host Vulkan does not expose timelineSemaphore";
+            unsupported = true;
+            return false;
+        }
+
+        const uint64_t expectedValue = 1;
+        VkSemaphoreTypeCreateInfo timelineType{
+            VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+        timelineType.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        semaphoreInfo.pNext = &timelineType;
+        VkSemaphore semaphore = VK_NULL_HANDLE;
+        caps_.timelineCreateResult = vkCreateSemaphore(device_, &semaphoreInfo,
+                                                       nullptr, &semaphore);
+        if (caps_.timelineCreateResult != VK_SUCCESS) {
+            failure = "Host vkCreateSemaphore(timeline) failed";
+            return false;
+        }
+
+        VkTimelineSemaphoreSubmitInfo timelineSubmit{
+            VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+        timelineSubmit.signalSemaphoreValueCount = 1;
+        timelineSubmit.pSignalSemaphoreValues = &expectedValue;
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.pNext = &timelineSubmit;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores = &semaphore;
+        caps_.timelineSubmitResult = vkQueueSubmit(graphicsQueue_, 1, &submit,
+                                                   VK_NULL_HANDLE);
+        if (caps_.timelineSubmitResult != VK_SUCCESS) {
+            vkDestroySemaphore(device_, semaphore, nullptr);
+            failure = "Host vkQueueSubmit(timeline signal) failed";
+            return false;
+        }
+
+        VkSemaphoreWaitInfo waitInfo{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+        waitInfo.semaphoreCount = 1;
+        waitInfo.pSemaphores = &semaphore;
+        waitInfo.pValues = &expectedValue;
+        caps_.timelineWaitResult = vkWaitSemaphores(device_, &waitInfo,
+                                                     UINT64_C(500000000));
+        if (caps_.timelineWaitResult == VK_SUCCESS) {
+            caps_.timelineCounterResult = vkGetSemaphoreCounterValue(
+                device_, semaphore, &caps_.timelineObservedValue);
+        }
+        caps_.timelineRoundTripPassed =
+            caps_.timelineWaitResult == VK_SUCCESS &&
+            caps_.timelineCounterResult == VK_SUCCESS &&
+            caps_.timelineObservedValue >= expectedValue;
+        vkDestroySemaphore(device_, semaphore, nullptr);
+
+        if (!caps_.timelineRoundTripPassed) {
+            failure = "Host timeline semaphore signal/wait/counter round-trip failed";
+            return false;
+        }
         return true;
     }
 

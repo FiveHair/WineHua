@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """WineHua regression suite runner (WSL).
 
-Builds the HAP with the local Makefile, validates the payload, installs it
-through the Linux hdc, starts the App in smoke mode with Want parameters,
+Builds the HAP in the canonical Docker container, validates the payload,
+installs it through hdc, starts the App in smoke mode with Want parameters,
 validates the deterministic fixed frames with validate_frame.py, and archives
 all machine-readable results under the archive root.
 
-No environment-specific path is hard-coded: the repository root is derived
-from this script's location, the hdc path comes from WINEHUA_HDC or is
-auto-detected, and the archive root comes from --archive-root, WINEHUA_ARCHIVE_ROOT,
-or the repository build/ directory. The device is selected automatically from
+The repository root is derived from this script's location, the hdc path comes
+from WINEHUA_HDC or PATH, and the archive root comes from --archive-root,
+WINEHUA_ARCHIVE_ROOT, or the repository build/ directory. The device is selected automatically from
 `hdc list targets` (physical targets preferred) or via --device-id.
 
 The D3D11 coverage policy and capability-matrix logic are shared with the
@@ -38,6 +37,8 @@ ABILITY = "EntryAbility"
 HAP_PATH = REPO_ROOT / "entry/build/default/outputs/default/entry-default-signed.hap"
 RAWFILE_ZIP = REPO_ROOT / "entry/src/main/resources/rawfile/wine-data.zip"
 DEVICE_SANDBOX = f"/data/app/el2/100/base/{BUNDLE}"
+DOCKER_CONTAINER = "winehua-master-ext4"
+DOCKER_REPO = "/data/src/winehua"
 
 # 产品性能 profile（DXVK Legacy 默认，见 STATUS_MEMO）与诊断 profile。
 PRODUCT_PERF_PROFILE = "shadow-precise-dirty-ring-inline-upload-coverage-sort"
@@ -48,6 +49,8 @@ SUITES = (
     "wine-vulkan", "wine-vulkan-present",
     "venus", "venus-sampled", "venus-depth-cube-array-2d-golden",
     "dxvk", "dxvk-long", "dxvk-dynamic",
+    "gpu-diagnostics", "dxvk26-requirements",
+    "dxvk-modern-baseline", "dxvk-modern-long",
     "capabilities", "all", "long",
 )
 
@@ -59,9 +62,13 @@ REQUIRED_PAYLOAD = (
     "smoke/x64/winehua_d3d8_smoke.exe", "smoke/x86/winehua_d3d8_smoke.exe",
     "smoke/x64/winehua_d3d_switch_cube.exe", "smoke/x86/winehua_d3d_switch_cube.exe",
     "smoke/x64/winehua_d3d11_smoke.exe", "smoke/x86/winehua_d3d11_smoke.exe",
+    "smoke/x64/winehua_gpu_diagnostics.exe", "smoke/x86/winehua_gpu_diagnostics.exe",
+    "smoke/x64/winehua_dxvk26_requirements.exe", "smoke/x86/winehua_dxvk26_requirements.exe",
     "dxvk/manifest.json",
     "dxvk/legacy/x64/d3d11.dll", "dxvk/legacy/x64/dxgi.dll",
     "dxvk/legacy/x86/d3d11.dll", "dxvk/legacy/x86/dxgi.dll",
+    "dxvk/modern-2.6/x64/d3d11.dll", "dxvk/modern-2.6/x64/dxgi.dll",
+    "dxvk/modern-2.6/x86/d3d11.dll", "dxvk/modern-2.6/x86/dxgi.dll",
     "bin/guest_vulkan/lib/libvulkan.so.1",
     "bin/guest_vulkan/lib/libvulkan_virtio.so",
     "bin/guest_vulkan/share/vulkan/icd.d/venus_icd.x86_64.json",
@@ -183,8 +190,24 @@ def capture_d3d11_frame(hdc: str, device_id: str, run_directory: Path,
 
 
 def invoke_build(log_path: Path) -> None:
+    inspect = subprocess.run(
+        ["docker", "inspect", DOCKER_CONTAINER],
+        capture_output=True, text=True, errors="replace")
+    if inspect.returncode != 0:
+        raise RuntimeError(f"Docker container is unavailable: {DOCKER_CONTAINER}")
+    running = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.Running}}", DOCKER_CONTAINER],
+        capture_output=True, text=True, errors="replace")
+    if running.returncode != 0:
+        raise RuntimeError(f"Cannot query Docker container: {DOCKER_CONTAINER}")
+    if running.stdout.strip() != "true":
+        started = subprocess.run(["docker", "start", DOCKER_CONTAINER],
+                                 capture_output=True, text=True, errors="replace")
+        if started.returncode != 0:
+            raise RuntimeError(f"Cannot start Docker container: {DOCKER_CONTAINER}")
     result = subprocess.run(
-        ["make", "NATIVE_ARCH=arm64-v8a"], cwd=REPO_ROOT,
+        ["docker", "exec", "-w", DOCKER_REPO, DOCKER_CONTAINER,
+         "make", "hap", "NATIVE_ARCH=arm64-v8a"],
         capture_output=True, text=True, errors="replace")
     redacted = [
         re.sub(r"(-keyPwd\s+)\S+", r"\1<redacted>",
@@ -391,7 +414,7 @@ def get_d3d11_coverage(summary: dict, run_suite: str, long_seconds: int) -> dict
             "computeUavSubmitted": bool(metrics.get("computeUavSubmitted")),
             "computeUavFunctional": bool(metrics.get("computeUavFunctional")),
             "computeSampledImageFunctional": bool(metrics.get("computeSampledImageFunctional")),
-            "longWallClock": (run_suite != "dxvk-long" or
+            "longWallClock": (run_suite not in ("dxvk-long", "dxvk-modern-long") or
                               int(metrics.get("durationMs", 0)) >= long_seconds * 1000 - 2000),
             "present60Frames": int(metrics.get("presentFrames", 0)) >= 60,
             "presentResultSuccess": int(metrics.get("presentResult", -1)) == 0,
@@ -447,6 +470,13 @@ def dxvk_tests_for_suite(run_suite: str) -> list[str]:
         return ["dxvk-dynamic-cb-x86", "dxvk-dynamic-cb-x64"]
     if run_suite == "dxvk-long":
         return ["dxvk-long-x64"]
+    if run_suite == "dxvk-modern-baseline":
+        return ["dxvk-modern-baseline-x86", "dxvk-modern-baseline-x64",
+                "dxvk-modern-cube-x64"]
+    if run_suite == "dxvk-modern-long":
+        return ["dxvk-modern-long-x64"]
+    if run_suite in ("gpu-diagnostics", "dxvk26-requirements"):
+        return []
     if run_suite == "all":
         return ["d3d9-cube-x86", "d3d9-cube-x64", "dxvk-legacy-x64", "dxvk-legacy-x86"]
     return ["dxvk-legacy-x64", "dxvk-legacy-x86"]
@@ -489,7 +519,7 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
         raise RuntimeError(f"Want start failed: {start_output.strip()}")
 
     run_timeout_minutes = timeout_minutes
-    if run_suite == "dxvk-long":
+    if run_suite in ("dxvk-long", "dxvk-modern-long"):
         run_timeout_minutes = max(timeout_minutes, (long_seconds + 300) // 60 + 5)
     deadline = time.monotonic() + run_timeout_minutes * 60
     captured: dict[str, bool] = {}
@@ -503,7 +533,8 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
                 if '"message"' in result_text and '"fixed-frame"' in result_text:
                     captured[test_id] = capture_frame(
                         hdc, device_id, run_directory, run_id, test_id, validate_rgba_quadrants)
-        if run_suite in ("d3d9", "dxvk", "dxvk-long", "dxvk-dynamic", "all"):
+        if run_suite in ("d3d9", "dxvk", "dxvk-long", "dxvk-dynamic", "all",
+                         "dxvk-modern-baseline", "dxvk-modern-long"):
             for test_id in dxvk_tests_for_suite(run_suite):
                 if test_id in captured:
                     continue
@@ -530,7 +561,8 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
     if run_suite in ("core", "opengl", "all", "long"):
         for test_id in ("opengl-x64", "opengl-x86"):
             captured.setdefault(test_id, False)
-    if run_suite in ("d3d9", "dxvk", "dxvk-long", "dxvk-dynamic", "all"):
+    if run_suite in ("d3d9", "dxvk", "dxvk-long", "dxvk-dynamic", "all",
+                     "dxvk-modern-baseline", "dxvk-modern-long"):
         for test_id in dxvk_tests_for_suite(run_suite):
             captured.setdefault(test_id, False)
     if run_suite == "host-vulkan":
@@ -564,7 +596,8 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
                     {"path": match.group(1), "reason": match.group(2)})
 
     visual_pass = not any(not value for value in captured.values())
-    if run_suite in ("dxvk", "dxvk-long", "dxvk-dynamic", "all"):
+    if run_suite in ("dxvk", "dxvk-long", "dxvk-dynamic", "all",
+                     "dxvk-modern-baseline", "dxvk-modern-long"):
         coverage = get_d3d11_coverage(summary, run_suite, long_seconds)
     else:
         coverage = None

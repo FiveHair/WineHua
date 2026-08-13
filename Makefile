@@ -37,6 +37,13 @@ DXVK_ARTIFACTS := \
 	$(BUILD_DIR)/dxvk/legacy/x86/bin/dxgi.dll
 DXVK_STAMP := $(STAMPS)/dxvk-legacy
 DXVK_SOURCE_INPUTS := $(shell find $(ROOT)/thirdparty/dxvk/src -type f 2>/dev/null; find $(ROOT)/thirdparty/dxvk -maxdepth 1 -type f 2>/dev/null)
+DXVK_MODERN_ARTIFACTS := \
+	$(BUILD_DIR)/dxvk/modern-2.6/x64/bin/d3d11.dll \
+	$(BUILD_DIR)/dxvk/modern-2.6/x64/bin/dxgi.dll \
+	$(BUILD_DIR)/dxvk/modern-2.6/x86/bin/d3d11.dll \
+	$(BUILD_DIR)/dxvk/modern-2.6/x86/bin/dxgi.dll
+DXVK_MODERN_STAMP := $(STAMPS)/dxvk-modern-2.6
+DXVK_MODERN_SOURCE_INPUTS := $(shell find $(ROOT)/thirdparty/dxvk-modern/src -type f 2>/dev/null; find $(ROOT)/thirdparty/dxvk-modern -maxdepth 1 -type f 2>/dev/null)
 
 # 架构列表 (NATIVE_ARCH=all 时展开为两个)
 ifeq ($(NATIVE_ARCH),all)
@@ -78,6 +85,20 @@ $(DXVK_STAMP): $(SCRIPTS)/build_dxvk.sh $(DXVK_SOURCE_INPUTS) | $(STAMPS)
 # packaging a partial or truncated DXVK install.
 $(DXVK_ARTIFACTS): $(DXVK_STAMP)
 	@test -s "$@" || { echo "ERROR: DXVK artifact missing after build: $@" >&2; exit 1; }
+
+# ============================================================
+# dxvk-modern — WineHua DXVK 2.6.2 compatibility profile (x64 + x86)
+# ============================================================
+.PHONY: dxvk-modern
+dxvk-modern: $(DXVK_MODERN_STAMP)
+
+$(DXVK_MODERN_STAMP): $(SCRIPTS)/build_dxvk_modern.sh $(DXVK_MODERN_SOURCE_INPUTS) | $(STAMPS)
+	@echo "=== dxvk modern 2.6 ==="
+	bash $(SCRIPTS)/build_dxvk_modern.sh
+	touch $@
+
+$(DXVK_MODERN_ARTIFACTS): $(DXVK_MODERN_STAMP)
+	@test -s "$@" || { echo "ERROR: DXVK Modern artifact missing after build: $@" >&2; exit 1; }
 ifeq ($(BUILD_GUEST_VULKAN),1)
 ASSEMBLE_GUEST_INPUTS += $(wildcard $(GUEST_VULKAN_SENTINEL))
 endif
@@ -321,9 +342,11 @@ define assemble_rule
 
 assemble-$(1): $$(STAMPS)/$(1)/assemble
 
-$$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFACTS) \
+$$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFACTS) $(DXVK_MODERN_ARTIFACTS) \
 	$(ROOT)/smoke/winehua_d3d8_smoke.c \
 	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
+	$(ROOT)/smoke/winehua_gpu_diagnostics.c \
+	$(ROOT)/smoke/winehua_dxvk26_requirements.c \
 	$(ROOT)/smoke/winehua_win32_driver.c \
 	$$(STAMPS)/deps $$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native \
 	$$(STAMPS)/$(1)/host-vulkan \

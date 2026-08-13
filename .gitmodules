@@ -71,3 +71,7 @@
 [submodule "thirdparty/gstreamer"]
 	path = thirdparty/gstreamer
 	url = https://gitlab.freedesktop.org/gstreamer/gstreamer.git
+[submodule "thirdparty/dxvk-modern"]
+	path = thirdparty/dxvk-modern
+	url = https://github.com/winehua/dxvk.git
+	branch = dxvk-modern-2.6

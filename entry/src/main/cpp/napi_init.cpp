@@ -127,6 +127,27 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         !strcmp(profile, "shadow-precise-strong-ring-trace");
     const bool preciseStrongPerf =
         !strcmp(profile, "shadow-precise-strong-ring-perf");
+    /* Timeline feedback is independently disabled in the Guest.  Keep the
+     * Host-side mapped-memory semantics identical to the other precise
+     * transport profiles so the A/B changes only feedback and ring topology. */
+    const bool preciseNoSemaphoreFeedbackSingleRing =
+        !strcmp(profile, "shadow-precise-no-semaphore-feedback-single-ring") ||
+        !strcmp(profile,
+                "shadow-precise-no-semaphore-feedback-single-ring-sync-submit") ||
+        !strcmp(profile,
+                "shadow-precise-no-semaphore-feedback-single-ring-readback-idle");
+    const bool preciseNoSemaphoreFeedback =
+        !strcmp(profile, "shadow-precise-no-semaphore-feedback") ||
+        preciseNoSemaphoreFeedbackSingleRing ||
+        !strcmp(profile,
+                "shadow-precise-no-semaphore-feedback-single-ring-trace");
+    /* Keep the guest single-ring workaround while restoring completion-time
+     * Host-to-Guest visibility. This is a bounded diagnostic A/B, not a
+     * product profile: it separates transport corruption from readback
+     * coverage without changing the established precise path. */
+    const bool fullNoSemaphoreFeedbackSingleRingTrace =
+        !strcmp(profile,
+                "shadow-full-no-semaphore-feedback-single-ring-trace");
     const bool legacyHostSync =
         !strcmp(profile, "shadow-precise-legacy-host-sync");
     const bool preciseDirtyPerf = !strcmp(profile, "shadow-precise-dirty-ring-perf");
@@ -166,7 +187,10 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     const bool preciseDirtyRing =
         !strcmp(profile, "shadow-precise-dirty-ring") ||
         preciseDirtyPresentImageTrace;
-    const bool trace = !strcmp(profile, "shadow-trace") || preciseStrongTrace;
+    const bool trace = !strcmp(profile, "shadow-trace") || preciseStrongTrace ||
+        !strcmp(profile,
+                "shadow-precise-no-semaphore-feedback-single-ring-trace") ||
+        fullNoSemaphoreFeedbackSingleRingTrace;
     const bool explicitToHost = !strcmp(profile, "shadow-to-host-explicit");
     const bool deferShmemUnref = !strcmp(profile, "shadow-precise-retain-shmem");
     const bool cpuShadowUpload =
@@ -179,6 +203,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         profile, "shadow-precise-strong-ring-fence-poll") ||
         preciseDirtyCoveragePoll;
     const bool precise = !strcmp(profile, "shadow-precise") ||
+        preciseNoSemaphoreFeedback ||
         !strcmp(profile, "shadow-precise-single-ring") ||
         !strcmp(profile, "shadow-precise-sync-submit") ||
         (!strcmp(profile, "shadow-precise-strong-ring") || legacyHostSync || preciseStrongTrace ||
@@ -206,6 +231,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
      * selector through the existing graphics-broker IPC. The child converts
      * this selector to the concrete renderer flags before vtest starts. */
     const char* shadowSelector =
+        preciseNoSemaphoreFeedbackSingleRing ? "gpu-upload" :
         legacyHostSync ? "legacy-host-sync" :
         preciseDirtyAliasCover ? "inline-gpu-upload-alias-cover" :
         preciseDirtyCoveragePoll ? "inline-gpu-upload-coverage-sort" :

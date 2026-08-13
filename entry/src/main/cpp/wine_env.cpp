@@ -154,8 +154,12 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
 
     std::string profile = d3dBackend.substr(strlen("dxvk_"));
     if (profile.empty()) profile = "legacy";
+    const bool legacy = profile == "legacy";
+    const bool modern26 = profile == "modern_2_6";
+    if (!legacy && !modern26) return;
+    const std::string runtimeProfile = modern26 ? "modern-2.6" : "legacy";
     const std::string overlayRoot = std::string(WINE_RUNTIME_ROOT) +
-        "/dxvk/" + profile;
+        "/dxvk/" + runtimeProfile;
     const std::string overlay64 = overlayRoot + "/x64";
     const std::string overlay86 = overlayRoot + "/x86";
     const std::string guestVulkanRoot = binDir + "/guest_vulkan";
@@ -171,9 +175,8 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
     const std::vector<std::string> managed = {
         "WINEHUA_D3D_BACKEND=" + d3dBackend,
         "WINEHUA_DXVK_ROOT=" + overlayRoot,
-        "WINEHUA_DXVK_PROFILE=" + profile,
-        "WINEHUA_DXVK_VERSION=1.10.3",
-        "WINEHUA_DXVK_RELAXED_FEATURES=1",
+        "WINEHUA_DXVK_PROFILE=" + runtimeProfile,
+        "WINEHUA_DXVK_VERSION=" + std::string(modern26 ? "2.6.2" : "1.10.3"),
         "WINEHUA_VULKAN_RUNTIME=1",
         "WINEHUA_VULKAN_LOADER_ARCH=x86_64",
         "WINEHUA_VENUS_ICD_ARCH=x86_64",
@@ -195,25 +198,35 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         /* Host GPU writes to Venus feedback buffers are not automatically
          * visible through WineHua's explicit Guest/Host shadow mapping.
          * Query the real Host objects instead of polling stale Guest words. */
-        "VN_PERF=no_fence_feedback,no_query_feedback",
+        /* This Guest Mesa/Host virglrenderer runtime uses WineHua's remote
+         * shared-ring transport. Per-thread Venus rings can corrupt that
+         * transport (the Host decoder observes an invalid command length),
+         * so advertise the runtime capability here for every DXVK version.
+         * Re-enable multi-ring only after a replacement Venus runtime passes
+         * the x86/x64 command-stream qualification gate. */
+        "VN_PERF=" + std::string(modern26
+            ? "no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring"
+            : "no_fence_feedback,no_query_feedback,no_multi_ring"),
         "WINEDLLOVERRIDES=d3d11=n;dxgi=n",
-        "DXVK_WINEHUA_COMMAND_QUERY_RESET=1",
-        "DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED=1",
-        /* Prefer the native RGBA8 SNORM render-target path. On devices such
-         * as Maleoon where sampling is supported but color attachment usage
-         * is not, DXVK may substitute its qualified RGBA16F backing image.
-         * Per-process diagnostics can still override this with 0. */
-        "DXVK_WINEHUA_EMULATE_RGBA8_SNORM_RT=auto",
-        /* This path is qualified by the command-list ownership and continuous
-         * Heaven gates. Keep per-range statistics opt-in so production avoids
-         * diagnostic bookkeeping and log I/O. */
-        "DXVK_WINEHUA_BATCH_MAPPED_FLUSH=1",
         "VN_WINEHUA_REMOTE_MEMORY_SYNC=1",
         "WINEDLLPATH=" + wineDllPath,
         "WINEDLLDIR0=" + overlay64,
         "WINEDLLDIR1=" + overlay86,
     };
     for (const std::string& line : managed) UpsertEnvLine(env, line);
+    if (!legacy) return;
+
+    const std::vector<std::string> legacyCompatibility = {
+        "WINEHUA_DXVK_RELAXED_FEATURES=1",
+        "DXVK_WINEHUA_COMMAND_QUERY_RESET=1",
+        "DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED=1",
+        /* Prefer the native RGBA8 SNORM render-target path. On devices such
+         * as Maleoon where sampling is supported but color attachment usage
+         * is not, DXVK may substitute its qualified RGBA16F backing image. */
+        "DXVK_WINEHUA_EMULATE_RGBA8_SNORM_RT=auto",
+        "DXVK_WINEHUA_BATCH_MAPPED_FLUSH=1",
+    };
+    for (const std::string& line : legacyCompatibility) UpsertEnvLine(env, line);
 }
 
 static bool ShouldSerializeEntryParamEnv(const std::string& envLine) {
