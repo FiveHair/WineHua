@@ -25,6 +25,12 @@ static inline void SetBox64PerfEnv() {
     setenv("BOX64_DYNAREC_FORWARD", "1024", 1);
     setenv("BOX64_DYNAREC_WEAKBARRIER", "2", 1);
     setenv("BOX64_AVX", "0", 1);
+    // Box64 0.4.3 的 dynarec 对 AES-NI/PCLMULQDQ (GnuTLS AES-GCM 加速路径)
+    // 的翻译有误: 解密得到乱码 (HTTPS 12152/400) 或 access violation。
+    // 关闭模拟 cpuid 中的这两个特性位后, GnuTLS/nettle 回退纯 C 实现,
+    // dynarec 对普通标量代码翻译正确, TLS 即恢复正常 (2026-08 实测)。
+    setenv("BOX64_AES", "0", 1);
+    setenv("BOX64_PCLMULQDQ", "0", 1);
     // 关闭 box64 的 PE Volatile Metadata 解析 (默认开启), 原因:
     // box64 的 my_mmap64 (wrappedlibc.c) 对 Wine 每个首次 mmap 的文件调用
     // ParseVolatileMetadata (src/tools/pe_tools.c), 该函数只校验 MZ 魔数、
@@ -50,6 +56,10 @@ inline void AppendBox64PerfStrings(std::vector<std::string>& env) {
     env.push_back("BOX64_DYNAREC_FORWARD=1024");
     env.push_back("BOX64_DYNAREC_WEAKBARRIER=2");
     env.push_back("BOX64_AVX=0");
+    // 与 SetBox64PerfEnv() 保持一致: 屏蔽模拟 cpuid 的 AES-NI/PCLMULQDQ,
+    // 避免 Box64 dynarec 对 GnuTLS AES-GCM 加速路径的误译 (HTTPS 乱码/崩溃)。
+    env.push_back("BOX64_AES=0");
+    env.push_back("BOX64_PCLMULQDQ=0");
     // 关闭 Volatile Metadata 解析, 详细原因见上方 SetBox64PerfEnv() 注释
     // (box64 pe_tools.c 对 DOS MZ exe 无边界检查 → explorer 浏览目录挂死)
     env.push_back("BOX64_DYNAREC_VOLATILE_METADATA=0");
