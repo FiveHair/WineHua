@@ -48,7 +48,19 @@ struct Index {
     const mirror = (): void => {
       this.state = env.engineState;
       this.sessionAlive = env.sessionAlive;
+      // prefixReady 跳变驱动文件区: 1.0.5 靠 refreshPrefix/waitForPrefix 在
+      // 就绪时 listDir, engine service 化后该联动丢失 (回归) — 就绪瞬间
+      // (含 aboutToAppear 时已就绪的首次镜像) 重置浏览位置并加载 C: 根目录;
+      // 变为未就绪 (重置 Wine 删 prefix) 时清空, 避免展示已失效的目录内容
+      const wasReady = this.prefixReady;
       this.prefixReady = env.prefixReady;
+      if (this.prefixReady && !wasReady) {
+        this.curDir = DRIVE_C;
+        this.dirStack = [];
+        this.listDir(DRIVE_C);
+      } else if (!this.prefixReady) {
+        this.entries = [];
+      }
       this.statusText = env.statusText;
       this.initOverlayText = env.initOverlayText;
       this.initOverlayVisible = env.initOverlayVisible;
