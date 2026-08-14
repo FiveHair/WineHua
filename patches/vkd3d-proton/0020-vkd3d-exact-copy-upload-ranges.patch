@@ -1,0 +1,202 @@
+From 5dc157e5b4b11af2b96e5351ef19b2da3807eac8 Mon Sep 17 00:00:00 2001
+From: WineHua Diagnostics <winehua@example.invalid>
+Date: Thu, 13 Aug 2026 16:05:00 +0800
+Subject: [PATCH] vkd3d: publish exact CopyBufferRegion upload ranges
+
+Keep the existing full-resource persistent-map registration as the default.
+Under the diagnostic-only opt-in, retain mapped upload source ranges on each
+command list and publish them before queuing ExecuteCommandLists.
+---
+ libs/vkd3d/command.c       | 98 ++++++++++++++++++++++++++++++++++++++++
+ libs/vkd3d/resource.c      | 10 ++++-
+ libs/vkd3d/vkd3d_private.h |  6 +++
+ 3 files changed, 113 insertions(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -4050,6 +4050,7 @@ ULONG STDMETHODCALLTYPE d3d12_command_list_Release(d3d12_command_list_iface *ifa
+         vkd3d_free(list->query_ranges);
+         vkd3d_free(list->active_queries);
+         vkd3d_free(list->pending_queries);
++        vkd3d_free(list->winehua_exact_upload_ranges);
+         vkd3d_free(list->dsv_resource_tracking);
+         vkd3d_free_aligned(list);
+ 
+@@ -4445,6 +4446,7 @@ static void d3d12_command_list_reset_internal_state(struct d3d12_command_list *l
+     list->query_ranges_count = 0;
+     list->active_queries_count = 0;
+     list->pending_queries_count = 0;
++    list->winehua_exact_upload_range_count = 0;
+     list->dsv_resource_tracking_count = 0;
+     list->tracked_copy_buffer_count = 0;
+ 
+@@ -5740,6 +5742,47 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
+         VK_CALL(vkCmdDispatchIndirect(list->vk_command_buffer, scratch.buffer, scratch.offset));
+ }
+ 
++static bool vkd3d_winehua_exact_copy_upload_ranges(void)
++{
++    const char *value = getenv("VKD3D_WINEHUA_EXACT_COPY_UPLOAD_RANGES");
++
++    return value && value[0] == '1' && !value[1];
++}
++
++static void d3d12_command_list_track_exact_copy_upload_range(struct d3d12_command_list *list,
++        struct d3d12_resource *resource, UINT64 offset, UINT64 size)
++{
++    VkMappedMemoryRange mapped_range;
++    D3D12_RANGE range;
++
++    if (!vkd3d_winehua_exact_copy_upload_ranges()
++            || resource->heap_properties.Type != D3D12_HEAP_TYPE_UPLOAD || !size)
++        return;
++
++    if (offset > SIZE_MAX || size > SIZE_MAX - offset)
++    {
++        d3d12_command_list_mark_as_invalid(list,
++                "WineHua exact upload range overflows SIZE_T.\n");
++        return;
++    }
++
++    range.Begin = (SIZE_T)offset;
++    range.End = (SIZE_T)(offset + size);
++    if (!d3d12_resource_get_mapped_memory_range(resource, 0, &range, &mapped_range))
++        return;
++
++    if (!vkd3d_array_reserve((void **)&list->winehua_exact_upload_ranges,
++            &list->winehua_exact_upload_ranges_size,
++            list->winehua_exact_upload_range_count + 1, sizeof(mapped_range)))
++    {
++        d3d12_command_list_mark_as_invalid(list,
++                "Failed to allocate WineHua exact upload range.\n");
++        return;
++    }
++
++    list->winehua_exact_upload_ranges[list->winehua_exact_upload_range_count++] = mapped_range;
++}
++
+ static void STDMETHODCALLTYPE d3d12_command_list_CopyBufferRegion(d3d12_command_list_iface *iface,
+         ID3D12Resource *dst, UINT64 dst_offset, ID3D12Resource *src, UINT64 src_offset, UINT64 byte_count)
+ {
+@@ -5762,6 +5805,7 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyBufferRegion(d3d12_command_
+ 
+     d3d12_command_list_track_resource_usage(list, dst_resource, true);
+     d3d12_command_list_track_resource_usage(list, src_resource, true);
++    d3d12_command_list_track_exact_copy_upload_range(list, src_resource, src_offset, byte_count);
+ 
+     d3d12_command_list_end_current_render_pass(list, true);
+ 
+@@ -10495,6 +10539,39 @@ static void STDMETHODCALLTYPE d3d12_command_queue_CopyTileMappings(ID3D12Command
+     d3d12_command_queue_add_submission(command_queue, &sub);
+ }
+ 
++static HRESULT d3d12_command_queue_flush_exact_upload_ranges(
++        struct d3d12_command_queue *command_queue, UINT command_list_count,
++        ID3D12CommandList * const *command_lists)
++{
++    const struct vkd3d_vk_device_procs *vk_procs = &command_queue->device->vk_procs;
++    struct d3d12_command_list *cmd_list;
++    VkResult vr;
++    unsigned int i;
++
++    if (!vkd3d_winehua_exact_copy_upload_ranges())
++        return S_OK;
++
++    for (i = 0; i < command_list_count; ++i)
++    {
++        cmd_list = unsafe_impl_from_ID3D12CommandList(command_lists[i]);
++        if (!cmd_list->winehua_exact_upload_range_count)
++            continue;
++        if (cmd_list->winehua_exact_upload_range_count > UINT32_MAX)
++            return E_OUTOFMEMORY;
++
++        vr = VK_CALL(vkFlushMappedMemoryRanges(command_queue->device->vk_device,
++                (uint32_t)cmd_list->winehua_exact_upload_range_count,
++                cmd_list->winehua_exact_upload_ranges));
++        if (vr != VK_SUCCESS)
++            return hresult_from_vk_result(vr);
++
++        TRACE("WineHua published %zu exact CopyBufferRegion upload ranges.\n",
++                cmd_list->winehua_exact_upload_range_count);
++    }
++
++    return S_OK;
++}
++
+ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12CommandQueue *iface,
+         UINT command_list_count, ID3D12CommandList * const *command_lists)
+ {
+@@ -10580,6 +10657,18 @@ static void STDMETHODCALLTYPE d3d12_command_queue_ExecuteCommandLists(ID3D12Comma
+             sub.execute.debug_capture = true;
+     }
+ 
++    if (FAILED(hr = d3d12_command_queue_flush_exact_upload_ranges(
++            command_queue, command_list_count, command_lists)))
++    {
++        for (i = 0; i < command_list_count; ++i)
++            InterlockedDecrement(outstanding[i]);
++        vkd3d_free(outstanding);
++        vkd3d_free(buffers);
++        d3d12_device_mark_as_removed(command_queue->device, hr,
++                "Failed to publish exact CopyBufferRegion upload ranges.\n");
++        return;
++    }
++
+     /* Append a full GPU barrier between submissions.
+      * This command buffer is SIMULTANEOUS_BIT. */
+     buffers[j++] = command_queue->vkd3d_queue->barrier_command_buffer;
+diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
+--- a/libs/vkd3d/resource.c
++++ b/libs/vkd3d/resource.c
+@@ -1518,7 +1518,14 @@ static bool vkd3d_winehua_force_coherent_map_sync(void)
+     return value && value[0] == '1' && !value[1];
+ }
+ 
+-static bool d3d12_resource_get_mapped_memory_range(struct d3d12_resource *resource,
++static bool vkd3d_winehua_exact_copy_upload_ranges(void)
++{
++    const char *value = getenv("VKD3D_WINEHUA_EXACT_COPY_UPLOAD_RANGES");
++
++    return value && value[0] == '1' && !value[1];
++}
++
++bool d3d12_resource_get_mapped_memory_range(struct d3d12_resource *resource,
+         UINT subresource, const D3D12_RANGE *range, VkMappedMemoryRange *vk_mapped_range)
+ {
+     const struct d3d12_device *device = resource->device;
+@@ -1664,7 +1671,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_resource_Map(d3d12_resource_iface *iface,
+      * copying the complete VkDeviceMemory allocator. Readback heaps remain
+      * excluded so stale Guest shadow data cannot overwrite Host GPU writes. */
+     if (vkd3d_winehua_force_coherent_map_sync()
+-            && resource->heap_properties.Type == D3D12_HEAP_TYPE_UPLOAD)
++            && resource->heap_properties.Type == D3D12_HEAP_TYPE_UPLOAD
++            && !vkd3d_winehua_exact_copy_upload_ranges())
+     {
+         const D3D12_RANGE write_intent_range = {0, (SIZE_T)resource->desc.Width};
+         d3d12_resource_flush_range(resource, sub_resource, &write_intent_range);
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -921,6 +921,8 @@ static inline VkImageLayout d3d12_resource_pick_layout(const struct d3d12_resour
+ LONG64 vkd3d_allocate_cookie();
+ 
+ bool d3d12_resource_is_cpu_accessible(const struct d3d12_resource *resource);
++bool d3d12_resource_get_mapped_memory_range(struct d3d12_resource *resource,
++        UINT subresource, const D3D12_RANGE *range, VkMappedMemoryRange *vk_mapped_range);
+ void d3d12_resource_promote_desc(const D3D12_RESOURCE_DESC *desc, D3D12_RESOURCE_DESC1 *desc1);
+ HRESULT d3d12_resource_validate_desc(const D3D12_RESOURCE_DESC1 *desc, struct d3d12_device *device);
+ VkImageSubresource d3d12_resource_get_vk_subresource(const struct d3d12_resource *resource,
+@@ -2066,6 +2068,10 @@ struct d3d12_command_list
+     size_t pending_queries_size;
+     size_t pending_queries_count;
+ 
++    VkMappedMemoryRange *winehua_exact_upload_ranges;
++    size_t winehua_exact_upload_ranges_size;
++    size_t winehua_exact_upload_range_count;
++
+     LONG *outstanding_submissions_count;
+ 
+     const struct vkd3d_descriptor_metadata_types *cbv_srv_uav_descriptors_types;
+-- 
+2.43.0

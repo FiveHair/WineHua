@@ -1017,6 +1017,13 @@ struct Index {
     environment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
     const diagnosticVkd3d = this.isVkd3dExperiment() ||
       this.perfProfileText === 'shadow-precise-direct-fence';
+    const exactCopyUploadRanges =
+      this.perfProfileText === 'vkd3d-exact-copy-upload-ranges' ||
+      this.perfProfileText === 'vkd3d-exact-gpu-upload' ||
+      this.perfProfileText === 'vkd3d-exact-frame-timeline' ||
+      this.perfProfileText === 'vkd3d-exact-copy-upload-ranges-sync-flush' ||
+      this.perfProfileText === 'vkd3d-exact-copy-upload-ranges-host-trace' ||
+      this.perfProfileText === 'vkd3d-exact-copy-upload-ranges-precise-shadow';
     /* The vtest bridge has distinct Host and Guest mappings, so feedback
      * slots cannot establish a readback dependency here. Product VKD3D uses
      * renderer events and falls back to local polling; a blocking Host wait
@@ -1027,6 +1034,9 @@ struct Index {
       'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
     environment['VN_WINEHUA_EVENT_FENCE_WAIT'] = diagnosticVkd3d ? '0' : '1';
     environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = diagnosticVkd3d ? '1' : '0';
+    // Direct Host vkWaitSemaphores blocks the single primary Venus ring and
+    // is retained only as an explicit diagnostic override.
+    environment['VN_WINEHUA_DIRECT_SEMAPHORE_WAIT'] = '0';
     // Temporary bounded tracing for the VKD3D fence/event transport audit.
     environment['VN_WINEHUA_PERF_SUMMARY'] = '1';
     environment['WINEHUA_VTEST_PRESENT_PERF_SUMMARY'] = '1';
@@ -1038,12 +1048,24 @@ struct Index {
       // Force the hash-verified DLL staged beside the microtest. Without an
       // explicit override Wine may satisfy LoadLibrary("d3d12.dll") with its
       // builtin module, which would invalidate the VKD3D experiment evidence.
-      environment['WINEDLLOVERRIDES'] = requiresVkd3dRuntime ? 'd3d12=n' : 'd3d12=n,b';
+      environment['WINEDLLOVERRIDES'] = requiresVkd3dRuntime
+        ? 'd3d12=n;d3d11=n;dxgi=n'
+        : 'd3d12=n,b';
       environment['VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC'] = '1';
       environment['VN_WINEHUA_PERSISTENT_MAP_SYNC'] = '1';
       /* Flush commands stay ordered before QueueSubmit on the primary ring,
        * but do not wait for one Host reply per mapped upload allocation. */
       environment['VN_WINEHUA_ASYNC_MEMORY_FLUSH'] = '1';
+      /* Ordinary VKD3D game launches do not pass through SmokeRunner. Keep
+       * the exact-range producer and consumer paired here so selecting the
+       * profile cannot consume ranges while VKD3D still publishes only its
+       * legacy whole-map registrations. */
+      if (exactCopyUploadRanges) {
+        environment['VKD3D_WINEHUA_EXACT_COPY_UPLOAD_RANGES'] = '1';
+        environment['VN_WINEHUA_CONSUME_PERSISTENT_FLUSH_RANGES'] = '1';
+        if (this.perfProfileText === 'vkd3d-exact-copy-upload-ranges-sync-flush')
+          environment['VN_WINEHUA_ASYNC_MEMORY_FLUSH'] = '0';
+      }
       environment['VN_WINEHUA_PERSISTENT_MAP_SYNC_TRACE'] = diagnosticVkd3d ? '1' : '0';
       /* A frame emits several ring submissions inside the normal 1 ms
        * notification-coalescing interval. If the Host becomes idle between
@@ -1209,7 +1231,9 @@ struct Index {
       this.sessionPerfProfile === 'shadow-precise-direct-fence' ?
       'shadow-precise-direct-fence' :
       (this.sessionD3dBackend === 'vkd3d_limited_500k' ?
-        'shadow-precise' : this.sessionPerfProfile);
+        (this.sessionPerfProfile.indexOf('vkd3d-exact-') === 0 ?
+          this.sessionPerfProfile : 'shadow-precise') :
+        this.sessionPerfProfile);
     testNapi.setHostShadowProfile(hostShadowProfile);
     hilog.info(DOMAIN, 'Experiment', 'host shadow profile=%{public}s experiment=%{public}s',
       hostShadowProfile, this.smokeRequest.experimentId);

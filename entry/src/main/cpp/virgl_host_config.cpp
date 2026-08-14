@@ -105,6 +105,10 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
      * across the guest, vtest and Host presenter boundary. */
     const bool presentImageTrace = config.shadowTrace == "present-image-trace" ||
         config.shadowTrace == "vkd3d-gate-c";
+    /* Trace the staged shadow-to-host copy without enabling the capture
+     * profile's GPU-upload path. This keeps the exact-range A/B otherwise
+     * identical to the product full-shadow configuration. */
+    const bool hostCopyTrace = config.shadowTrace == "host-copy-trace";
     const bool gpuFrameProfile = config.shadowTrace == "gpu-frame-profile";
     const bool frameTimeline = config.shadowTrace == "frame-timeline";
     const bool sampledPerf =
@@ -168,7 +172,8 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
               (captureTrace || gateCTrace) ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_SHADOW_FROM_HOST", fromHostMode);
     AppendEnv(params, "VKR_WINEHUA_SHADOW_TO_HOST", toHostMode);
-    AppendEnv(params, "VKR_WINEHUA_SHADOW_TRACE", captureTrace ? "1" : "0");
+    AppendEnv(params, "VKR_WINEHUA_SHADOW_TRACE",
+              (captureTrace || hostCopyTrace) ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_BGRA_ARRAY_RGBA", bgraArrayTrace ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_PERF_SUMMARY", perfSummary ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_PERF_SAMPLE_INTERVAL", sampledPerf ? "120" : "0");

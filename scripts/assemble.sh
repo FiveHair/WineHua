@@ -266,20 +266,10 @@ assemble_pad() {
         err "Vulkan headers missing; initialize DXVK Modern, DXVK, or Mesa before assembly"
     VULKAN_INCLUDE="$graphics_probe_header" bash "$SCRIPT_DIR/build_graphics_probes.sh"
     local graphics_probe_root="$BUILD_DIR/probes"
-    [ -s "$graphics_probe_root/winehua_vulkan_pso_storm.exe" ] || \
-        err "Vulkan PSO storm probe missing: $graphics_probe_root/winehua_vulkan_pso_storm.exe"
     [ -s "$graphics_probe_root/winehua_d3d12_persistent_upload.exe" ] || \
         err "D3D12 persistent upload probe missing: $graphics_probe_root/winehua_d3d12_persistent_upload.exe"
-    [ -s "$graphics_probe_root/pso_storm.vert.spv" ] || \
-        err "PSO storm vertex shader missing: $graphics_probe_root/pso_storm.vert.spv"
-    [ -s "$graphics_probe_root/pso_storm.frag.spv" ] || \
-        err "PSO storm fragment shader missing: $graphics_probe_root/pso_storm.frag.spv"
-    cp "$graphics_probe_root/winehua_vulkan_pso_storm.exe" \
-        "$smoke_dir/x64/winehua_vulkan_pso_storm.exe"
     cp "$graphics_probe_root/winehua_d3d12_persistent_upload.exe" \
         "$smoke_dir/x64/winehua_d3d12_persistent_upload.exe"
-    cp "$graphics_probe_root/pso_storm.vert.spv" "$smoke_dir/assets/pso_storm.vert.spv"
-    cp "$graphics_probe_root/pso_storm.frag.spv" "$smoke_dir/assets/pso_storm.frag.spv"
     local cube_source="$WINEHUA/smoke/winehua_d3d_switch_cube.c"
     x86_64-w64-mingw32-gcc -O2 -s -mwindows -o \
         "$smoke_dir/x64/winehua_d3d_switch_cube.exe" "$cube_source" \
@@ -394,7 +384,7 @@ assemble_pad() {
         cp "$smoke32" "$smoke_dir/x86/$smoke_program.exe"
     done
     local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha d3d864_sha cube64_sha diagnostics64_sha driver64_sha requirements64_sha
-    local pso_storm64_sha persistent_upload64_sha pso_storm_vert_sha pso_storm_frag_sha
+    local persistent_upload64_sha
     local audio32_sha graphics32_sha vulkan32_sha d3d1132_sha d3d832_sha cube32_sha diagnostics32_sha driver32_sha requirements32_sha
     local storage_write_sha storage_read_sha image_fetch_sha combined_sample_sha separated_sample_sha
     local vkd3d64_d3d12_sha vkd3d64_smoke_sha
@@ -407,10 +397,7 @@ assemble_pad() {
     diagnostics64_sha="$(sha256sum "$smoke_dir/x64/winehua_gpu_diagnostics.exe" | awk '{print $1}')"
     driver64_sha="$(sha256sum "$smoke_dir/x64/winehua_win32_driver.exe" | awk '{print $1}')"
     requirements64_sha="$(sha256sum "$smoke_dir/x64/winehua_dxvk26_requirements.exe" | awk '{print $1}')"
-    pso_storm64_sha="$(sha256sum "$smoke_dir/x64/winehua_vulkan_pso_storm.exe" | awk '{print $1}')"
     persistent_upload64_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d12_persistent_upload.exe" | awk '{print $1}')"
-    pso_storm_vert_sha="$(sha256sum "$smoke_dir/assets/pso_storm.vert.spv" | awk '{print $1}')"
-    pso_storm_frag_sha="$(sha256sum "$smoke_dir/assets/pso_storm.frag.spv" | awk '{print $1}')"
     audio32_sha="$(sha256sum "$smoke_dir/x86/winehua_audio_smoke.exe" | awk '{print $1}')"
     graphics32_sha="$(sha256sum "$smoke_dir/x86/winehua_graphics_smoke.exe" | awk '{print $1}')"
     vulkan32_sha="$(sha256sum "$smoke_dir/x86/winehua_vulkan_smoke.exe" | awk '{print $1}')"
@@ -504,7 +491,6 @@ EOF
     "x64/winehua_gpu_diagnostics.exe": "$diagnostics64_sha",
     "x64/winehua_win32_driver.exe": "$driver64_sha",
     "x64/winehua_dxvk26_requirements.exe": "$requirements64_sha",
-    "x64/winehua_vulkan_pso_storm.exe": "$pso_storm64_sha",
     "x64/winehua_d3d12_persistent_upload.exe": "$persistent_upload64_sha",
     "x64/winehua_d3d12_smoke.exe": "$vkd3d64_smoke_sha",
     "x64/triangle.exe": "$vkd3d_upstream_triangle_sha",
@@ -522,9 +508,7 @@ EOF
     "assets/venus_storage_read.spv": "$storage_read_sha",
     "assets/venus_image_fetch.spv": "$image_fetch_sha",
     "assets/venus_combined_sample.spv": "$combined_sample_sha",
-    "assets/venus_separated_sample.spv": "$separated_sample_sha",
-    "assets/pso_storm.vert.spv": "$pso_storm_vert_sha",
-    "assets/pso_storm.frag.spv": "$pso_storm_frag_sha"
+    "assets/venus_separated_sample.spv": "$separated_sample_sha"
   }
 }
 EOF
@@ -655,24 +639,33 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
     # program root used by runHostProgram. It remains opt-in test code and is
     # never part of normal startup or the production present path.
     NATIVE_ARCH="$NATIVE_ARCH" bash "$SCRIPT_DIR/build_ohos_nativebuffer_probe.sh"
-    local nativebuffer_probe="$BUILD_DIR/probes/$NATIVE_ARCH/winehua_ohos_nativebuffer_vulkan_probe"
-    [ -s "$nativebuffer_probe" ] || err "NativeBuffer Vulkan probe missing: $nativebuffer_probe"
+    local nativebuffer_probe="$host_vulkan_root/bin/winehua_ohos_nativebuffer_vulkan_probe"
+    local nativebuffer_module="$host_vulkan_root/lib/libwinehua_ohos_nativebuffer_vulkan_probe.so"
+    [ -s "$nativebuffer_probe" ] || err "NativeBuffer Vulkan marker missing: $nativebuffer_probe"
+    [ -s "$nativebuffer_module" ] || err "NativeBuffer Vulkan module missing: $nativebuffer_module"
     cp "$nativebuffer_probe" "$wine_data/bin/host_vulkan/bin/winehua_ohos_nativebuffer_vulkan_probe"
-    chmod 0755 "$wine_data/bin/host_vulkan/bin/winehua_ohos_nativebuffer_vulkan_probe"
-    local nativebuffer_probe_sha
+    cp "$nativebuffer_module" "$wine_data/bin/host_vulkan/lib/libwinehua_ohos_nativebuffer_vulkan_probe.so"
+    local nativebuffer_probe_sha nativebuffer_module_sha
     nativebuffer_probe_sha="$(sha256sum "$nativebuffer_probe" | awk '{print $1}')"
-    python3 - "$wine_data/bin/host_vulkan/manifest.json" "$nativebuffer_probe_sha" <<'PY'
+    nativebuffer_module_sha="$(sha256sum "$nativebuffer_module" | awk '{print $1}')"
+    python3 - "$wine_data/bin/host_vulkan/manifest.json" \
+        "$nativebuffer_probe_sha" "$nativebuffer_module_sha" <<'PY'
 import json
 import sys
 
-path, digest = sys.argv[1:]
+path, marker_digest, module_digest = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 manifest.setdefault("files", {})[
-    "bin/winehua_ohos_nativebuffer_vulkan_probe"] = digest
+    "bin/winehua_ohos_nativebuffer_vulkan_probe"] = marker_digest
+manifest["files"][
+    "lib/libwinehua_ohos_nativebuffer_vulkan_probe.so"] = module_digest
 manifest.setdefault("diagnostics", {})["nativeBufferVulkanProbe"] = {
     "path": "bin/winehua_ohos_nativebuffer_vulkan_probe",
-    "sha256": digest,
+    "module": "lib/libwinehua_ohos_nativebuffer_vulkan_probe.so",
+    "entryPoint": "winehua_host_probe_main",
+    "sha256": marker_digest,
+    "moduleSha256": module_digest,
     "defaultStartup": False,
 }
 with open(path, "w", encoding="utf-8") as stream:

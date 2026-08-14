@@ -32,6 +32,7 @@ add_library(entry SHARED
     wine_launch.cpp
     wine_exe.cpp
     host_vulkan_probe.cpp
+    host_nativebuffer_probe.cpp
     broker.cpp
     ncp_dispatch.cpp
     perf_utils.cpp

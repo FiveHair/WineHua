@@ -215,6 +215,12 @@ export default class EntryAbility extends UIAbility {
       'shadow-precise-dirty-ring-frame-assoc-trace',
       'shadow-precise-dirty-ring-bgra-array-trace',
       'shadow-precise-dirty-ring-present-image-trace',
+      'vkd3d-exact-copy-upload-ranges',
+      'vkd3d-exact-copy-upload-ranges-sync-flush',
+      'vkd3d-exact-copy-upload-ranges-host-trace',
+      'vkd3d-exact-copy-upload-ranges-precise-shadow',
+      'vkd3d-exact-gpu-upload',
+      'vkd3d-exact-frame-timeline',
       'shadow-precise-strong-ring-trace', 'shadow-precise-strong-ring-perf',
       'shadow-precise-strong-ring-async-present',
       'shadow-precise-strong-ring-fence-poll',
@@ -222,7 +228,8 @@ export default class EntryAbility extends UIAbility {
       'shadow-precise-direct-fence', 'shadow-precise-retain-shmem',
       'shadow-precise-cpu-upload']
       .indexOf(requestedPerfProfile) >= 0 ? requestedPerfProfile : 'baseline';
-    this.contentPage = mode === 'smoke' && suite === 'host-vulkan' ?
+    this.contentPage = mode === 'smoke' &&
+      (suite === 'host-vulkan' || suite === 'host-nativebuffer') ?
       'pages/HostVulkanSmoke' : 'pages/Index';
     const request = JSON.stringify({
       mode: mode,

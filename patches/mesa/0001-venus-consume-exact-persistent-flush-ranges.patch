@@ -1,0 +1,100 @@
+diff --git a/src/virtio/vulkan/vn_device_memory.c b/src/virtio/vulkan/vn_device_memory.c
+index 04d5aec..a13ca02 100644
+--- a/src/virtio/vulkan/vn_device_memory.c
++++ b/src/virtio/vulkan/vn_device_memory.c
+@@ -85,6 +85,20 @@ vn_winehua_persistent_map_verbose_enabled(void)
+    return enabled != 0;
+ }
+ 
++static bool
++vn_winehua_consume_persistent_flush_ranges_enabled(void)
++{
++   static atomic_int cached = ATOMIC_VAR_INIT(-1);
++   int enabled = atomic_load_explicit(&cached, memory_order_relaxed);
++   if (enabled < 0) {
++      const char *value =
++         os_get_option("VN_WINEHUA_CONSUME_PERSISTENT_FLUSH_RANGES");
++      enabled = value && value[0] == '1' && !value[1];
++      atomic_store_explicit(&cached, enabled, memory_order_relaxed);
++   }
++   return enabled != 0;
++}
++
+ static const char *
+ vn_winehua_smoke_label(const char *name)
+ {
+@@ -241,6 +255,9 @@ vn_device_memory_flush_persistent_mappings(struct vn_device *dev)
+    uint32_t allocation_count = 0;
+    uint32_t whole_map_count = 0;
+    uint64_t flush_bytes = 0;
++   bool all_flushes_succeeded = true;
++   const bool consume_ranges =
++      vn_winehua_consume_persistent_flush_ranges_enabled();
+    const bool trace = vn_winehua_persistent_map_trace_enabled();
+    const bool verbose = trace &&
+       vn_winehua_persistent_map_verbose_enabled();
+@@ -274,6 +291,14 @@ vn_device_memory_flush_persistent_mappings(struct vn_device *dev)
+           mem->map_end <= mem->map_offset)
+          continue;
+ 
++      /* Exact-range mode relies on an explicit vkFlushMappedMemoryRanges call
++       * before each D3D12 ExecuteCommandLists. Once a recorded range has been
++       * replayed, a later fence-only or bookkeeping submit must not fall back
++       * to the complete persistent mapping. */
++      if (consume_ranges && !mem->persistent_flush_range_overflow &&
++          !mem->persistent_flush_range_count)
++         continue;
++
+       if (trace)
+          allocation_count++;
+       const bool whole_map = mem->persistent_flush_range_overflow ||
+@@ -309,6 +334,7 @@ vn_device_memory_flush_persistent_mappings(struct vn_device *dev)
+             const VkResult result = vn_device_memory_flush_ranges(
+                dev, device, range_count, ranges, false);
+             if (result != VK_SUCCESS) {
++               all_flushes_succeeded = false;
+                vn_log(dev->instance,
+                       "WineHua persistent-map flush batch failed: "
+                       "ranges=%u result=%d", range_count, result);
+@@ -323,12 +349,26 @@ vn_device_memory_flush_persistent_mappings(struct vn_device *dev)
+       const VkResult result = vn_device_memory_flush_ranges(
+          dev, device, range_count, ranges, false);
+       if (result != VK_SUCCESS) {
++         all_flushes_succeeded = false;
+          vn_log(dev->instance,
+                 "WineHua persistent-map flush batch failed: "
+                 "ranges=%u result=%d", range_count, result);
+       }
+       batch_count++;
+    }
++
++   if (consume_ranges && all_flushes_succeeded) {
++      list_for_each_entry(struct vn_device_memory, mem, &dev->mapped_memories,
++                          mapped_head) {
++         if (!mem->persistent_flush_range_count &&
++             !mem->persistent_flush_range_overflow)
++            continue;
++         mem->persistent_flush_range_count = 0;
++         mem->persistent_flush_range_overflow = false;
++         atomic_store_explicit(&mem->persistent_map_write_seen, false,
++                               memory_order_relaxed);
++      }
++   }
+    simple_mtx_unlock(&dev->mapped_memory_mutex);
+ 
+    if (flush_count && trace) {
+@@ -352,11 +392,13 @@ vn_device_memory_flush_persistent_mappings(struct vn_device *dev)
+                 " submit=%" PRIu64
+                 " allocations=%u replayRanges=%u replayBytes=%" PRIu64
+                 " batches=%u wholeMaps=%u guestReplayUs=%" PRIu64
++                " consumed=%u"
+                 " cumulativeRanges=%" PRIu64 " cumulativeBytes=%" PRIu64
+                 " cumulativeBatches=%" PRIu64 " cumulativeWholeMaps=%" PRIu64,
+                 run_id, test_id, submit, allocation_count,
+                 flush_count, flush_bytes, batch_count, whole_map_count,
+-                elapsed_us, total_ranges, total_bytes, total_batches,
++                elapsed_us, (unsigned)(consume_ranges && all_flushes_succeeded),
++                total_ranges, total_bytes, total_batches,
+                 total_whole_maps);
+    }
+ }

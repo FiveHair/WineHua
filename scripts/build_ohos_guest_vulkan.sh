@@ -1020,6 +1020,28 @@ chmod +x "$OUTPUT_ROOT/bin/venus_spirv_replay"
     -o "$OUTPUT_ROOT/bin/venus_heaven_material_replay"
 chmod +x "$OUTPUT_ROOT/bin/venus_heaven_material_replay"
 
+log "--- winehua_vulkan_pso_storm (x86_64-linux-ohos) ---"
+cp -L "$ROOT/smoke/pso_storm.vert.spv" "$SHADER_OUTPUT/pso_storm.vert.spv"
+cp -L "$ROOT/smoke/pso_storm.frag.spv" "$SHADER_OUTPUT/pso_storm.frag.spv"
+"$CLANG" --target="$TARGET" --sysroot="$SYSROOT" \
+    -std=c11 -O2 -Wall -Wextra -Werror -fPIE -fno-emulated-tls \
+    -I"$HEADERS_INSTALL/include" \
+    "$ROOT/smoke/winehua_vulkan_pso_storm.c" \
+    -L"$LOADER_INSTALL/lib" -Wl,-rpath,'$ORIGIN/../lib' \
+    -Wl,--enable-new-dtags -pie -lvulkan -ldl -lpthread \
+    -o "$OUTPUT_ROOT/bin/winehua_vulkan_pso_storm"
+chmod +x "$OUTPUT_ROOT/bin/winehua_vulkan_pso_storm"
+
+log "--- winehua_vulkan_cache_reuse (x86_64-linux-ohos) ---"
+"$CLANG" --target="$TARGET" --sysroot="$SYSROOT" \
+    -std=c11 -O2 -Wall -Wextra -Werror -fPIE -fno-emulated-tls \
+    -I"$HEADERS_INSTALL/include" \
+    "$ROOT/smoke/winehua_vulkan_cache_reuse.c" \
+    -L"$LOADER_INSTALL/lib" -Wl,-rpath,'$ORIGIN/../lib' \
+    -Wl,--enable-new-dtags -pie -lvulkan -ldl -lpthread \
+    -o "$OUTPUT_ROOT/bin/winehua_vulkan_cache_reuse"
+chmod +x "$OUTPUT_ROOT/bin/winehua_vulkan_cache_reuse"
+
 # Optional exact replay of the first Heaven pass-2 material draw. This is a
 # generated diagnostic payload and is only staged when a local capture exists;
 # it never changes the product Vulkan path.
@@ -1118,11 +1140,42 @@ fi
 
 loader_sha="$(sha256sum "$OUTPUT_ROOT/lib/libvulkan.so.1" | awk '{print $1}')"
 icd_sha="$(sha256sum "$OUTPUT_ROOT/lib/libvulkan_virtio.so" | awk '{print $1}')"
-mesa_commit="$(git -c safe.directory="$ROOT/thirdparty/mesa" -C "$ROOT/thirdparty/mesa" rev-parse HEAD)"
+expected_mesa_commit="0a239288f90ba0afe074aa90832d8fd71bd0ffe8"
+mesa_patch_sha256=""
+if git -c safe.directory="$ROOT/thirdparty/mesa" -C "$ROOT/thirdparty/mesa" \
+        rev-parse HEAD >/dev/null 2>&1; then
+    mesa_commit="$(git -c safe.directory="$ROOT/thirdparty/mesa" \
+        -C "$ROOT/thirdparty/mesa" rev-parse HEAD)"
+    if [ -n "$(git -c safe.directory="$ROOT/thirdparty/mesa" \
+            -C "$ROOT/thirdparty/mesa" status --porcelain)" ]; then
+        mesa_patch_sha256="$(git -c safe.directory="$ROOT/thirdparty/mesa" \
+            -C "$ROOT/thirdparty/mesa" diff --binary | sha256sum | awk '{print $1}')"
+        [ -n "${WINEHUA_GUEST_MESA_VERIFIED_PATCH_SHA256:-}" ] || \
+            err "Guest Mesa submodule is dirty without a verified patch hash"
+        [ "$mesa_patch_sha256" = "$WINEHUA_GUEST_MESA_VERIFIED_PATCH_SHA256" ] || \
+            err "Guest Mesa patch drifted: expected $WINEHUA_GUEST_MESA_VERIFIED_PATCH_SHA256, got $mesa_patch_sha256"
+    fi
+else
+    mesa_commit="${WINEHUA_GUEST_MESA_VERIFIED_COMMIT:-}"
+    mesa_patch_sha256="${WINEHUA_GUEST_MESA_VERIFIED_PATCH_SHA256:-}"
+    if [ -z "$mesa_patch_sha256" ]; then
+        [ "${WINEHUA_GUEST_MESA_VERIFIED_CLEAN:-0}" = "1" ] || \
+            err "Guest Mesa Git metadata is unavailable without an externally verified clean source or patch hash"
+    elif [ "${#mesa_patch_sha256}" -ne 64 ] || \
+            [ -n "${mesa_patch_sha256//[0-9a-f]/}" ]; then
+        err "Guest Mesa verified patch SHA-256 is malformed: $mesa_patch_sha256"
+    fi
+fi
+[ "$mesa_commit" = "$expected_mesa_commit" ] || \
+    err "Guest Mesa base drifted: expected $expected_mesa_commit, got $mesa_commit"
 smoke_sha="$(sha256sum "$OUTPUT_ROOT/bin/winehua_guest_vulkan_smoke" | awk '{print $1}')"
 probe_sha="$(sha256sum "$OUTPUT_ROOT/bin/venus_sampled_image_probe" | awk '{print $1}')"
 replay_sha="$(sha256sum "$OUTPUT_ROOT/bin/venus_spirv_replay" | awk '{print $1}')"
 heaven_replay_sha="$(sha256sum "$OUTPUT_ROOT/bin/venus_heaven_material_replay" | awk '{print $1}')"
+pso_storm_sha="$(sha256sum "$OUTPUT_ROOT/bin/winehua_vulkan_pso_storm" | awk '{print $1}')"
+pso_storm_vert_sha="$(sha256sum "$SHADER_OUTPUT/pso_storm.vert.spv" | awk '{print $1}')"
+pso_storm_frag_sha="$(sha256sum "$SHADER_OUTPUT/pso_storm.frag.spv" | awk '{print $1}')"
+cache_reuse_sha="$(sha256sum "$OUTPUT_ROOT/bin/winehua_vulkan_cache_reuse" | awk '{print $1}')"
 cat > "$OUTPUT_ROOT/manifest.json" <<EOF
 {
   "schemaVersion": 1,
@@ -1134,6 +1187,7 @@ cat > "$OUTPUT_ROOT/manifest.json" <<EOF
   "headersCommit": "$HEADERS_COMMIT",
   "guestMesaVersion": "$(cat "$ROOT/thirdparty/mesa/VERSION")",
   "guestMesaCommit": "$mesa_commit",
+  "guestMesaPatchSha256": "$mesa_patch_sha256",
   "transportRequirements": {
     "remoteMemoryShadow": true,
     "multiRing": false,
@@ -1147,8 +1201,12 @@ cat > "$OUTPUT_ROOT/manifest.json" <<EOF
     "bin/venus_sampled_image_probe": "$probe_sha",
     "bin/venus_spirv_replay": "$replay_sha",
     "bin/venus_heaven_material_replay": "$heaven_replay_sha",
+    "bin/winehua_vulkan_pso_storm": "$pso_storm_sha",
+    "bin/winehua_vulkan_cache_reuse": "$cache_reuse_sha",
     "lib/libvulkan.so.1": "$loader_sha",
-    "lib/libvulkan_virtio.so": "$icd_sha"
+    "lib/libvulkan_virtio.so": "$icd_sha",
+    "share/winehua/pso_storm.vert.spv": "$pso_storm_vert_sha",
+    "share/winehua/pso_storm.frag.spv": "$pso_storm_frag_sha"
   }
 }
 EOF
@@ -1160,10 +1218,12 @@ loader_commit=$LOADER_COMMIT
 headers_tag=$HEADERS_TAG
 headers_commit=$HEADERS_COMMIT
 mesa_commit=$mesa_commit
+mesa_patch_sha256=$mesa_patch_sha256
 built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
 file "$OUTPUT_ROOT/bin/winehua_guest_vulkan_smoke" \
-    "$OUTPUT_ROOT/bin/venus_heaven_material_replay" "$OUTPUT_ROOT/lib/libvulkan.so.1" \
+    "$OUTPUT_ROOT/bin/venus_heaven_material_replay" \
+    "$OUTPUT_ROOT/bin/winehua_vulkan_pso_storm" "$OUTPUT_ROOT/lib/libvulkan.so.1" \
     "$OUTPUT_ROOT/lib/libvulkan_virtio.so"
 log "guest Vulkan runtime ready: $OUTPUT_ROOT"

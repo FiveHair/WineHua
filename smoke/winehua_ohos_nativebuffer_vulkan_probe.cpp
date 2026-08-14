@@ -1,6 +1,10 @@
 #define VK_USE_PLATFORM_OHOS 1
 
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
 #include <native_buffer/native_buffer.h>
+#include <native_image/native_image.h>
+#include <native_window/external_window.h>
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
@@ -11,6 +15,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -64,6 +69,8 @@ struct HostBuffer {
 };
 
 struct Result {
+    std::string testId = "ohos-nativebuffer-vulkan";
+    std::string windowSource = "none";
     VkResult instanceResult = VK_NOT_READY;
     VkResult deviceResult = VK_NOT_READY;
     VkResult imageFormatQueryResult = VK_NOT_READY;
@@ -72,6 +79,9 @@ struct Result {
     VkResult importAllocateResult = VK_NOT_READY;
     VkResult importBindResult = VK_NOT_READY;
     VkResult importedVkMapResult = VK_NOT_READY;
+    VkResult persistentVkMapResult = VK_NOT_READY;
+    VkResult persistentVkFlushResult = VK_NOT_READY;
+    VkResult persistentVkInvalidateResult = VK_NOT_READY;
     VkPhysicalDeviceProperties deviceProperties{};
     VkPhysicalDeviceMemoryProperties memoryProperties{};
     uint32_t queueFamily = UINT32_MAX;
@@ -88,6 +98,44 @@ struct Result {
     VkExternalMemoryFeatureFlags imageExternalFeatures = 0;
     uint64_t imageNativeUsage = 0;
     bool nativeAllocated = false;
+    uint32_t nativeAllocationAttempts = 0;
+    bool consumerSurfaceCreated = false;
+    int32_t consumerDefaultSizeResult = -1;
+    int32_t consumerDefaultUsageResult = -1;
+    int32_t consumerListenerResult = -1;
+    bool producerWindowAcquired = false;
+    int32_t producerGeometryResult = -1;
+    int32_t producerFormatResult = -1;
+    int32_t producerUsageResult = -1;
+    int32_t producerTimeoutResult = -1;
+    int32_t producerQueueSizeResult = -1;
+    int32_t producerQueueSize = -1;
+    int32_t producerSurfaceIdResult = -1;
+    uint64_t producerSurfaceId = 0;
+    int32_t producerPreallocateResult = -1;
+    int32_t producerRequestResult = -1;
+    int32_t nativeFromWindowResult = -1;
+    int32_t producerAbortResult = -1;
+    int32_t eglGetDisplayResult = -1;
+    int32_t eglInitializeResult = -1;
+    int32_t eglMajor = 0;
+    int32_t eglMinor = 0;
+    int32_t eglBindApiResult = -1;
+    int32_t eglChooseConfigResult = -1;
+    int32_t eglCreateContextResult = -1;
+    int32_t eglCreateSurfaceResult = -1;
+    int32_t eglMakeCurrentResult = -1;
+    int32_t eglSwapIntervalResult = -1;
+    uint32_t glClearError = GL_NO_ERROR;
+    int32_t eglSwapResult = -1;
+    int32_t eglSwapError = EGL_SUCCESS;
+    int32_t lastFlushedBufferResult = -1;
+    bool lastFlushedBufferPresent = false;
+    int32_t flushedFromWindowResult = -1;
+    int32_t lastFlushedBufferReleaseResult = -1;
+    bool eglProducerConnected = false;
+    uint32_t consumerFrameSignals = 0;
+    std::string nativeSource = "none";
     uint32_t nativeSequence = 0;
     int nativeMapResult = -1;
     int nativeUnmapResult = -1;
@@ -106,15 +154,33 @@ struct Result {
     bool synchronizedGpuToCpuPassed = false;
     bool persistentCpuToGpuPassed = false;
     bool persistentGpuToCpuPassed = false;
+    bool persistentVkCpuToGpuPassed = false;
+    bool persistentVkGpuToCpuPassed = false;
+    bool explicitCacheMaintenanceRequired = false;
     uint64_t synchronizedCpuToGpuMismatches = UINT64_MAX;
     uint64_t synchronizedGpuToCpuMismatches = UINT64_MAX;
     uint64_t persistentCpuToGpuMismatches = UINT64_MAX;
     uint64_t persistentGpuToCpuMismatches = UINT64_MAX;
+    uint64_t persistentVkCpuToGpuMismatches = UINT64_MAX;
+    uint64_t persistentVkGpuToCpuMismatches = UINT64_MAX;
     std::string fatal;
 };
 
 class NativeBufferVulkanProbe {
 public:
+    NativeBufferVulkanProbe(OHNativeWindow* producerWindow = nullptr,
+                            bool ownsProducerWindow = false)
+        : producerWindow_(producerWindow),
+          ownsProducerWindow_(ownsProducerWindow),
+          externalProducerWindow_(producerWindow != nullptr)
+    {
+        if (externalProducerWindow_) {
+            result_.testId = "host-nativebuffer";
+            result_.windowSource = "xcomponent-surface";
+            result_.producerWindowAcquired = true;
+        }
+    }
+
     ~NativeBufferVulkanProbe()
     {
         Cleanup();
@@ -127,19 +193,27 @@ public:
             RunNativeBufferMapping();
             RunBufferImport();
         }
+        ReleaseProbeBacking();
         Emit(outputPath);
-
-        const bool persistent = result_.persistentCpuToGpuPassed && result_.persistentGpuToCpuPassed;
+        const bool persistentVk = result_.persistentVkCpuToGpuPassed &&
+                                  result_.persistentVkGpuToCpuPassed;
         const bool synchronized = result_.synchronizedCpuToGpuPassed &&
                                   result_.synchronizedGpuToCpuPassed;
-        const bool fullUpload = persistent &&
+        const bool fullUpload = result_.persistentVkCpuToGpuPassed &&
             (result_.fullBufferExternalFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT);
         if (!result_.fatal.empty()) return 1;
-        if (fullUpload) return 0;
-        return (persistent || synchronized) ? 2 : 3;
+        if (fullUpload && result_.persistentVkGpuToCpuPassed) return 0;
+        return (persistentVk || result_.persistentVkCpuToGpuPassed ||
+                result_.persistentVkGpuToCpuPassed || synchronized) ? 2 : 3;
     }
 
 private:
+    static void OnConsumerFrameAvailable(void* context)
+    {
+        auto* probe = static_cast<NativeBufferVulkanProbe*>(context);
+        probe->consumerFrameSignals_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     bool InitVulkan()
     {
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
@@ -309,10 +383,12 @@ private:
 
     void RunNativeBufferMapping()
     {
-        OH_NativeBuffer_Config config{};
-        config.width = static_cast<int32_t>(kProbeBytes);
-        config.height = 1;
-        config.format = NATIVEBUFFER_PIXEL_FMT_BLOB;
+        struct AllocationCandidate {
+            int32_t width;
+            int32_t height;
+            int32_t format;
+            int32_t usage;
+        };
         const int32_t usageCandidates[] = {
             NATIVEBUFFER_USAGE_CPU_READ | NATIVEBUFFER_USAGE_CPU_WRITE |
                 NATIVEBUFFER_USAGE_MEM_DMA | NATIVEBUFFER_USAGE_MEM_MMZ_CACHE |
@@ -323,10 +399,83 @@ private:
             NATIVEBUFFER_USAGE_CPU_READ | NATIVEBUFFER_USAGE_CPU_WRITE |
                 NATIVEBUFFER_USAGE_MEM_DMA,
         };
-        for (int32_t usage : usageCandidates) {
-            config.usage = usage;
-            nativeBuffer_ = OH_NativeBuffer_Alloc(&config);
-            if (nativeBuffer_) break;
+        constexpr size_t usageCandidateCount =
+            sizeof(usageCandidates) / sizeof(usageCandidates[0]);
+        std::vector<AllocationCandidate> candidates;
+        candidates.reserve(2 * usageCandidateCount);
+        for (int32_t usage : usageCandidates)
+            candidates.push_back({static_cast<int32_t>(kProbeBytes), 1,
+                                  NATIVEBUFFER_PIXEL_FMT_BLOB, usage});
+        for (int32_t usage : usageCandidates)
+            candidates.push_back({512, 512, NATIVEBUFFER_PIXEL_FMT_RGBA_8888, usage});
+
+        constexpr uint64_t surfaceUsage =
+            NATIVEBUFFER_USAGE_CPU_READ | NATIVEBUFFER_USAGE_CPU_WRITE |
+            NATIVEBUFFER_USAGE_MEM_DMA | NATIVEBUFFER_USAGE_HW_RENDER |
+            NATIVEBUFFER_USAGE_HW_TEXTURE;
+
+        if (!producerWindow_) {
+            consumerSurface_ = OH_ConsumerSurface_Create();
+            result_.consumerSurfaceCreated = consumerSurface_ != nullptr;
+            if (consumerSurface_) {
+                result_.consumerDefaultSizeResult = OH_ConsumerSurface_SetDefaultSize(
+                    consumerSurface_, 512, 512);
+                result_.consumerDefaultUsageResult = OH_ConsumerSurface_SetDefaultUsage(
+                    consumerSurface_, surfaceUsage);
+                OH_OnFrameAvailableListener listener{};
+                listener.context = this;
+                listener.onFrameAvailable = OnConsumerFrameAvailable;
+                result_.consumerListenerResult = OH_NativeImage_SetOnFrameAvailableListener(
+                    consumerSurface_, listener);
+                consumerListenerSet_ = result_.consumerListenerResult == 0;
+                producerWindow_ = OH_NativeImage_AcquireNativeWindow(consumerSurface_);
+                result_.producerWindowAcquired = producerWindow_ != nullptr;
+                if (producerWindow_) result_.windowSource = "consumer-surface";
+            }
+        }
+        if (producerWindow_) {
+            result_.producerGeometryResult = OH_NativeWindow_NativeWindowHandleOpt(
+                producerWindow_, SET_BUFFER_GEOMETRY, 512, 512);
+            result_.producerFormatResult = OH_NativeWindow_NativeWindowHandleOpt(
+                producerWindow_, SET_FORMAT, NATIVEBUFFER_PIXEL_FMT_RGBA_8888);
+            result_.producerUsageResult = OH_NativeWindow_NativeWindowHandleOpt(
+                producerWindow_, SET_USAGE, surfaceUsage);
+            result_.producerTimeoutResult = OH_NativeWindow_NativeWindowHandleOpt(
+                producerWindow_, SET_TIMEOUT, 0);
+            result_.producerQueueSizeResult = OH_NativeWindow_NativeWindowHandleOpt(
+                producerWindow_, GET_BUFFERQUEUE_SIZE, &result_.producerQueueSize);
+            result_.producerSurfaceIdResult = OH_NativeWindow_GetSurfaceId(
+                producerWindow_, &result_.producerSurfaceId);
+            result_.producerPreallocateResult = OH_NativeWindow_PreAllocBuffers(
+                producerWindow_, 3);
+            RunEglProducer(surfaceUsage);
+            if (!nativeBuffer_) {
+                result_.producerRequestResult = OH_NativeWindow_NativeWindowRequestBuffer(
+                    producerWindow_, &windowBuffer_, &windowFenceFd_);
+                if (result_.producerRequestResult == 0 && windowBuffer_) {
+                    if (windowFenceFd_ >= 0) {
+                        close(windowFenceFd_);
+                        windowFenceFd_ = -1;
+                    }
+                    result_.nativeFromWindowResult = OH_NativeBuffer_FromNativeWindowBuffer(
+                        windowBuffer_, &nativeBuffer_);
+                    if (result_.nativeFromWindowResult == 0 && nativeBuffer_)
+                        result_.nativeSource = result_.windowSource;
+                }
+            }
+        }
+        if (!nativeBuffer_) {
+            OH_NativeBuffer_Config config{};
+            for (const auto& candidate : candidates) {
+                ++result_.nativeAllocationAttempts;
+                config = {candidate.width, candidate.height, candidate.format,
+                          candidate.usage, 0};
+                nativeBuffer_ = OH_NativeBuffer_Alloc(&config);
+                if (nativeBuffer_) {
+                    result_.nativeSource = "direct-alloc";
+                    break;
+                }
+            }
         }
         result_.nativeAllocated = nativeBuffer_ != nullptr;
         if (!nativeBuffer_) return;
@@ -351,6 +500,91 @@ private:
         if (OH_NativeBuffer_Map(nativeBuffer_, &mapped) != 0 || !mapped) return;
         result_.nativeRemapPassed = Verify(mapped, 0x11) == 0;
         OH_NativeBuffer_Unmap(nativeBuffer_);
+    }
+
+    void RunEglProducer(uint64_t usage)
+    {
+        if (!producerWindow_) return;
+        if (!externalProducerWindow_) {
+            // This native child is not a guest Wayland/VirGL process. Inherit
+            // no surfaceless selector from the application graphics helpers.
+            unsetenv("EGL_PLATFORM");
+            unsetenv("WAYLAND_DISPLAY");
+        }
+        OH_NativeWindow_NativeWindowHandleOpt(producerWindow_, SET_USAGE, usage);
+        eglDisplay_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        result_.eglGetDisplayResult = eglDisplay_ != EGL_NO_DISPLAY ? 0 : -1;
+        if (eglDisplay_ == EGL_NO_DISPLAY) return;
+        result_.eglInitializeResult = eglInitialize(
+            eglDisplay_, &result_.eglMajor, &result_.eglMinor)
+            == EGL_TRUE ? 0 : eglGetError();
+        if (result_.eglInitializeResult != 0) return;
+        result_.eglBindApiResult = eglBindAPI(EGL_OPENGL_ES_API)
+            == EGL_TRUE ? 0 : eglGetError();
+        if (result_.eglBindApiResult != 0) return;
+        const EGLint attrs[] = {
+            EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8,
+            EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+            EGL_NONE,
+        };
+        EGLint count = 0;
+        EGLConfig config = nullptr;
+        result_.eglChooseConfigResult = eglChooseConfig(
+            eglDisplay_, attrs, &config, 1, &count) == EGL_TRUE && count ? 0 : eglGetError();
+        if (result_.eglChooseConfigResult != 0) return;
+        const EGLint contextAttrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+        eglContext_ = eglCreateContext(eglDisplay_, config, EGL_NO_CONTEXT, contextAttrs);
+        result_.eglCreateContextResult = eglContext_ != EGL_NO_CONTEXT ? 0 : eglGetError();
+        if (result_.eglCreateContextResult != 0) return;
+        eglSurface_ = eglCreateWindowSurface(
+            eglDisplay_, config, reinterpret_cast<EGLNativeWindowType>(producerWindow_), nullptr);
+        result_.eglCreateSurfaceResult = eglSurface_ != EGL_NO_SURFACE ? 0 : eglGetError();
+        if (result_.eglCreateSurfaceResult != 0) return;
+        result_.eglMakeCurrentResult = eglMakeCurrent(
+            eglDisplay_, eglSurface_, eglSurface_, eglContext_) == EGL_TRUE ? 0 : eglGetError();
+        if (result_.eglMakeCurrentResult != 0) return;
+        result_.eglSwapIntervalResult = eglSwapInterval(eglDisplay_, 0)
+            == EGL_TRUE ? 0 : eglGetError();
+        glClearColor(0.125f, 0.25f, 0.5f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        result_.glClearError = glGetError();
+        if (result_.glClearError != GL_NO_ERROR) return;
+        result_.eglSwapResult = eglSwapBuffers(eglDisplay_, eglSurface_) == EGL_TRUE ? 0 : -1;
+        result_.eglSwapError = result_.eglSwapResult == 0 ? EGL_SUCCESS : eglGetError();
+        result_.eglProducerConnected = result_.eglSwapResult == 0;
+        if (!result_.eglProducerConnected) return;
+        float matrix[16]{};
+        int fenceFd = -1;
+        OHNativeWindowBuffer* flushed = nullptr;
+        result_.lastFlushedBufferResult = OH_NativeWindow_GetLastFlushedBufferV2(
+            producerWindow_, &flushed, &fenceFd, matrix);
+        if (fenceFd >= 0) close(fenceFd);
+        result_.lastFlushedBufferPresent = flushed != nullptr;
+        if (result_.lastFlushedBufferResult == 0 && flushed) {
+            flushedWindowBuffer_ = flushed;
+            result_.flushedFromWindowResult = OH_NativeBuffer_FromNativeWindowBuffer(
+                flushedWindowBuffer_, &nativeBuffer_);
+            if (result_.flushedFromWindowResult == 0 && nativeBuffer_)
+                result_.nativeSource = externalProducerWindow_
+                    ? "egl-flushed-xcomponent" : "egl-flushed-surface";
+        }
+    }
+
+    void ReleaseEglProducer()
+    {
+        if (eglDisplay_ != EGL_NO_DISPLAY) {
+            eglMakeCurrent(eglDisplay_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            if (eglSurface_ != EGL_NO_SURFACE) eglDestroySurface(eglDisplay_, eglSurface_);
+            if (eglContext_ != EGL_NO_CONTEXT) eglDestroyContext(eglDisplay_, eglContext_);
+            // The main App shares EGL_DEFAULT_DISPLAY across renderers. Keep
+            // it initialized when this probe runs on a real XComponent.
+            if (!externalProducerWindow_) eglTerminate(eglDisplay_);
+        }
+        eglDisplay_ = EGL_NO_DISPLAY;
+        eglSurface_ = EGL_NO_SURFACE;
+        eglContext_ = EGL_NO_CONTEXT;
     }
 
     void RunBufferImport()
@@ -429,6 +663,7 @@ private:
 
         RunSynchronizedVisibility();
         RunPersistentVisibility();
+        RunPersistentVulkanVisibility();
     }
 
     void RunSynchronizedVisibility()
@@ -472,6 +707,53 @@ private:
             result_.persistentGpuToCpuPassed = result_.persistentGpuToCpuMismatches == 0;
         }
         OH_NativeBuffer_Unmap(nativeBuffer_);
+    }
+
+    void RunPersistentVulkanVisibility()
+    {
+        void* mapping = nullptr;
+        result_.persistentVkMapResult = vkMapMemory(
+            device_, importedMemory_, 0, VK_WHOLE_SIZE, 0, &mapping);
+        if (result_.persistentVkMapResult != VK_SUCCESS || !mapping) return;
+
+        result_.explicitCacheMaintenanceRequired =
+            !(result_.selectedMemoryFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        Fill(mapping, 0xa5);
+        if (result_.explicitCacheMaintenanceRequired) {
+            VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+            range.memory = importedMemory_;
+            range.offset = 0;
+            range.size = VK_WHOLE_SIZE;
+            result_.persistentVkFlushResult =
+                vkFlushMappedMemoryRanges(device_, 1, &range);
+        } else {
+            result_.persistentVkFlushResult = VK_SUCCESS;
+        }
+        if (result_.persistentVkFlushResult == VK_SUCCESS && CopyImportedToReadback()) {
+            result_.persistentVkCpuToGpuMismatches = VerifyHostBuffer(readback_, 0xa5);
+            result_.persistentVkCpuToGpuPassed =
+                result_.persistentVkCpuToGpuMismatches == 0;
+        }
+
+        if (FillHostBuffer(upload_, 0xc7) && CopyUploadToImported()) {
+            if (result_.explicitCacheMaintenanceRequired) {
+                VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+                range.memory = importedMemory_;
+                range.offset = 0;
+                range.size = VK_WHOLE_SIZE;
+                result_.persistentVkInvalidateResult =
+                    vkInvalidateMappedMemoryRanges(device_, 1, &range);
+            } else {
+                result_.persistentVkInvalidateResult = VK_SUCCESS;
+            }
+            if (result_.persistentVkInvalidateResult == VK_SUCCESS) {
+                result_.persistentVkGpuToCpuMismatches = Verify(mapping, 0xc7);
+                result_.persistentVkGpuToCpuPassed =
+                    result_.persistentVkGpuToCpuMismatches == 0;
+            }
+        }
+        vkUnmapMemory(device_, importedMemory_);
     }
 
     uint32_t ExternalQueueFamily() const
@@ -651,16 +933,19 @@ private:
     {
         const bool synchronized = result_.synchronizedCpuToGpuPassed &&
                                   result_.synchronizedGpuToCpuPassed;
-        const bool persistent = result_.persistentCpuToGpuPassed &&
-                                result_.persistentGpuToCpuPassed;
-        const bool fullUpload = persistent &&
-            (result_.fullBufferExternalFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT);
-        const char* status = !result_.fatal.empty() ? "FAIL" : fullUpload ? "PASS" :
-                             (persistent || synchronized) ? "PARTIAL" : "UNSUPPORTED";
+        const bool fullUsage = result_.fullBufferExternalFeatures &
+                               VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+        const bool fullUpload = result_.persistentVkCpuToGpuPassed && fullUsage;
+        const bool readback = result_.persistentVkGpuToCpuPassed;
+        const bool anyDirect = result_.persistentVkCpuToGpuPassed || readback;
+        const bool copyOnly = !anyDirect && synchronized;
+        const char* status = !result_.fatal.empty() ? "FAIL" :
+                             (fullUpload && readback) ? "PASS" :
+                             (anyDirect || synchronized) ? "PARTIAL" : "UNSUPPORTED";
         std::ostringstream out;
         out << "{\n"
             << "  \"schemaVersion\":1,\n"
-            << "  \"testId\":\"ohos-nativebuffer-vulkan\",\n"
+            << "  \"testId\":\"" << result_.testId << "\",\n"
             << "  \"status\":\"" << status << "\",\n"
             << "  \"fatal\":\"" << JsonEscape(result_.fatal.c_str()) << "\",\n"
             << "  \"device\":{\"name\":\""
@@ -691,6 +976,8 @@ private:
             << ",\"imageFeatures\":" << result_.imageExternalFeatures
             << ",\"imageNativeUsage\":" << result_.imageNativeUsage << "},\n"
             << "  \"nativeBuffer\":{\"allocated\":" << JsonBool(result_.nativeAllocated)
+            << ",\"source\":\"" << result_.nativeSource << "\""
+            << ",\"allocationAttempts\":" << result_.nativeAllocationAttempts
             << ",\"sequence\":" << result_.nativeSequence
             << ",\"mapResult\":" << result_.nativeMapResult
             << ",\"unmapResult\":" << result_.nativeUnmapResult
@@ -700,11 +987,59 @@ private:
             << ",\"format\":" << result_.nativeFormat
             << ",\"usage\":" << result_.nativeUsage
             << ",\"stride\":" << result_.nativeStride << "},\n"
+            << "  \"consumerSurface\":{\"created\":"
+            << JsonBool(result_.consumerSurfaceCreated)
+            << ",\"windowSource\":\"" << result_.windowSource << "\""
+            << ",\"defaultSizeResult\":" << result_.consumerDefaultSizeResult
+            << ",\"defaultUsageResult\":" << result_.consumerDefaultUsageResult
+            << ",\"listenerResult\":" << result_.consumerListenerResult
+            << ",\"windowAcquired\":" << JsonBool(result_.producerWindowAcquired)
+            << ",\"geometryResult\":" << result_.producerGeometryResult
+            << ",\"formatResult\":" << result_.producerFormatResult
+            << ",\"usageResult\":" << result_.producerUsageResult
+            << ",\"timeoutResult\":" << result_.producerTimeoutResult
+            << ",\"queueSizeResult\":" << result_.producerQueueSizeResult
+            << ",\"queueSize\":" << result_.producerQueueSize
+            << ",\"surfaceIdResult\":" << result_.producerSurfaceIdResult
+            << ",\"surfaceId\":" << result_.producerSurfaceId
+            << ",\"preallocateResult\":" << result_.producerPreallocateResult
+            << ",\"requestResult\":" << result_.producerRequestResult
+            << ",\"fromWindowResult\":" << result_.nativeFromWindowResult
+            << ",\"abortResult\":" << result_.producerAbortResult
+            << ",\"frameSignals\":" << result_.consumerFrameSignals << "},\n"
+            << "  \"eglProducer\":{\"getDisplayResult\":"
+            << result_.eglGetDisplayResult
+            << ",\"initializeResult\":" << result_.eglInitializeResult
+            << ",\"major\":" << result_.eglMajor
+            << ",\"minor\":" << result_.eglMinor
+            << ",\"bindApiResult\":" << result_.eglBindApiResult
+            << ",\"chooseConfigResult\":" << result_.eglChooseConfigResult
+            << ",\"createContextResult\":" << result_.eglCreateContextResult
+            << ",\"createSurfaceResult\":" << result_.eglCreateSurfaceResult
+            << ",\"makeCurrentResult\":" << result_.eglMakeCurrentResult
+            << ",\"swapIntervalResult\":" << result_.eglSwapIntervalResult
+            << ",\"glClearError\":" << result_.glClearError
+            << ",\"swapResult\":" << result_.eglSwapResult
+            << ",\"swapError\":" << result_.eglSwapError
+            << ",\"producerConnected\":" << JsonBool(result_.eglProducerConnected)
+            << ",\"lastFlushedBufferResult\":"
+            << result_.lastFlushedBufferResult
+            << ",\"lastFlushedBufferPresent\":"
+            << JsonBool(result_.lastFlushedBufferPresent)
+            << ",\"fromWindowResult\":" << result_.flushedFromWindowResult
+            << ",\"bufferReleaseResult\":"
+            << result_.lastFlushedBufferReleaseResult << "},\n"
             << "  \"import\":{\"propertyResult\":" << result_.nativePropertyResult
             << ",\"createResult\":" << result_.externalBufferCreateResult
             << ",\"allocateResult\":" << result_.importAllocateResult
             << ",\"bindResult\":" << result_.importBindResult
             << ",\"vkMapResult\":" << result_.importedVkMapResult
+            << ",\"persistentVkMapResult\":" << result_.persistentVkMapResult
+            << ",\"persistentVkFlushResult\":" << result_.persistentVkFlushResult
+            << ",\"persistentVkInvalidateResult\":"
+            << result_.persistentVkInvalidateResult
+            << ",\"explicitCacheMaintenanceRequired\":"
+            << JsonBool(result_.explicitCacheMaintenanceRequired)
             << ",\"allocationSize\":" << result_.nativeAllocationSize
             << ",\"nativeMemoryTypeBits\":" << result_.nativeMemoryTypeBits
             << ",\"bufferMemoryTypeBits\":" << result_.bufferMemoryTypeBits
@@ -726,6 +1061,10 @@ private:
             << JsonBool(result_.persistentCpuToGpuPassed)
             << ",\"persistentGpuToCpuPassed\":"
             << JsonBool(result_.persistentGpuToCpuPassed)
+            << ",\"persistentVkCpuToGpuPassed\":"
+            << JsonBool(result_.persistentVkCpuToGpuPassed)
+            << ",\"persistentVkGpuToCpuPassed\":"
+            << JsonBool(result_.persistentVkGpuToCpuPassed)
             << ",\"synchronizedCpuToGpuMismatches\":"
             << result_.synchronizedCpuToGpuMismatches
             << ",\"synchronizedGpuToCpuMismatches\":"
@@ -733,15 +1072,19 @@ private:
             << ",\"persistentCpuToGpuMismatches\":"
             << result_.persistentCpuToGpuMismatches
             << ",\"persistentGpuToCpuMismatches\":"
-            << result_.persistentGpuToCpuMismatches << "},\n"
+            << result_.persistentGpuToCpuMismatches
+            << ",\"persistentVkCpuToGpuMismatches\":"
+            << result_.persistentVkCpuToGpuMismatches
+            << ",\"persistentVkGpuToCpuMismatches\":"
+            << result_.persistentVkGpuToCpuMismatches << "},\n"
             << "  \"decision\":{\"uploadBackingViable\":"
             << JsonBool(fullUpload)
-            << ",\"readbackBackingViable\":" << JsonBool(persistent)
-            << ",\"copyOnlySharedBacking\":"
-            << JsonBool(persistent &&
-                !(result_.fullBufferExternalFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT))
-            << ",\"synchronizedOnly\":" << JsonBool(synchronized && !persistent)
-            << ",\"requiresShadowCopy\":" << JsonBool(!persistent) << "}\n"
+            << ",\"readbackBackingViable\":" << JsonBool(readback)
+            << ",\"copyOnlySharedBacking\":" << JsonBool(copyOnly)
+            << ",\"synchronizedOnly\":" << JsonBool(synchronized && !anyDirect)
+            << ",\"requiresShadowCopy\":" << JsonBool(!fullUpload)
+            << ",\"uploadRequiresShadowCopy\":" << JsonBool(!fullUpload)
+            << ",\"readbackRequiresShadowCopy\":" << JsonBool(!readback) << "}\n"
             << "}\n";
         const std::string json = out.str();
         std::fwrite(json.data(), 1, json.size(), stdout);
@@ -751,6 +1094,36 @@ private:
         }
     }
 
+    void ReleaseProducerBuffer()
+    {
+        if (producerWindow_ && windowBuffer_) {
+            result_.producerAbortResult = OH_NativeWindow_NativeWindowAbortBuffer(
+                producerWindow_, windowBuffer_);
+            windowBuffer_ = nullptr;
+        }
+        if (windowFenceFd_ >= 0) {
+            close(windowFenceFd_);
+            windowFenceFd_ = -1;
+        }
+        if (flushedWindowBuffer_) {
+            result_.lastFlushedBufferReleaseResult =
+                OH_NativeWindow_NativeObjectUnreference(flushedWindowBuffer_);
+            flushedWindowBuffer_ = nullptr;
+        }
+        ReleaseEglProducer();
+        if (producerWindow_ && ownsProducerWindow_)
+            OH_NativeWindow_DestroyNativeWindow(producerWindow_);
+        // Otherwise the NativeImage owns the window returned by
+        // AcquireNativeWindow.
+        producerWindow_ = nullptr;
+        result_.consumerFrameSignals = consumerFrameSignals_.load(std::memory_order_relaxed);
+        if (consumerSurface_ && consumerListenerSet_) {
+            OH_NativeImage_UnsetOnFrameAvailableListener(consumerSurface_);
+            consumerListenerSet_ = false;
+        }
+        if (consumerSurface_) OH_NativeImage_Destroy(&consumerSurface_);
+    }
+
     void DestroyHostBuffer(HostBuffer& buffer)
     {
         if (buffer.buffer) vkDestroyBuffer(device_, buffer.buffer, nullptr);
@@ -758,14 +1131,30 @@ private:
         buffer = {};
     }
 
+    void ReleaseProbeBacking()
+    {
+        DestroyHostBuffer(upload_);
+        DestroyHostBuffer(readback_);
+        if (importedBuffer_) {
+            vkDestroyBuffer(device_, importedBuffer_, nullptr);
+            importedBuffer_ = VK_NULL_HANDLE;
+        }
+        if (importedMemory_) {
+            vkFreeMemory(device_, importedMemory_, nullptr);
+            importedMemory_ = VK_NULL_HANDLE;
+        }
+        if (nativeBuffer_) {
+            OH_NativeBuffer_Unreference(nativeBuffer_);
+            nativeBuffer_ = nullptr;
+        }
+        ReleaseProducerBuffer();
+    }
+
     void Cleanup()
     {
         if (device_) vkDeviceWaitIdle(device_);
-        DestroyHostBuffer(upload_);
-        DestroyHostBuffer(readback_);
-        if (importedBuffer_) vkDestroyBuffer(device_, importedBuffer_, nullptr);
-        if (importedMemory_) vkFreeMemory(device_, importedMemory_, nullptr);
-        if (nativeBuffer_) OH_NativeBuffer_Unreference(nativeBuffer_);
+        ReleaseProbeBacking();
+        ReleaseProducerBuffer();
         if (commandPool_) vkDestroyCommandPool(device_, commandPool_, nullptr);
         if (device_) vkDestroyDevice(device_, nullptr);
         if (instance_) vkDestroyInstance(instance_, nullptr);
@@ -783,6 +1172,18 @@ private:
     HostBuffer upload_;
     HostBuffer readback_;
     OH_NativeBuffer* nativeBuffer_ = nullptr;
+    OH_NativeImage* consumerSurface_ = nullptr;
+    OHNativeWindow* producerWindow_ = nullptr;
+    OHNativeWindowBuffer* windowBuffer_ = nullptr;
+    OHNativeWindowBuffer* flushedWindowBuffer_ = nullptr;
+    int windowFenceFd_ = -1;
+    EGLDisplay eglDisplay_ = EGL_NO_DISPLAY;
+    EGLSurface eglSurface_ = EGL_NO_SURFACE;
+    EGLContext eglContext_ = EGL_NO_CONTEXT;
+    std::atomic<uint32_t> consumerFrameSignals_{0};
+    bool consumerListenerSet_ = false;
+    bool ownsProducerWindow_ = false;
+    bool externalProducerWindow_ = false;
     PFN_vkGetNativeBufferPropertiesOHOS getNativeBufferProperties_ = nullptr;
     PFN_vkGetMemoryNativeBufferOHOS getMemoryNativeBuffer_ = nullptr;
     PFN_vkAcquireImageOHOS acquireImage_ = nullptr;
@@ -797,9 +1198,24 @@ int WineHuaRunOhosNativeBufferVulkanProbe(const char* outputPath)
     return probe.Run(outputPath);
 }
 
+extern "C" int winehua_host_probe_main(int argc, char** argv)
+{
+    return WineHuaRunOhosNativeBufferVulkanProbe(argc > 1 ? argv[1] : nullptr);
+}
+
+extern "C" int winehua_host_nativebuffer_window_probe(
+    uint64_t surfaceId, const char* outputPath)
+{
+    OHNativeWindow* window = nullptr;
+    const int result = OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfaceId, &window);
+    if (result != 0 || !window) return 4;
+    NativeBufferVulkanProbe probe(window, true);
+    return probe.Run(outputPath);
+}
+
 #ifndef WINEHUA_NATIVEBUFFER_PROBE_LIBRARY
 int main(int argc, char** argv)
 {
-    return WineHuaRunOhosNativeBufferVulkanProbe(argc > 1 ? argv[1] : nullptr);
+    return winehua_host_probe_main(argc, argv);
 }
 #endif

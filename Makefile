@@ -69,8 +69,10 @@ GUEST_VULKAN_SENTINEL := $(BUILD_DIR)/guest_vulkan/$(GUEST_ARCH)/manifest.json
 WINE_MONO_SENTINEL := $(BUILD_DIR)/wine-ohos/share/wine/mono/wine-mono-11.1.0-x86.msi
 HOST_VULKAN_SOURCE := $(ROOT)/smoke/venus_heaven_material_replay.c
 GRAPHICS_PROBE_SOURCES := \
+	$(ROOT)/smoke/winehua_d3d12_persistent_upload.c
+GUEST_VULKAN_PROBE_INPUTS := \
 	$(ROOT)/smoke/winehua_vulkan_pso_storm.c \
-	$(ROOT)/smoke/winehua_d3d12_persistent_upload.c \
+	$(ROOT)/smoke/winehua_vulkan_cache_reuse.c \
 	$(ROOT)/smoke/pso_storm.vert.spv \
 	$(ROOT)/smoke/pso_storm.frag.spv
 NATIVEBUFFER_PROBE_SOURCE := $(ROOT)/smoke/winehua_ohos_nativebuffer_vulkan_probe.cpp
@@ -209,6 +211,7 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
 	$(ROOT)/smoke/venus_depth_cube_array_2d_compare.comp \
 	$(ROOT)/smoke/venus_depth_cube_array_compare.comp \
 	$(ROOT)/smoke/venus_spirv_replay.c \
+	$(GUEST_VULKAN_PROBE_INPUTS) \
 	$(wildcard $(ROOT)/replay_spv/CS_*.remapped.spv) \
 	$(ROOT)/smoke/venus_separated_sample.comp \
 	$(SCRIPTS)/env.sh FORCE | $(STAMPS)
@@ -251,6 +254,7 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_ohos_guest_gfx.sh \
 	    ! [ "$(ROOT)/smoke/venus_depth_cube_array_2d_compare.comp" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_depth_cube_array_compare.comp" -nt $@ ] && \
 	    ! [ "$(ROOT)/smoke/venus_spirv_replay.c" -nt $@ ] && \
+	    ! find $(GUEST_VULKAN_PROBE_INPUTS) -newer $@ -print -quit | grep -q . && \
 	    ! [ "$(ROOT)/smoke/venus_separated_sample.comp" -nt $@ ] && \
 	    ! find $(ROOT)/thirdparty/freetype \
 	           $(ROOT)/thirdparty/libffi \

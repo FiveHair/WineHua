@@ -5,14 +5,18 @@ const DOMAIN = 0x0000;
 
 class HostVulkanController extends XComponentController {
   runId: string = '';
+  suite: string = 'host-vulkan';
   started: boolean = false;
 
   onSurfaceCreated(surfaceId: string): void {
     hilog.info(DOMAIN, 'HostVulkan', 'surface created id=%{public}s run=%{public}s', surfaceId, this.runId);
     if (this.started || !this.runId) return;
-    this.started = testNapi.runHostVulkanProbe(BigInt(surfaceId), this.runId) as boolean;
+    this.started = this.suite === 'host-nativebuffer' ?
+      testNapi.runHostNativeBufferProbe(BigInt(surfaceId), this.runId) as boolean :
+      testNapi.runHostVulkanProbe(BigInt(surfaceId), this.runId) as boolean;
     if (!this.started) {
-      hilog.error(DOMAIN, 'HostVulkan', 'native host Vulkan probe failed to start');
+      hilog.error(DOMAIN, 'HostVulkan', 'native host probe failed to start suite=%{public}s',
+        this.suite);
     }
   }
 
@@ -23,7 +27,11 @@ class HostVulkanController extends XComponentController {
 
   onSurfaceDestroyed(surfaceId: string): void {
     hilog.info(DOMAIN, 'HostVulkan', 'surface destroyed id=%{public}s', surfaceId);
-    testNapi.stopHostVulkanProbe();
+    if (this.suite === 'host-nativebuffer') {
+      testNapi.stopHostNativeBufferProbe();
+    } else {
+      testNapi.stopHostVulkanProbe();
+    }
   }
 }
 @Entry
@@ -36,6 +44,7 @@ struct HostVulkanSmoke {
     try {
       const request = JSON.parse(this.requestText) as Record<string, string>;
       this.controller.runId = request.runId ?? `${Date.now()}`;
+      this.controller.suite = request.suite ?? 'host-vulkan';
     } catch (_) {
       this.controller.runId = `${Date.now()}`;
     }

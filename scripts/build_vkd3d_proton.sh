@@ -25,13 +25,20 @@ EXPECTED_BASE_COMMIT="3e5aab6fb3e18f81a71b339be4cb5cdf55140980"
 [ -f "$PATCH_ROOT/0001-probe-recover-validated-VKD3D-2.6-500K-profile.patch" ] || \
     err "VKD3D-Proton limited-500K patch series is missing"
 
-base_commit="$(git -c safe.directory="$VKD3D_PROTON_SRC" \
-    -C "$VKD3D_PROTON_SRC" rev-parse HEAD)"
+if git -c safe.directory="$VKD3D_PROTON_SRC" \
+        -C "$VKD3D_PROTON_SRC" rev-parse HEAD >/dev/null 2>&1; then
+    base_commit="$(git -c safe.directory="$VKD3D_PROTON_SRC" \
+        -C "$VKD3D_PROTON_SRC" rev-parse HEAD)"
+    [ -z "$(git -c safe.directory="$VKD3D_PROTON_SRC" \
+        -C "$VKD3D_PROTON_SRC" status --porcelain)" ] || \
+        err "VKD3D-Proton submodule is dirty; patches must stay outside the submodule"
+else
+    base_commit="${WINEHUA_VKD3D_VERIFIED_COMMIT:-}"
+    [ "${WINEHUA_VKD3D_VERIFIED_CLEAN:-0}" = "1" ] || \
+        err "VKD3D-Proton Git metadata is unavailable without an externally verified clean source"
+fi
 [ "$base_commit" = "$EXPECTED_BASE_COMMIT" ] || \
     err "VKD3D-Proton base drifted: expected $EXPECTED_BASE_COMMIT, got $base_commit"
-[ -z "$(git -c safe.directory="$VKD3D_PROTON_SRC" \
-    -C "$VKD3D_PROTON_SRC" status --porcelain)" ] || \
-    err "VKD3D-Proton submodule is dirty; patches must stay outside the submodule"
 
 mapfile -t patches < <(find "$PATCH_ROOT" -maxdepth 1 -type f -name '*.patch' -print | sort)
 [ "${#patches[@]}" -gt 0 ] || err "VKD3D-Proton patch series is empty"

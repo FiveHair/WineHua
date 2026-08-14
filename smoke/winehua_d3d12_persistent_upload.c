@@ -22,7 +22,18 @@ struct options {
     UINT frames;
     UINT write_bytes;
     UINT64 heap_bytes;
+    UINT64 range_stride;
+    int rotate_ranges;
+    DWORD fence_timeout_ms;
     const char *result_path;
+};
+
+struct diagnostics {
+    const char *stage;
+    UINT frame;
+    UINT submitted;
+    UINT64 requested_fence;
+    UINT64 completed_fence;
 };
 
 static void release_unknown(IUnknown **object)
@@ -82,6 +93,9 @@ static int parse_options(int argc, char **argv, struct options *options)
     options->frames = DEFAULT_FRAMES;
     options->write_bytes = DEFAULT_WRITE_BYTES;
     options->heap_bytes = DEFAULT_HEAP_BYTES;
+    options->range_stride = DEFAULT_WRITE_BYTES;
+    options->rotate_ranges = 1;
+    options->fence_timeout_ms = 120000;
     options->result_path = "persistent-upload-result.json";
 
     for (i = 1; i < argc; i++) {
@@ -94,6 +108,22 @@ static int parse_options(int argc, char **argv, struct options *options)
         } else if (!strcmp(argv[i], "--heap-bytes") && i + 1 < argc) {
             if (!parse_u64(argv[++i], &options->heap_bytes))
                 return 0;
+        } else if (!strcmp(argv[i], "--range-stride") && i + 1 < argc) {
+            if (!parse_u64(argv[++i], &options->range_stride))
+                return 0;
+        } else if (!strcmp(argv[i], "--range-mode") && i + 1 < argc) {
+            const char *mode = argv[++i];
+            if (!strcmp(mode, "same"))
+                options->rotate_ranges = 0;
+            else if (!strcmp(mode, "rotate"))
+                options->rotate_ranges = 1;
+            else
+                return 0;
+        } else if (!strcmp(argv[i], "--fence-timeout-ms") && i + 1 < argc) {
+            UINT timeout;
+            if (!parse_u32(argv[++i], &timeout))
+                return 0;
+            options->fence_timeout_ms = timeout;
         } else if (!strcmp(argv[i], "--result") && i + 1 < argc) {
             options->result_path = argv[++i];
         } else {
@@ -101,21 +131,30 @@ static int parse_options(int argc, char **argv, struct options *options)
         }
     }
 
-    if (options->write_bytes > options->heap_bytes)
+    if (options->write_bytes > options->heap_bytes ||
+        !options->range_stride || options->range_stride > options->heap_bytes ||
+        options->range_stride < options->write_bytes)
         return 0;
     return 1;
 }
 
-static HRESULT wait_for_fence(ID3D12Fence *fence, UINT64 value, HANDLE event)
+static HRESULT wait_for_fence(ID3D12Fence *fence, UINT64 value, HANDLE event,
+        DWORD timeout_ms, struct diagnostics *diagnostics)
 {
     HRESULT hr;
-    if (ID3D12Fence_GetCompletedValue(fence) >= value)
+    diagnostics->requested_fence = value;
+    diagnostics->completed_fence = ID3D12Fence_GetCompletedValue(fence);
+    if (diagnostics->completed_fence >= value)
         return S_OK;
     hr = ID3D12Fence_SetEventOnCompletion(fence, value, event);
     if (FAILED(hr))
         return hr;
-    return WaitForSingleObject(event, 120000) == WAIT_OBJECT_0
-        ? S_OK : HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    if (WaitForSingleObject(event, timeout_ms) != WAIT_OBJECT_0) {
+        diagnostics->completed_fence = ID3D12Fence_GetCompletedValue(fence);
+        return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    }
+    diagnostics->completed_fence = ID3D12Fence_GetCompletedValue(fence);
+    return S_OK;
 }
 
 static HRESULT create_buffer(ID3D12Device *device, UINT64 size,
@@ -151,7 +190,8 @@ static HRESULT create_buffer(ID3D12Device *device, UINT64 size,
 }
 
 static void write_result(const struct options *options, const char *status,
-        HRESULT hr, double submit_ms, UINT64 mismatches, UINT64 first_mismatch)
+        HRESULT hr, double submit_ms, UINT64 mismatches, UINT64 first_mismatch,
+        const struct diagnostics *diagnostics)
 {
     FILE *file = fopen(options->result_path, "wb");
     const double submits_per_second = submit_ms > 0.0
@@ -169,17 +209,28 @@ static void write_result(const struct options *options, const char *status,
         "  \"inFlight\": %u,\n"
         "  \"heapBytes\": %llu,\n"
         "  \"writeBytesPerFrame\": %u,\n"
+        "  \"rangeStride\": %llu,\n"
+        "  \"rangeMode\": \"%s\",\n"
         "  \"logicalBytesWritten\": %llu,\n"
         "  \"submitMilliseconds\": %.3f,\n"
         "  \"submitsPerSecond\": %.3f,\n"
         "  \"mismatchCount\": %llu,\n"
-        "  \"firstMismatch\": %lld\n"
+        "  \"firstMismatch\": %lld,\n"
+        "  \"failure\": {\"stage\": \"%s\", \"frame\": %u, "
+        "\"submitted\": %u, \"requestedFence\": %llu, "
+        "\"completedFence\": %llu, \"timeoutMilliseconds\": %lu}\n"
         "}\n",
         status, (unsigned long)hr, options->frames, MAX_IN_FLIGHT,
         (unsigned long long)options->heap_bytes, options->write_bytes,
+        (unsigned long long)options->range_stride,
+        options->rotate_ranges ? "rotate" : "same",
         (unsigned long long)logical_bytes, submit_ms, submits_per_second,
         (unsigned long long)mismatches,
-        mismatches ? (long long)first_mismatch : -1ll);
+        mismatches ? (long long)first_mismatch : -1ll,
+        diagnostics->stage, diagnostics->frame, diagnostics->submitted,
+        (unsigned long long)diagnostics->requested_fence,
+        (unsigned long long)diagnostics->completed_fence,
+        (unsigned long)options->fence_timeout_ms);
     fclose(file);
 }
 
@@ -205,13 +256,15 @@ int main(int argc, char **argv)
     uint64_t submit_begin = 0;
     uint64_t submit_end = 0;
     HRESULT hr = E_FAIL;
+    struct diagnostics diagnostics = {"initialization", 0, 0, 0, 0};
     UINT frame;
     UINT i;
 
     memset(slots, 0, sizeof(slots));
     if (!parse_options(argc, argv, &options)) {
         fprintf(stderr, "usage: %s [--frames N] [--write-bytes N] "
-                "[--heap-bytes N] [--result PATH]\n", argv[0]);
+                "[--heap-bytes N] [--range-stride N] [--range-mode same|rotate] "
+                "[--fence-timeout-ms N] [--result PATH]\n", argv[0]);
         return 2;
     }
 
@@ -274,13 +327,18 @@ int main(int argc, char **argv)
     submit_begin = qpc_now();
     for (frame = 0; frame < options.frames; frame++) {
         struct frame_slot *slot = &slots[frame % MAX_IN_FLIGHT];
-        const UINT64 range_count = options.heap_bytes / options.write_bytes;
-        const UINT64 source_offset = ((UINT64)frame % range_count) * options.write_bytes;
+        const UINT64 range_count = options.heap_bytes / options.range_stride;
+        const UINT64 range_index = options.rotate_ranges ?
+            ((UINT64)frame % range_count) : 0;
+        const UINT64 source_offset = range_index * options.range_stride;
         ID3D12CommandList *lists[1];
         UINT byte_index;
 
         if (slot->fence_value) {
-            hr = wait_for_fence(fence, slot->fence_value, fence_event);
+            diagnostics.stage = "slot-reuse-wait";
+            diagnostics.frame = frame;
+            hr = wait_for_fence(fence, slot->fence_value, fence_event,
+                    options.fence_timeout_ms, &diagnostics);
             if (FAILED(hr))
                 goto done;
         }
@@ -305,9 +363,13 @@ int main(int argc, char **argv)
         hr = ID3D12CommandQueue_Signal(queue, fence, slot->fence_value);
         if (FAILED(hr))
             goto done;
+        diagnostics.submitted = frame + 1;
     }
 
-    hr = wait_for_fence(fence, next_fence - 1, fence_event);
+    diagnostics.stage = "final-submit-wait";
+    diagnostics.frame = options.frames;
+    hr = wait_for_fence(fence, next_fence - 1, fence_event,
+            options.fence_timeout_ms, &diagnostics);
     if (FAILED(hr))
         goto done;
     submit_end = qpc_now();
@@ -316,7 +378,9 @@ int main(int argc, char **argv)
         struct frame_slot *slot = &slots[0];
         D3D12_RESOURCE_BARRIER barrier;
         ID3D12CommandList *lists[1];
-        hr = wait_for_fence(fence, slot->fence_value, fence_event);
+        diagnostics.stage = "readback-slot-wait";
+        hr = wait_for_fence(fence, slot->fence_value, fence_event,
+                options.fence_timeout_ms, &diagnostics);
         if (FAILED(hr))
             goto done;
         hr = ID3D12CommandAllocator_Reset(slot->allocator);
@@ -343,7 +407,9 @@ int main(int argc, char **argv)
         hr = ID3D12CommandQueue_Signal(queue, fence, next_fence);
         if (FAILED(hr))
             goto done;
-        hr = wait_for_fence(fence, next_fence, fence_event);
+        diagnostics.stage = "readback-wait";
+        hr = wait_for_fence(fence, next_fence, fence_event,
+                options.fence_timeout_ms, &diagnostics);
         if (FAILED(hr))
             goto done;
     }
@@ -363,21 +429,26 @@ int main(int argc, char **argv)
     ID3D12Resource_Unmap(readback, 0, &empty_range);
     readback_map = NULL;
     hr = mismatches ? E_FAIL : S_OK;
+    diagnostics.stage = SUCCEEDED(hr) ? "complete" : "readback-validate";
 
 done:
     if (upload_map)
         ID3D12Resource_Unmap(upload, 0, NULL);
     write_result(&options, SUCCEEDED(hr) ? "PASS" : "FAIL", hr,
             submit_end > submit_begin ? qpc_ms(submit_begin, submit_end) : 0.0,
-            mismatches, first_mismatch);
+            mismatches, first_mismatch, &diagnostics);
     fprintf(stdout,
             "persistent-upload status=%s hr=0x%08lx frames=%u "
-            "write_bytes=%u heap_bytes=%llu submit_ms=%.3f mismatches=%llu\n",
+            "write_bytes=%u heap_bytes=%llu submit_ms=%.3f mismatches=%llu "
+            "stage=%s frame=%u submitted=%u requested_fence=%llu completed_fence=%llu\n",
             SUCCEEDED(hr) ? "PASS" : "FAIL", (unsigned long)hr,
             options.frames, options.write_bytes,
             (unsigned long long)options.heap_bytes,
             submit_end > submit_begin ? qpc_ms(submit_begin, submit_end) : 0.0,
-            (unsigned long long)mismatches);
+            (unsigned long long)mismatches, diagnostics.stage,
+            diagnostics.frame, diagnostics.submitted,
+            (unsigned long long)diagnostics.requested_fence,
+            (unsigned long long)diagnostics.completed_fence);
 
     for (i = 0; i < MAX_IN_FLIGHT; i++) {
         release_unknown((IUnknown **)&slots[i].list);

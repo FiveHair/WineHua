@@ -1,0 +1,141 @@
+From 9f92c13ebc16d05f6542f29ba6ad64d02be8538b Mon Sep 17 00:00:00 2001
+From: WineHua Diagnostics <winehua@example.invalid>
+Date: Thu, 13 Aug 2026 22:20:00 +0800
+Subject: [PATCH] vkd3d: track active CBV table upload ranges
+
+The exact upload path already covers copy sources, root descriptors, vertex
+and index buffers, and indirect arguments. Descriptor-table CBVs are another
+direct consumer of persistently mapped upload heaps. Preserve their GPU VA in
+descriptor metadata and publish only the active root-table ranges at submit.
+
+---
+ libs/vkd3d/command.c       | 70 +++++++++++++++++++++++++++++++++++++++
+ libs/vkd3d/resource.c      |  1 +
+ libs/vkd3d/vkd3d_private.h |  4 ++-
+ 3 files changed, 74 insertions(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -1083,3 +1083,4 @@ struct vkd3d_descriptor_metadata_types
+ {
++    D3D12_GPU_VIRTUAL_ADDRESS winehua_gpu_va;
+     VkDescriptorType current_null_type;
+     uint8_t set_info_mask;
+@@ -1093 +1094 @@ struct vkd3d_descriptor_metadata_types
+-STATIC_ASSERT(sizeof(struct vkd3d_descriptor_metadata_types) == 8);
++STATIC_ASSERT(sizeof(struct vkd3d_descriptor_metadata_types) == 16);
+@@ -2074,3 +2075,5 @@ struct d3d12_command_list
+     const struct vkd3d_descriptor_metadata_types *cbv_srv_uav_descriptors_types;
+     const struct vkd3d_descriptor_metadata_view *cbv_srv_uav_descriptors_view;
++    UINT winehua_cbv_srv_uav_descriptor_count;
++    bool winehua_exact_descriptor_ranges_tracked;
+
+diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
+--- a/libs/vkd3d/resource.c
++++ b/libs/vkd3d/resource.c
+@@ -3907,4 +3907,5 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
+             VKD3D_DESCRIPTOR_FLAG_SINGLE_DESCRIPTOR;
+     d.types->single_binding = binding;
++    d.types->winehua_gpu_va = desc->BufferLocation;
+     d.view->info.buffer = descriptor_info.buffer;
+
+diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -4449,2 +4449,3 @@ static void d3d12_command_list_reset_internal_state(struct d3d12_command_list *l
+     list->winehua_exact_upload_range_count = 0;
++    list->winehua_exact_descriptor_ranges_tracked = false;
+     list->dsv_resource_tracking_count = 0;
+@@ -5807,5 +5808,74 @@ static void d3d12_command_list_track_exact_upload_va_range(struct d3d12_command_
+             resource, address, size, &mapped_range))
+         d3d12_command_list_add_exact_upload_range(list, &mapped_range);
+ }
++
++static void d3d12_command_list_track_exact_descriptor_upload_ranges(
++        struct d3d12_command_list *list)
++{
++    unsigned int bind_point;
++
++    if (!vkd3d_winehua_exact_copy_upload_ranges()
++            || list->winehua_exact_descriptor_ranges_tracked)
++        return;
++
++    list->winehua_exact_descriptor_ranges_tracked = true;
++    if (!list->cbv_srv_uav_descriptors_types
++            || !list->cbv_srv_uav_descriptors_view
++            || !list->winehua_cbv_srv_uav_descriptor_count)
++        return;
++
++    for (bind_point = 0; bind_point < ARRAY_SIZE(list->pipeline_bindings); ++bind_point)
++    {
++        const struct vkd3d_pipeline_bindings *bindings =
++                &list->pipeline_bindings[bind_point];
++        const struct d3d12_root_signature *root_signature = bindings->root_signature;
++        uint64_t descriptor_table_mask;
++
++        if (!root_signature)
++            continue;
++
++        descriptor_table_mask = root_signature->descriptor_table_mask
++                & bindings->descriptor_table_active_mask;
++        while (descriptor_table_mask)
++        {
++            const struct vkd3d_shader_descriptor_table *table;
++            unsigned int root_parameter_index;
++            unsigned int binding_index;
++
++            root_parameter_index = vkd3d_bitmask_iter64(&descriptor_table_mask);
++            table = root_signature_get_descriptor_table(root_signature,
++                    root_parameter_index);
++            for (binding_index = 0; binding_index < table->binding_count; ++binding_index)
++            {
++                const struct vkd3d_shader_resource_binding *binding =
++                        &table->first_binding[binding_index];
++                uint64_t first, count, descriptor_index;
++
++                if (binding->type != VKD3D_SHADER_DESCRIPTOR_TYPE_CBV)
++                    continue;
++
++                first = (uint64_t)bindings->descriptor_tables[root_parameter_index]
++                        + binding->descriptor_offset;
++                if (first >= list->winehua_cbv_srv_uav_descriptor_count)
++                    continue;
++                count = min((uint64_t)binding->register_count,
++                        (uint64_t)list->winehua_cbv_srv_uav_descriptor_count - first);
++                for (descriptor_index = first;
++                        descriptor_index < first + count; ++descriptor_index)
++                {
++                    const struct vkd3d_descriptor_metadata_types *types =
++                            &list->cbv_srv_uav_descriptors_types[descriptor_index];
++                    const struct vkd3d_descriptor_metadata_view *view =
++                            &list->cbv_srv_uav_descriptors_view[descriptor_index];
++
++                    if ((types->flags & VKD3D_DESCRIPTOR_FLAG_NON_NULL)
++                            && types->winehua_gpu_va)
++                        d3d12_command_list_track_exact_upload_va_range(list,
++                                types->winehua_gpu_va, view->info.buffer.range);
++                }
++            }
++        }
++    }
++}
+ 
+ static void STDMETHODCALLTYPE d3d12_command_list_CopyBufferRegion(d3d12_command_list_iface *iface,
+@@ -7569,3 +7629,5 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetDescriptorHeaps(d3d12_command
+             list->cbv_srv_uav_descriptors_types = d.types;
+             list->cbv_srv_uav_descriptors_view = d.view;
++            list->winehua_cbv_srv_uav_descriptor_count = heap->desc.NumDescriptors;
++            list->winehua_exact_descriptor_ranges_tracked = false;
+         }
+@@ -7651,2 +7713,3 @@ static void d3d12_command_list_set_descriptor_table(struct d3d12_command_list *li
+     bindings->descriptor_table_active_mask |= (uint64_t)1 << index;
++    list->winehua_exact_descriptor_ranges_tracked = false;
+ 
+@@ -10643,3 +10706,4 @@ static HRESULT d3d12_command_queue_collect_exact_upload_ranges(
+     {
+         cmd_list = unsafe_impl_from_ID3D12CommandList(command_lists[i]);
++        d3d12_command_list_track_exact_descriptor_upload_ranges(cmd_list);
+         if (cmd_list->winehua_exact_upload_range_count > UINT32_MAX - total_range_count)
+-- 
+2.43.0

@@ -13,6 +13,7 @@
 #include "wine_launch.h"
 #include "wine_exe.h"
 #include "host_vulkan_probe.h"
+#include "host_nativebuffer_probe.h"
 #include "experiment_payload.h"
 #include "phone_adapter/phone_adapter.h"
 
@@ -125,6 +126,13 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
 
     const bool skip = !strcmp(profile, "shadow-none");
     const bool directFence = !strcmp(profile, "shadow-precise-direct-fence");
+    const bool vkd3dExactHostTrace =
+        !strcmp(profile, "vkd3d-exact-copy-upload-ranges-host-trace");
+    const bool vkd3dExactPreciseShadow =
+        !strcmp(profile, "vkd3d-exact-copy-upload-ranges") ||
+        !strcmp(profile, "vkd3d-exact-copy-upload-ranges-precise-shadow");
+    const bool vkd3dExactPreciseShadowTrace =
+        !strcmp(profile, "vkd3d-exact-copy-upload-ranges-precise-shadow");
     const bool preciseStrongTrace =
         !strcmp(profile, "shadow-precise-strong-ring-trace");
     const bool preciseStrongPerf =
@@ -156,7 +164,8 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     const bool preciseDirtyGpuFrameProfile =
         !strcmp(profile, "shadow-precise-dirty-ring-gpu-frame-profile");
     const bool preciseDirtyFrameTimeline =
-        !strcmp(profile, "shadow-precise-dirty-ring-frame-timeline");
+        !strcmp(profile, "shadow-precise-dirty-ring-frame-timeline") ||
+        !strcmp(profile, "vkd3d-exact-frame-timeline");
     const bool preciseDirtyNoMerge = !strcmp(profile, "shadow-precise-dirty-ring-no-merge");
     const bool preciseDirtyNoUpload = !strcmp(profile, "shadow-precise-dirty-ring-no-upload");
     const bool preciseDirtyNoUploadFast =
@@ -164,7 +173,8 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
     const bool preciseDirtyDescriptorSerialized =
         !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-descriptor-serialized");
     const bool preciseDirtyCoverageSort =
-        !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-coverage-sort");
+        !strcmp(profile, "shadow-precise-dirty-ring-inline-upload-coverage-sort") ||
+        !strcmp(profile, "vkd3d-exact-gpu-upload");
     /* Diagnostic only: submit the private upload separately and wait for its
      * fence before the Guest copy, without a queue-wide idle. */
     const bool preciseDirtyUploadWait =
@@ -213,6 +223,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
         profile, "shadow-precise-strong-ring-fence-poll") ||
         preciseDirtyCoveragePoll;
     const bool precise = !strcmp(profile, "shadow-precise") ||
+        vkd3dExactPreciseShadow ||
         preciseNoSemaphoreFeedback ||
         !strcmp(profile, "shadow-precise-single-ring") ||
         !strcmp(profile, "shadow-precise-sync-submit") ||
@@ -243,6 +254,7 @@ static napi_value SetHostShadowProfile(napi_env env, napi_callback_info info) {
      * selector through the existing graphics-broker IPC. The child converts
      * this selector to the concrete renderer flags before vtest starts. */
     const char* shadowSelector =
+        (vkd3dExactHostTrace || vkd3dExactPreciseShadowTrace) ? "host-copy-trace" :
         preciseNoSemaphoreFeedbackSingleRing ? "gpu-upload" :
         legacyHostSync ? "legacy-host-sync" :
         preciseDirtyAliasCover ? "inline-gpu-upload-alias-cover" :
@@ -560,6 +572,37 @@ static napi_value RunHostVulkanProbe(napi_env env, napi_callback_info info) {
 
 static napi_value StopHostVulkanProbeNapi(napi_env env, napi_callback_info) {
     StopHostVulkanProbe();
+    napi_value result;
+    napi_get_boolean(env, true, &result);
+    return result;
+}
+
+static napi_value RunHostNativeBufferProbeNapi(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    uint64_t surfaceId = 0;
+    bool lossless = false;
+    char runId[128] = {};
+    if (argc < 2 ||
+        napi_get_value_bigint_uint64(env, args[0], &surfaceId, &lossless) != napi_ok || !lossless ||
+        napi_get_value_string_utf8(env, args[1], runId, sizeof(runId), nullptr) != napi_ok) {
+        napi_value result;
+        napi_get_boolean(env, false, &result);
+        return result;
+    }
+    const bool started = StartHostNativeBufferProbe(surfaceId, runId);
+    OH_LOG_INFO(LOG_APP,
+                "[HostNativeBuffer] start surface=%{public}llu run=%{public}s result=%{public}s",
+                static_cast<unsigned long long>(surfaceId), runId,
+                started ? "true" : "false");
+    napi_value result;
+    napi_get_boolean(env, started, &result);
+    return result;
+}
+
+static napi_value StopHostNativeBufferProbeNapi(napi_env env, napi_callback_info) {
+    StopHostNativeBufferProbe();
     napi_value result;
     napi_get_boolean(env, true, &result);
     return result;
@@ -1034,6 +1077,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"stageExperimentPayload", nullptr, StageExperimentPayloadNapi, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"runHostVulkanProbe", nullptr, RunHostVulkanProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopHostVulkanProbe", nullptr, StopHostVulkanProbeNapi, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"runHostNativeBufferProbe", nullptr, RunHostNativeBufferProbeNapi, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopHostNativeBufferProbe", nullptr, StopHostNativeBufferProbeNapi, nullptr, nullptr, nullptr, napi_default, nullptr},
         // surfaceId 驱动的渲染器管理 (XComponentController 回调)
         {"createRenderer",  nullptr, CreateRenderer,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"resizeRenderer",  nullptr, ResizeRenderer,  nullptr, nullptr, nullptr, napi_default, nullptr},

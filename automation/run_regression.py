@@ -49,7 +49,14 @@ DOCKER_REPO = "/data/src/winehua"
 
 # 产品性能 profile（DXVK Legacy 默认，见 STATUS_MEMO）与诊断 profile。
 PRODUCT_PERF_PROFILE = "shadow-precise-dirty-ring-inline-upload-coverage-sort"
-DIAGNOSTIC_PERF_PROFILES = ("shadow-precise-dirty-ring-frame-timeline",)
+DIAGNOSTIC_PERF_PROFILES = (
+    "shadow-precise-dirty-ring-frame-timeline",
+    "shadow-precise-dirty-ring-perf",
+    "vkd3d-exact-copy-upload-ranges",
+    "vkd3d-exact-copy-upload-ranges-sync-flush",
+    "vkd3d-exact-copy-upload-ranges-host-trace",
+    "vkd3d-exact-copy-upload-ranges-precise-shadow",
+)
 
 SUITES = (
     "core", "audio", "opengl", "d3d8", "d3d9",
@@ -58,7 +65,9 @@ SUITES = (
     "dxvk", "dxvk-long", "dxvk-dynamic",
     "gpu-diagnostics", "dxvk26-requirements",
     "dxvk-modern-baseline", "dxvk-modern-long",
-    "capabilities", "vkd3d-capability", "vkd3d-probes", "all", "long",
+    "capabilities", "vkd3d-capability", "vkd3d-probes", "vkd3d-upload-ranges",
+    "host-nativebuffer",
+    "all", "long",
 )
 
 REQUIRED_PAYLOAD = (
@@ -71,9 +80,7 @@ REQUIRED_PAYLOAD = (
     "smoke/x64/winehua_d3d11_smoke.exe", "smoke/x86/winehua_d3d11_smoke.exe",
     "smoke/x64/winehua_gpu_diagnostics.exe", "smoke/x86/winehua_gpu_diagnostics.exe",
     "smoke/x64/winehua_dxvk26_requirements.exe", "smoke/x86/winehua_dxvk26_requirements.exe",
-    "smoke/x64/winehua_vulkan_pso_storm.exe",
     "smoke/x64/winehua_d3d12_persistent_upload.exe",
-    "smoke/assets/pso_storm.vert.spv", "smoke/assets/pso_storm.frag.spv",
     "dxvk/manifest.json",
     "dxvk/legacy/x64/d3d11.dll", "dxvk/legacy/x64/dxgi.dll",
     "dxvk/legacy/x86/d3d11.dll", "dxvk/legacy/x86/dxgi.dll",
@@ -81,6 +88,10 @@ REQUIRED_PAYLOAD = (
     "dxvk/modern-2.6/x86/d3d11.dll", "dxvk/modern-2.6/x86/dxgi.dll",
     "bin/guest_vulkan/lib/libvulkan.so.1",
     "bin/guest_vulkan/lib/libvulkan_virtio.so",
+    "bin/guest_vulkan/manifest.json",
+    "bin/guest_vulkan/bin/winehua_vulkan_pso_storm",
+    "bin/guest_vulkan/share/winehua/pso_storm.vert.spv",
+    "bin/guest_vulkan/share/winehua/pso_storm.frag.spv",
     "bin/guest_vulkan/share/vulkan/icd.d/venus_icd.x86_64.json",
     "bin/host_vulkan/bin/winehua_ohos_nativebuffer_vulkan_probe",
 )
@@ -331,11 +342,7 @@ def get_artifact_metadata(output_directory: Path) -> dict:
             raise RuntimeError("Payload missing required files: " + ", ".join(missing))
 
         smoke_manifest = json.loads(payload.read("smoke/manifest.json"))
-        for relative in (
-                "x64/winehua_vulkan_pso_storm.exe",
-                "x64/winehua_d3d12_persistent_upload.exe",
-                "assets/pso_storm.vert.spv",
-                "assets/pso_storm.frag.spv"):
+        for relative in ("x64/winehua_d3d12_persistent_upload.exe",):
             expected = smoke_manifest.get("files", {}).get(relative)
             actual = hashlib.sha256(payload.read(f"smoke/{relative}")).hexdigest()
             if not expected or expected != actual:
@@ -343,6 +350,24 @@ def get_artifact_metadata(output_directory: Path) -> dict:
                     f"Smoke manifest hash mismatch for {relative}: "
                     f"expected={expected or 'MISSING'} actual={actual}")
             probe_hashes[f"smoke/{relative}"] = actual
+
+        guest_manifest = json.loads(payload.read("bin/guest_vulkan/manifest.json"))
+        for relative in (
+                "bin/winehua_vulkan_pso_storm",
+                "share/winehua/pso_storm.vert.spv",
+                "share/winehua/pso_storm.frag.spv"):
+            expected = guest_manifest.get("files", {}).get(relative)
+            actual = hashlib.sha256(payload.read(f"bin/guest_vulkan/{relative}")).hexdigest()
+            if not expected or expected != actual:
+                raise RuntimeError(
+                    f"Guest Vulkan manifest hash mismatch for {relative}: "
+                    f"expected={expected or 'MISSING'} actual={actual}")
+            probe_hashes[f"bin/guest_vulkan/{relative}"] = actual
+            if relative == "bin/winehua_vulkan_pso_storm":
+                guest_pso_arch = sh_capture_shell(
+                    f"unzip -p '{RAWFILE_ZIP}' bin/guest_vulkan/{relative} | file -")
+                if "ELF 64-bit" not in guest_pso_arch or "x86-64" not in guest_pso_arch:
+                    raise RuntimeError(f"Guest PSO architecture invalid: {guest_pso_arch}")
 
         host_manifest = json.loads(payload.read("bin/host_vulkan/manifest.json"))
         host_relative = "bin/winehua_ohos_nativebuffer_vulkan_probe"
@@ -997,6 +1022,8 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
         raise RuntimeError(f"Want start failed: {start_output.strip()}")
 
     run_timeout_minutes = timeout_minutes
+    if run_suite in ("vkd3d-probes", "vkd3d-upload-ranges"):
+        run_timeout_minutes = max(run_timeout_minutes, 25)
     if run_suite in ("dxvk-long", "dxvk-modern-long"):
         run_timeout_minutes = max(timeout_minutes, (long_seconds + 300) // 60 + 5)
     deadline = time.monotonic() + run_timeout_minutes * 60
@@ -1055,7 +1082,7 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
                      run_directory / "virgl-host.log")
     save_device_file(hdc, device_id, f"{DEVICE_SANDBOX}/temp/winehua_vtest_frontbuffer.log",
                      run_directory / "vtest-frontbuffer.log")
-    if run_suite == "host-vulkan":
+    if run_suite in ("host-vulkan", "host-nativebuffer"):
         save_probe_results(hdc, device_id, run_directory, remote_host_results, summary)
     else:
         save_probe_results(hdc, device_id, run_directory, remote_results, summary)
@@ -1148,10 +1175,10 @@ def main() -> int:
         matrix = [("host-vulkan", "reuse"), ("venus", "reuse")]
     elif args.suite == "vkd3d-capability":
         matrix = [("host-vulkan", "reuse"), ("vkd3d-capability", "reuse")]
-    elif args.suite == "vkd3d-probes":
+    elif args.suite in ("vkd3d-probes", "vkd3d-upload-ranges"):
         # The D3D12 probe stages d3d12.dll only into the app-owned clean test
         # prefix. This never modifies the user's normal .wine tree.
-        matrix = [("vkd3d-probes", "clean")] * args.runs
+        matrix = [(args.suite, "clean")] * args.runs
     else:
         matrix = [(args.suite, args.prefix)] * args.runs
 

@@ -233,7 +233,6 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     'x64/winehua_d3d8_smoke.exe', 'x64/winehua_d3d_switch_cube.exe',
     'x64/winehua_gpu_diagnostics.exe',
     'x64/winehua_win32_driver.exe', 'x64/winehua_dxvk26_requirements.exe',
-    'x64/winehua_vulkan_pso_storm.exe',
     'x64/winehua_d3d12_persistent_upload.exe',
     'x64/winehua_d3d12_smoke.exe',
     'x64/triangle.exe', 'x64/gears.exe',
@@ -245,7 +244,6 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     'assets/venus_storage_write.spv', 'assets/venus_storage_read.spv',
     'assets/venus_image_fetch.spv', 'assets/venus_combined_sample.spv',
     'assets/venus_separated_sample.spv',
-    'assets/pso_storm.vert.spv', 'assets/pso_storm.frag.spv',
   ];
   /* DXVK is a WineHua runtime overlay, not part of C:\\smoke.  Remove the
    * four files from older payloads, but only inside this managed directory. */
@@ -406,6 +404,7 @@ export class SmokeRunner {
      * layers a future D3D12 runtime would use. */
     const includeVkd3dCapability = this.request.suite === 'vkd3d-capability';
     const includeVkd3dProbes = this.request.suite === 'vkd3d-probes';
+    const includeVkd3dUploadRanges = this.request.suite === 'vkd3d-upload-ranges';
     const includeDxvkLong = this.request.suite === 'dxvk-long';
     const includeDxvkModernLong = this.request.suite === 'dxvk-modern-long';
     const includeDxvkReplay = this.request.suite === 'dxvk-replay';
@@ -712,10 +711,36 @@ export class SmokeRunner {
        * storm exercises Wine Vulkan/Venus directly, the D3D12 probe uses the
        * isolated managed VKD3D runtime, and the Host probe remains outside
        * Wine under the signed Host Vulkan asset root. */
-      tests.push({ id: 'vulkan-pso-storm-x64', architecture: 'x64',
-        executable: 'winehua_vulkan_pso_storm.exe', seconds: 0, timeoutMs: 300000 });
-      tests.push({ id: 'd3d12-persistent-upload-x64', architecture: 'x64',
-        executable: 'winehua_d3d12_persistent_upload.exe', seconds: 0, timeoutMs: 180000 });
+      for (const ringMode of ['multi', 'single']) {
+        for (const cacheMode of ['none', 'per-pso']) {
+          for (const lifetimeMode of ['immediate', 'deferred']) {
+            tests.push({
+              id: `vulkan-pso-storm-${ringMode}-${cacheMode}-${lifetimeMode}-x64`,
+              architecture: 'guest-x64', executable: 'winehua_vulkan_pso_storm',
+              seconds: 0, timeoutMs: 180000
+            });
+          }
+        }
+      }
+      tests.push({
+        id: 'vulkan-cache-reuse-x64',
+        architecture: 'guest-x64', executable: 'winehua_vulkan_cache_reuse',
+        seconds: 0, timeoutMs: 180000
+      });
+    }
+    if (includeVkd3dProbes || includeVkd3dUploadRanges) {
+      /* Compare repeated and rotating writes independently of allocator-slot
+       * reuse. The dedicated suite provides a focused baseline/exact-range
+       * A/B without unrelated PSO or Host NativeBuffer diagnostics. */
+      for (const rangeMode of ['same', 'rotate']) {
+        for (const frameCount of [1, 16, 17, 64]) {
+          tests.push({ id: `d3d12-persistent-upload-${rangeMode}-${frameCount}-x64`,
+            architecture: 'x64', executable: 'winehua_d3d12_persistent_upload.exe',
+            seconds: 0, timeoutMs: 45000 });
+        }
+      }
+    }
+    if (includeVkd3dProbes) {
       tests.push({ id: 'ohos-nativebuffer-vulkan-host', architecture: 'host-probe',
         executable: 'winehua_ohos_nativebuffer_vulkan_probe', seconds: 0, timeoutMs: 120000 });
     }
@@ -933,7 +958,7 @@ export class SmokeRunner {
       return this.waitForFinal(spec, resultPath, hostProcess);
     }
 
-    if (spec.id === 'd3d12-persistent-upload-x64' &&
+    if (spec.id.indexOf('d3d12-persistent-upload-') === 0 &&
       !stageManagedVkd3dRuntime(this.request.prefixMode))
       return this.failureResult(spec, 'startup',
         'managed VKD3D runtime staging requires the clean test prefix', null);
@@ -1221,9 +1246,22 @@ export class SmokeRunner {
           'pass3' : 'pass0'}/${capturedHeavenMaterialDepthNoFloatControls ?
             'vs-no-float-controls.spv' : 'vs.spv'}` :
         capturedHeaven ? capturedHeavenVertex : replayVertex;
-      const guestProcess = testNapi.runGuestProgram({
-        executablePath: executablePath,
-        argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
+      const psoMatch = spec.id.match(
+        /^vulkan-pso-storm-(multi|single)-(none|per-pso)-(immediate|deferred)-x64$/);
+      const isPsoStorm = psoMatch !== null;
+      const isCacheReuse = spec.id === 'vulkan-cache-reuse-x64';
+      const guestArguments = isPsoStorm ?
+        ['--pipelines', '512', '--workers', '8', '--cache', `${psoMatch?.[2]}`,
+          '--lifetime', `${psoMatch?.[3]}`,
+          '--vertex', `${GUEST_VULKAN_ROOT}/share/winehua/pso_storm.vert.spv`,
+          '--fragment', `${GUEST_VULKAN_ROOT}/share/winehua/pso_storm.frag.spv`,
+          '--result', resultPath] :
+        isCacheReuse ?
+        ['--iterations', '32',
+          '--vertex', `${GUEST_VULKAN_ROOT}/share/winehua/pso_storm.vert.spv`,
+          '--fragment', `${GUEST_VULKAN_ROOT}/share/winehua/pso_storm.frag.spv`,
+          '--result', resultPath] :
+        ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
           '--result', resultPath,
           ...(spec.id === 'guest-dxvk26-requirements-x64' ?
             ['--dxvk26-requirements', '1'] : []),
@@ -1306,7 +1344,10 @@ export class SmokeRunner {
             ['--depth-cube-array'] : []),
           ...(spec.id === 'venus-depth-cube-array-2d-golden-x64' ?
             ['--depth-cube-array-2d-golden'] : []),
-          ...(spec.executable === 'venus_spirv_replay' ? ['--spv-dir', replaySpvDirectory] : [])],
+          ...(spec.executable === 'venus_spirv_replay' ? ['--spv-dir', replaySpvDirectory] : [])];
+      const guestProcess = testNapi.runGuestProgram({
+        executablePath: executablePath,
+        argv: guestArguments,
         environment: {
           'WINEHUA_SMOKE_RUN_ID': this.request.runId,
           'WINEHUA_SMOKE_TEST_ID': spec.id,
@@ -1315,8 +1356,13 @@ export class SmokeRunner {
             'VN_WINEHUA_REMOTE_MEMORY_SYNC': '1',
             /* The OHOS shadow-memory bridge requires Host-side fence polling;
              * guest fence-feedback slots are not visible across the mappings. */
-            'VN_PERF': spec.id === 'venus-offscreen-x64' ?
-              'no_fence_feedback,no_query_feedback' : '',
+            'VN_PERF': (isPsoStorm || isCacheReuse) ?
+              `no_fence_feedback,no_query_feedback${psoMatch?.[1] === 'single' ?
+                ',no_multi_ring' : ''}` :
+              (spec.id === 'venus-offscreen-x64' ?
+                'no_fence_feedback,no_query_feedback' : ''),
+            'WINEHUA_PSO_RING_MODE': isPsoStorm ? `${psoMatch?.[1]}` : '',
+            'VN_WINEHUA_PERF_SUMMARY': isPsoStorm ? '1' : '0',
             'WINEHUA_VKR_TRACE_PIPELINE':
               this.request.suite === 'venus-heaven-material-layout' ? '1' : '0',
             'VKR_WINEHUA_SHADOW_TRACE':
@@ -1342,8 +1388,7 @@ export class SmokeRunner {
     const isWineVulkan = spec.executable === 'winehua_vulkan_smoke.exe';
     const isVkd3dCapability = spec.id === 'wine-vkd3d-capability-x64';
     const isVkd3dCapabilityPe = spec.id === 'vkd3d-capability-pe-x64';
-    const isPsoStorm = spec.id === 'vulkan-pso-storm-x64';
-    const isPersistentUpload = spec.id === 'd3d12-persistent-upload-x64';
+    const isPersistentUpload = spec.id.indexOf('d3d12-persistent-upload-') === 0;
     const isDxvk26Requirements = spec.executable === 'winehua_dxvk26_requirements.exe';
     const isGpuDiagnostics = spec.executable === 'winehua_gpu_diagnostics.exe';
     const isWineVulkanPresent = isWineVulkan && spec.id.indexOf('present') >= 0;
@@ -1354,7 +1399,7 @@ export class SmokeRunner {
       spec.executable === 'winehua_d3d_switch_cube.exe');
     const isDxvkModern = isDxvk && spec.id.indexOf('dxvk-modern-') === 0;
     let process: ProcessInfo;
-    if (isWineVulkan || isDxvk || isDxvk26Requirements || isPsoStorm || isPersistentUpload) {
+    if (isWineVulkan || isDxvk || isDxvk26Requirements || isPersistentUpload) {
       const guestVulkanLibrary = `${GUEST_VULKAN_ROOT}/lib`;
       const guestVulkanIcd = `${GUEST_VULKAN_ROOT}/share/vulkan/icd.d/venus_icd.x86_64.json`;
       const box64LibraryPath = `${guestVulkanLibrary}:${WINE_ROOT}/bin/guest_gfx/lib:` +
@@ -1398,6 +1443,35 @@ export class SmokeRunner {
          * diagnostic run through runWineProgram. */
         'WINEDEBUG': '+loaddll,+module'
       };
+      /* This suite measures the actual limited VKD3D transport path. The
+       * persistent-map trace is rate-limited in Mesa and exposes replayed
+       * ranges/bytes and flush time per queue submit; Host summary supplies
+       * matching shadow preparation and driver timing. */
+      if (isPersistentUpload) {
+        smokeEnvironment['VN_WINEHUA_PERSISTENT_MAP_SYNC'] = '1';
+        smokeEnvironment['VN_WINEHUA_ASYNC_MEMORY_FLUSH'] = '1';
+        smokeEnvironment['VN_WINEHUA_PERSISTENT_MAP_SYNC_TRACE'] = '1';
+        smokeEnvironment['VKR_WINEHUA_PERF_SUMMARY'] = '1';
+        if (this.perfProfile === 'vkd3d-exact-copy-upload-ranges' ||
+          this.perfProfile === 'vkd3d-exact-copy-upload-ranges-sync-flush' ||
+          this.perfProfile === 'vkd3d-exact-copy-upload-ranges-host-trace' ||
+          this.perfProfile === 'vkd3d-exact-copy-upload-ranges-precise-shadow') {
+          /* Diagnostic-only contract: VKD3D publishes CopyBufferRegion source
+           * ranges at ExecuteCommandLists, and Venus consumes each successful
+           * replay so fence-only submits cannot widen back to the whole map. */
+          smokeEnvironment['VKD3D_WINEHUA_EXACT_COPY_UPLOAD_RANGES'] = '1';
+          smokeEnvironment['VN_WINEHUA_CONSUME_PERSISTENT_FLUSH_RANGES'] = '1';
+          /* A/B the Venus protocol completion boundary without changing the
+           * exact range set, VKD3D worker association, or Host shadow mode. */
+          if (this.perfProfile === 'vkd3d-exact-copy-upload-ranges-sync-flush')
+            smokeEnvironment['VN_WINEHUA_ASYNC_MEMORY_FLUSH'] = '0';
+        }
+        /* VKD3D implements D3D12 fences with timeline semaphores. Host GPU
+         * feedback writes are not visible through WineHua's split shadow
+         * mappings, so query the authoritative Host semaphore counter. */
+        if (smokeEnvironment['VN_PERF'].indexOf('no_semaphore_feedback') < 0)
+          smokeEnvironment['VN_PERF'] += ',no_semaphore_feedback';
+      }
       if (isDxvk26Requirements &&
         this.perfProfile === 'shadow-precise-no-semaphore-feedback') {
         /* Preserve this profile as an A/B diagnostic without allowing it to
@@ -1566,13 +1640,13 @@ export class SmokeRunner {
           smokeEnvironment['DXVK_STATE_CACHE'] = '0';
         if (spec.id.indexOf('dxvk-combined') >= 0)
           smokeEnvironment['WINEHUA_D3D11_COMBINED_SAMPLER'] = '1';
-      const probeArguments = isPsoStorm ?
-        ['--pipelines', '5120', '--threads', '8',
-          '--vertex', 'C:\\smoke\\assets\\pso_storm.vert.spv',
-          '--fragment', 'C:\\smoke\\assets\\pso_storm.frag.spv',
-          '--result', windowsResult] :
-        isPersistentUpload ?
-          ['--frames', '600', '--write-bytes', '65536', '--heap-bytes', '67108864',
+      const persistentMatch = spec.id.match(
+        /^d3d12-persistent-upload-(same|rotate)-(\d+)-x64$/);
+      const probeArguments = isPersistentUpload ?
+          ['--frames', `${Number(persistentMatch?.[2] || '1')}`,
+            '--write-bytes', '65536', '--heap-bytes', '67108864',
+            '--range-stride', '65536', '--range-mode', `${persistentMatch?.[1] || 'same'}`,
+            '--fence-timeout-ms', '15000',
             '--result', windowsResult] :
           ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
             '--result', windowsResult, isPresent ? '--present' : '--offscreen',

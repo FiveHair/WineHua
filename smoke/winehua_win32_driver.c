@@ -117,6 +117,38 @@ static BOOL SendRelativeClientClick(HWND window, int xPermille, int yPermille)
     return TRUE;
 }
 
+static BOOL SendInputClientClick(HWND window, int xPermille, int yPermille)
+{
+    RECT clientRect;
+    POINT screenPoint;
+    INPUT inputs[2] = {0};
+    wchar_t message[256];
+
+    if (!GetClientRect(window, &clientRect)) return FALSE;
+    screenPoint.x = clientRect.left +
+        (clientRect.right - clientRect.left) * xPermille / 1000;
+    screenPoint.y = clientRect.top +
+        (clientRect.bottom - clientRect.top) * yPermille / 1000;
+    if (!ClientToScreen(window, &screenPoint)) return FALSE;
+
+    SetForegroundWindow(window);
+    Sleep(100);
+    if (!SetCursorPos(screenPoint.x, screenPoint.y)) return FALSE;
+    Sleep(100);
+
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    inputs[1].type = INPUT_MOUSE;
+    inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    if (SendInput(2, inputs, sizeof(inputs[0])) != 2) return FALSE;
+
+    swprintf(message, sizeof(message) / sizeof(message[0]),
+        L"relative SendInput click sent window=%p screen=%ld,%ld",
+        window, screenPoint.x, screenPoint.y);
+    LogMessage(message);
+    return TRUE;
+}
+
 static wchar_t* ParentDirectory(const wchar_t* path)
 {
     size_t length = wcslen(path);
@@ -138,6 +170,8 @@ static int RunDriver(int argc, wchar_t** argv)
     const wchar_t* titlePrefix = NULL;
     const wchar_t* buttonText = NULL;
     BOOL attachOnly = FALSE;
+    BOOL pressEnter = FALSE;
+    BOOL sendInputClick = FALSE;
     int clickXPermille = -1;
     int clickYPermille = -1;
     BOOL useClientClick;
@@ -155,6 +189,8 @@ static int RunDriver(int argc, wchar_t** argv)
         if (!wcscmp(argv[i], L"--launch") && i + 1 < argc) launchPath = argv[++i];
         else if (!wcscmp(argv[i], L"--attach")) attachOnly = TRUE;
         else if (!wcscmp(argv[i], L"--title-prefix") && i + 1 < argc) titlePrefix = argv[++i];
+        else if (!wcscmp(argv[i], L"--press-enter")) pressEnter = TRUE;
+        else if (!wcscmp(argv[i], L"--sendinput-click")) sendInputClick = TRUE;
         else if (!wcscmp(argv[i], L"--button-text") && i + 1 < argc) buttonText = argv[++i];
         else if (!wcscmp(argv[i], L"--client-x-permille") && i + 1 < argc)
             clickXPermille = wcstol(argv[++i], NULL, 10);
@@ -165,7 +201,8 @@ static int RunDriver(int argc, wchar_t** argv)
     }
     useClientClick = clickXPermille >= 0 && clickYPermille >= 0;
     if ((!attachOnly && !launchPath) || !titlePrefix ||
-        (!buttonText && !useClientClick) ||
+        (!buttonText && !useClientClick && !pressEnter) ||
+        (sendInputClick && !useClientClick) ||
         (clickXPermille >= 0) != (clickYPermille >= 0) ||
         clickXPermille > 1000 || clickYPermille > 1000 ||
         timeoutMs < 1000 || timeoutMs > 120000) {
@@ -205,21 +242,39 @@ static int RunDriver(int argc, wchar_t** argv)
             buttonSearch.result = NULL;
             if (buttonText)
                 EnumChildWindows(windowSearch.result, FindButtonCallback, (LPARAM)&buttonSearch);
-            if (buttonSearch.result || useClientClick) break;
+            if (buttonSearch.result || useClientClick || pressEnter) break;
         }
         if (process.hProcess && WaitForSingleObject(process.hProcess, 100) == WAIT_OBJECT_0) break;
         if (!process.hProcess) Sleep(100);
     }
-    if (!windowSearch.result || (!buttonSearch.result && !useClientClick)) {
+    if (!windowSearch.result || (!buttonSearch.result && !useClientClick && !pressEnter)) {
         LogMessage(L"target window or button not found");
         if (process.hThread) CloseHandle(process.hThread);
         if (process.hProcess) CloseHandle(process.hProcess);
         return 5;
     }
 
-    if (!buttonSearch.result) {
-        if (!SendRelativeClientClick(
-                windowSearch.result, clickXPermille, clickYPermille)) {
+    if (pressEnter) {
+        INPUT inputs[2] = {0};
+        SetForegroundWindow(windowSearch.result);
+        Sleep(100);
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].ki.wVk = VK_RETURN;
+        inputs[1].type = INPUT_KEYBOARD;
+        inputs[1].ki.wVk = VK_RETURN;
+        inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        if (SendInput(2, inputs, sizeof(inputs[0])) != 2) {
+            LogMessage(L"Enter SendInput failed");
+            if (process.hThread) CloseHandle(process.hThread);
+            if (process.hProcess) CloseHandle(process.hProcess);
+            return 6;
+        }
+        LogMessage(L"Enter SendInput sent");
+    } else if (!buttonSearch.result) {
+        const BOOL clicked = sendInputClick ?
+            SendInputClientClick(windowSearch.result, clickXPermille, clickYPermille) :
+            SendRelativeClientClick(windowSearch.result, clickXPermille, clickYPermille);
+        if (!clicked) {
             LogMessage(L"relative client click failed or timed out");
             if (process.hThread) CloseHandle(process.hThread);
             if (process.hProcess) CloseHandle(process.hProcess);

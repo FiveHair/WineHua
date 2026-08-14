@@ -311,11 +311,13 @@ setup_build_env() {
     export LLVM_AR="$(create_exe_wrapper "$LLVM_AR_REAL" llvm-ar)"
     export LLVM_STRIP="$(create_exe_wrapper "$LLVM_STRIP_REAL" llvm-strip)"
 
-    export WAYLAND_SCANNER="${WAYLAND_SCANNER:-$(resolve_first_executable \
+    WAYLAND_SCANNER="$(resolve_first_executable \
+        "${WAYLAND_SCANNER:-}" \
         "$HOST_TOOLS_DIR/bin/wayland-scanner" \
         "/usr/local/bin/wayland-scanner" \
         "/usr/bin/wayland-scanner" \
-        || true)}"
+        || true)"
+    export WAYLAND_SCANNER
     if [ ! -x "$WAYLAND_SCANNER" ]; then
         # Auto-build wayland from thirdparty if available
         local wayland_src="$ROOT/thirdparty/wayland"
@@ -326,7 +328,7 @@ setup_build_env() {
             meson setup "$wl_build" "$wayland_src" -Ddocumentation=false -Dtests=false
             meson compile -C "$wl_build"
             mkdir -p "$HOST_TOOLS_DIR/bin"
-            cp "$wl_build/wayland-scanner" "$HOST_TOOLS_DIR/bin/"
+            cp "$wl_build/src/wayland-scanner" "$HOST_TOOLS_DIR/bin/"
             export WAYLAND_SCANNER="$HOST_TOOLS_DIR/bin/wayland-scanner"
         fi
     fi

@@ -20,10 +20,10 @@ static inline void SetBox64PerfEnv() {
     // Keep Box64's compatibility default. Forcing 0 breaks code that observes
     // x86 flags across translated blocks, including protected startup code.
     setenv("BOX64_DYNAREC_SAFEFLAGS", "1", 1);
-    setenv("BOX64_DYNAREC_BIGBLOCK", "3", 1);
-    setenv("BOX64_DYNAREC_CALLRET", "2", 1);
-    setenv("BOX64_DYNAREC_FORWARD", "1024", 1);
-    setenv("BOX64_DYNAREC_WEAKBARRIER", "2", 1);
+    setenv("BOX64_DYNAREC_BIGBLOCK", "0", 1);
+    setenv("BOX64_DYNAREC_CALLRET", "0", 1);
+    setenv("BOX64_DYNAREC_FORWARD", "0", 1);
+    setenv("BOX64_DYNAREC_WEAKBARRIER", "0", 1);
     setenv("BOX64_AVX", "0", 1);
     // 关闭 box64 的 PE Volatile Metadata 解析 (默认开启), 原因:
     // box64 的 my_mmap64 (wrappedlibc.c) 对 Wine 每个首次 mmap 的文件调用
@@ -45,10 +45,10 @@ inline void AppendBox64PerfStrings(std::vector<std::string>& env) {
     env.push_back("BOX64_NOBANNER=1");
     env.push_back("BOX64_SHOWSEGV=1");
     env.push_back("BOX64_DYNAREC_SAFEFLAGS=1");
-    env.push_back("BOX64_DYNAREC_BIGBLOCK=3");
-    env.push_back("BOX64_DYNAREC_CALLRET=2");
-    env.push_back("BOX64_DYNAREC_FORWARD=1024");
-    env.push_back("BOX64_DYNAREC_WEAKBARRIER=2");
+    env.push_back("BOX64_DYNAREC_BIGBLOCK=0");
+    env.push_back("BOX64_DYNAREC_CALLRET=0");
+    env.push_back("BOX64_DYNAREC_FORWARD=0");
+    env.push_back("BOX64_DYNAREC_WEAKBARRIER=0");
     env.push_back("BOX64_AVX=0");
     // 关闭 Volatile Metadata 解析, 详细原因见上方 SetBox64PerfEnv() 注释
     // (box64 pe_tools.c 对 DOS MZ exe 无边界检查 → explorer 浏览目录挂死)

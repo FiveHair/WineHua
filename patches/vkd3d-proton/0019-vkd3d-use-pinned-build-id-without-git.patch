@@ -1,0 +1,30 @@
+From 8a5de4ad8efc6657e5db8fa82dadf966f63fc1c1 Mon Sep 17 00:00:00 2001
+From: WineHua <winehua@local>
+Date: Thu, 13 Aug 2026 00:20:00 +0800
+Subject: [PATCH] build: use pinned build id without Git metadata
+
+The packaged source is intentionally copied without .git metadata. Meson's
+default vcs_tag fallback is the project version ("2.6"), which is not a valid
+hexadecimal uint64_t initializer and does not identify the validated source.
+Use the pinned VKD3D-Proton base revision as the fallback build id.
+---
+ meson.build | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/meson.build b/meson.build
+index b44446c7..bbb8119e 100644
+--- a/meson.build
++++ b/meson.build
+@@ -151,7 +151,8 @@ endif
+ vkd3d_build = vcs_tag(
+   command : ['git', 'describe', '--always', '--exclude=*', '--abbrev=15', '--dirty=0'],
+   input   : 'vkd3d_build.h.in',
+-  output  : 'vkd3d_build.h')
++  output  : 'vkd3d_build.h',
++  fallback : '3e5aab6fb3e18f')
+ 
+ vkd3d_version = vcs_tag(
+   command : ['git', 'describe', '--always', '--tags', '--dirty=+'],
+-- 
+2.43.0
+

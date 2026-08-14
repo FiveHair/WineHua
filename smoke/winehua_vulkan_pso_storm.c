@@ -1,5 +1,8 @@
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#define _POSIX_C_SOURCE 200809L
+#include <pthread.h>
+#include <stdatomic.h>
+#include <time.h>
+#include <unistd.h>
 #include <vulkan/vulkan.h>
 #include <inttypes.h>
 #include <stdint.h>
@@ -48,23 +51,34 @@ struct worker {
     VkPipelineCache cache;
     enum cache_mode cache_mode;
     enum lifetime_mode lifetime_mode;
-    CRITICAL_SECTION *shared_cache_mutex;
+    pthread_mutex_t *shared_cache_mutex;
     VkPipeline *pipelines;
     VkShaderModule *deferred_vertices;
     VkShaderModule *deferred_fragments;
     VkPipelineCache *deferred_caches;
     double *latencies;
-    volatile LONG *global_attempted;
+    atomic_uint *global_attempted;
     uint32_t total_pipelines;
     uint32_t first;
     uint32_t count;
     uint32_t thread_index;
     uint32_t attempted;
     uint32_t completed;
+    uint32_t immediate_destroyed;
+    double immediate_destroy_ms;
     uint32_t failures;
     uint32_t first_failure_index;
     VkResult first_error;
     double milliseconds;
+};
+
+struct render_diagnostics {
+    uint64_t first_mismatch;
+    uint64_t channel_mismatches[4];
+    uint8_t actual_first_rgba[4];
+    uint8_t expected_rgba[4];
+    uint8_t actual_center_rgba[4];
+    uint8_t actual_last_rgba[4];
 };
 
 static const char *cache_mode_name(enum cache_mode mode)
@@ -85,16 +99,15 @@ static const char *lifetime_mode_name(enum lifetime_mode mode)
 
 static uint64_t qpc_now(void)
 {
-    LARGE_INTEGER value;
-    QueryPerformanceCounter(&value);
-    return (uint64_t)value.QuadPart;
+    struct timespec value;
+    clock_gettime(CLOCK_MONOTONIC, &value);
+    return (uint64_t)value.tv_sec * UINT64_C(1000000000) +
+            (uint64_t)value.tv_nsec;
 }
 
 static double qpc_ms(uint64_t begin, uint64_t end)
 {
-    LARGE_INTEGER frequency;
-    QueryPerformanceFrequency(&frequency);
-    return (double)(end - begin) * 1000.0 / (double)frequency.QuadPart;
+    return (double)(end - begin) / 1000000.0;
 }
 
 static int parse_u32(const char *text, uint32_t *value)
@@ -311,7 +324,7 @@ static VkResult create_pipeline(struct worker *worker, uint32_t index,
             NULL, pipeline);
 }
 
-static DWORD WINAPI worker_main(void *opaque)
+static void *worker_main(void *opaque)
 {
     struct worker *worker = opaque;
     VkPipelineCacheCreateInfo cache_info;
@@ -337,11 +350,11 @@ static DWORD WINAPI worker_main(void *opaque)
             result = vkCreatePipelineCache(worker->device, &cache_info, NULL, &cache);
         if (result == VK_SUCCESS) {
             if (worker->shared_cache_mutex)
-                EnterCriticalSection(worker->shared_cache_mutex);
+                pthread_mutex_lock(worker->shared_cache_mutex);
             result = create_pipeline(worker, index, vertex, fragment, cache,
                     &worker->pipelines[index]);
             if (worker->shared_cache_mutex)
-                LeaveCriticalSection(worker->shared_cache_mutex);
+                pthread_mutex_unlock(worker->shared_cache_mutex);
         }
         if (worker->lifetime_mode == LIFETIME_MODE_DEFERRED) {
             worker->deferred_vertices[index] = vertex;
@@ -349,6 +362,15 @@ static DWORD WINAPI worker_main(void *opaque)
             if (worker->cache_mode == CACHE_MODE_PER_PSO)
                 worker->deferred_caches[index] = cache;
         } else {
+            /* Keep only the final pipeline for the deterministic render check.
+             * All other successful objects exercise real pipeline churn. */
+            if (result == VK_SUCCESS && index + 1u != worker->total_pipelines) {
+                const uint64_t destroy_begin = qpc_now();
+                vkDestroyPipeline(worker->device, worker->pipelines[index], NULL);
+                worker->immediate_destroy_ms += qpc_ms(destroy_begin, qpc_now());
+                worker->pipelines[index] = VK_NULL_HANDLE;
+                worker->immediate_destroyed++;
+            }
             if (worker->cache_mode == CACHE_MODE_PER_PSO && cache)
                 vkDestroyPipelineCache(worker->device, cache, NULL);
             if (fragment) vkDestroyShaderModule(worker->device, fragment, NULL);
@@ -366,16 +388,16 @@ static DWORD WINAPI worker_main(void *opaque)
             worker->completed++;
         }
         {
-            LONG attempted = InterlockedIncrement(worker->global_attempted);
+            unsigned int attempted = atomic_fetch_add(worker->global_attempted, 1u) + 1u;
             if (!(attempted % HEARTBEAT_INTERVAL)) {
-                fprintf(stderr, "pso-storm heartbeat attempted=%ld total=%u worker=%u\n",
+                fprintf(stderr, "pso-storm heartbeat attempted=%u total=%u worker=%u\n",
                         attempted, worker->total_pipelines, worker->thread_index);
                 fflush(stderr);
             }
         }
     }
     worker->milliseconds = qpc_ms(begin, qpc_now());
-    return 0;
+    return NULL;
 }
 
 static uint32_t find_graphics_queue(VkPhysicalDevice physical)
@@ -486,7 +508,8 @@ static uint64_t fnv1a64(const uint8_t *data, size_t size)
 static VkResult render_and_validate(VkPhysicalDevice physical, VkDevice device,
         VkQueue queue, uint32_t queue_family, VkRenderPass render_pass,
         VkPipeline pipeline, uint32_t pipeline_index, int *readback_ok,
-        uint64_t *actual_hash, uint64_t *expected_hash)
+        uint64_t *actual_hash, uint64_t *expected_hash,
+        struct render_diagnostics *diagnostics)
 {
     const VkDeviceSize readback_size = RENDER_WIDTH * RENDER_HEIGHT * 4u;
     VkImage image = VK_NULL_HANDLE;
@@ -675,6 +698,8 @@ static VkResult render_and_validate(VkPhysicalDevice physical, VkDevice device,
         const uint8_t *bytes = mapped;
         uint64_t expected_value = UINT64_C(14695981039346656037);
         size_t i;
+        diagnostics->first_mismatch = UINT64_MAX;
+        memcpy(diagnostics->expected_rgba, expected, sizeof(expected));
         if (!(readback_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
             VkMappedMemoryRange range;
             memset(&range, 0, sizeof(range));
@@ -685,10 +710,19 @@ static VkResult render_and_validate(VkPhysicalDevice physical, VkDevice device,
             result = vkInvalidateMappedMemoryRanges(device, 1, &range);
         }
         *readback_ok = result == VK_SUCCESS;
-        for (i = 0; i < (size_t)readback_size && *readback_ok; i++) {
-            if (bytes[i] != expected[i & 3u])
+        for (i = 0; i < (size_t)readback_size; i++) {
+            if (bytes[i] != expected[i & 3u]) {
+                if (diagnostics->first_mismatch == UINT64_MAX)
+                    diagnostics->first_mismatch = i;
+                diagnostics->channel_mismatches[i & 3u]++;
                 *readback_ok = 0;
+            }
         }
+        memcpy(diagnostics->actual_first_rgba, bytes, 4);
+        memcpy(diagnostics->actual_center_rgba,
+                bytes + ((RENDER_HEIGHT / 2u * RENDER_WIDTH +
+                RENDER_WIDTH / 2u) * 4u), 4);
+        memcpy(diagnostics->actual_last_rgba, bytes + readback_size - 4u, 4);
         *actual_hash = fnv1a64(bytes, (size_t)readback_size);
         for (i = 0; i < (size_t)readback_size; i++) {
             expected_value ^= expected[i & 3u];
@@ -730,12 +764,20 @@ static void write_result(const struct options *options,
         double object_create_ms, double pipeline_create_ms,
         double render_validate_ms, double object_destroy_ms,
         const double *sorted_latencies, int readback_ok,
-        uint64_t actual_hash, uint64_t expected_hash)
+        uint64_t actual_hash, uint64_t expected_hash,
+        const struct render_diagnostics *diagnostics)
 {
     FILE *file = fopen(options->result_path, "wb");
+    const char *ring_mode = getenv("WINEHUA_PSO_RING_MODE");
+    uint32_t immediate_destroyed = 0;
+    double immediate_destroy_ms = 0.0;
     uint32_t i;
     if (!file)
         return;
+    for (i = 0; i < options->threads; i++) {
+        immediate_destroyed += workers[i].immediate_destroyed;
+        immediate_destroy_ms += workers[i].immediate_destroy_ms;
+    }
     fprintf(file,
             "{\n  \"schemaVersion\": 2,\n"
             "  \"test\": \"vulkan-pso-storm\",\n"
@@ -743,11 +785,13 @@ static void write_result(const struct options *options,
             "  \"vkResult\": %d,\n"
             "  \"device\": {\"name\": \"%s\", \"vendorId\": %u, "
             "\"deviceId\": %u, \"driverVersion\": %u, \"apiVersion\": %u},\n"
-            "  \"mode\": {\"cache\": \"%s\", \"lifetime\": \"%s\", "
+            "  \"mode\": {\"cache\": \"%s\", \"lifetime\": \"%s\", \"ring\": \"%s\", "
             "\"sharedCacheLock\": %s, \"sharedUnlockedDiagnostic\": %s},\n"
             "  \"requestedPipelines\": %u,\n"
             "  \"attemptedPipelines\": %u,\n"
             "  \"completedPipelines\": %u,\n"
+            "  \"retainedPipelineCount\": %u,\n"
+            "  \"immediateDestroyedPipelines\": %u,\n"
             "  \"failures\": %u,\n"
             "  \"firstFailureIndex\": %" PRId64 ",\n"
             "  \"workers\": %u,\n"
@@ -755,15 +799,11 @@ static void write_result(const struct options *options,
             "  \"timings\": {\"objectCreateMilliseconds\": %.3f, "
             "\"pipelineWorkloadMilliseconds\": %.3f, "
             "\"renderValidateMilliseconds\": %.3f, "
-            "\"objectDestroyMilliseconds\": %.3f},\n"
+            "\"objectDestroyMilliseconds\": %.3f, "
+            "\"immediatePipelineDestroyMilliseconds\": %.3f},\n"
             "  \"psoLatencyMilliseconds\": {\"p50\": %.3f, \"p95\": %.3f, "
             "\"p99\": %.3f, \"max\": %.3f},\n"
-            "  \"pipelinesPerSecond\": %.3f,\n"
-            "  \"renderValidation\": {\"passed\": %s, "
-            "\"width\": %u, \"height\": %u, \"bytesCompared\": %u, "
-            "\"actualFnv1a64\": \"0x%016" PRIx64 "\", "
-            "\"expectedFnv1a64\": \"0x%016" PRIx64 "\"},\n"
-            "  \"workerResults\": [\n",
+            "  \"pipelinesPerSecond\": %.3f,\n",
             failures || result != VK_SUCCESS ? "FAIL" : "PASS", result,
             properties ? properties->deviceName : "unavailable",
             properties ? properties->vendorID : 0,
@@ -772,20 +812,55 @@ static void write_result(const struct options *options,
             properties ? properties->apiVersion : 0,
             cache_mode_name(options->cache_mode),
             lifetime_mode_name(options->lifetime_mode),
+            ring_mode && ring_mode[0] ? ring_mode : "unspecified",
             options->shared_cache_lock ? "true" : "false",
             options->cache_mode == CACHE_MODE_SHARED &&
                     !options->shared_cache_lock ? "true" : "false",
-            options->pipelines, attempted, completed, failures,
-            first_failure_index, options->threads, HEARTBEAT_INTERVAL,
+            options->pipelines, attempted, completed,
+            completed ? (options->lifetime_mode == LIFETIME_MODE_IMMEDIATE ? 1u : completed) : 0u,
+            immediate_destroyed, failures, first_failure_index,
+            options->threads, HEARTBEAT_INTERVAL,
             object_create_ms, pipeline_create_ms, render_validate_ms,
-            object_destroy_ms, percentile(sorted_latencies, attempted, 50),
+            object_destroy_ms, immediate_destroy_ms,
+            percentile(sorted_latencies, attempted, 50),
             percentile(sorted_latencies, attempted, 95),
             percentile(sorted_latencies, attempted, 99),
             attempted ? sorted_latencies[attempted - 1u] : 0.0,
             pipeline_create_ms > 0.0 ? completed * 1000.0 /
-                    pipeline_create_ms : 0.0,
+                    pipeline_create_ms : 0.0);
+    /* Keep argument lists short here. Box64's libc vararg bridge has crashed
+     * on this probe's former 70-argument fprintf after all Vulkan work had
+     * completed successfully. */
+    fprintf(file,
+            "  \"renderValidation\": {\"passed\": %s, "
+            "\"width\": %u, \"height\": %u, \"bytesCompared\": %u, "
+            "\"actualFnv1a64\": \"0x%016" PRIx64 "\", "
+            "\"expectedFnv1a64\": \"0x%016" PRIx64 "\", "
+            "\"firstMismatchByte\": %" PRIu64 ",\n",
             readback_ok ? "true" : "false", RENDER_WIDTH, RENDER_HEIGHT,
-            RENDER_WIDTH * RENDER_HEIGHT * 4u, actual_hash, expected_hash);
+            RENDER_WIDTH * RENDER_HEIGHT * 4u, actual_hash, expected_hash,
+            diagnostics->first_mismatch);
+    fprintf(file,
+            "    \"expectedRgba\": [%u,%u,%u,%u], "
+            "\"actualFirstRgba\": [%u,%u,%u,%u],\n",
+            diagnostics->expected_rgba[0], diagnostics->expected_rgba[1],
+            diagnostics->expected_rgba[2], diagnostics->expected_rgba[3],
+            diagnostics->actual_first_rgba[0], diagnostics->actual_first_rgba[1],
+            diagnostics->actual_first_rgba[2], diagnostics->actual_first_rgba[3]);
+    fprintf(file,
+            "    \"actualCenterRgba\": [%u,%u,%u,%u], "
+            "\"actualLastRgba\": [%u,%u,%u,%u],\n",
+            diagnostics->actual_center_rgba[0], diagnostics->actual_center_rgba[1],
+            diagnostics->actual_center_rgba[2], diagnostics->actual_center_rgba[3],
+            diagnostics->actual_last_rgba[0], diagnostics->actual_last_rgba[1],
+            diagnostics->actual_last_rgba[2], diagnostics->actual_last_rgba[3]);
+    fprintf(file,
+            "    \"channelMismatchCounts\": [%llu,%llu,%llu,%llu]},\n"
+            "  \"workerResults\": [\n",
+            (unsigned long long)diagnostics->channel_mismatches[0],
+            (unsigned long long)diagnostics->channel_mismatches[1],
+            (unsigned long long)diagnostics->channel_mismatches[2],
+            (unsigned long long)diagnostics->channel_mismatches[3]);
     for (i = 0; i < options->threads; i++) {
         fprintf(file,
                 "    {\"index\": %u, \"requested\": %u, "
@@ -807,7 +882,7 @@ int main(int argc, char **argv)
 {
     struct options options;
     struct worker workers[MAX_THREADS];
-    HANDLE threads[MAX_THREADS];
+    pthread_t threads[MAX_THREADS];
     VkApplicationInfo application;
     VkInstanceCreateInfo instance_info;
     VkInstance instance = VK_NULL_HANDLE;
@@ -842,7 +917,7 @@ int main(int argc, char **argv)
     uint32_t failures = 0;
     uint32_t threads_created = 0;
     int64_t first_failure_index = -1;
-    volatile LONG global_attempted = 0;
+    atomic_uint global_attempted = 0;
     uint64_t timing_begin = 0;
     double object_create_ms = 0.0;
     double pipeline_create_ms = 0.0;
@@ -851,8 +926,9 @@ int main(int argc, char **argv)
     int readback_ok = 0;
     uint64_t actual_hash = 0;
     uint64_t expected_hash = 0;
+    struct render_diagnostics render_diagnostics;
     VkResult result = VK_ERROR_INITIALIZATION_FAILED;
-    CRITICAL_SECTION shared_cache_mutex;
+    pthread_mutex_t shared_cache_mutex;
     int shared_cache_mutex_initialized = 0;
     float queue_priority = 1.0f;
     uint32_t i;
@@ -860,6 +936,8 @@ int main(int argc, char **argv)
     memset(workers, 0, sizeof(workers));
     memset(threads, 0, sizeof(threads));
     memset(caches, 0, sizeof(caches));
+    memset(&render_diagnostics, 0, sizeof(render_diagnostics));
+    render_diagnostics.first_mismatch = UINT64_MAX;
     memset(&properties, 0, sizeof(properties));
     if (!parse_options(argc, argv, &options)) {
         fprintf(stderr, "usage: %s [--pipelines N] [--workers N] "
@@ -952,7 +1030,10 @@ int main(int argc, char **argv)
         }
     }
     if (options.cache_mode == CACHE_MODE_SHARED && options.shared_cache_lock) {
-        InitializeCriticalSection(&shared_cache_mutex);
+        if (pthread_mutex_init(&shared_cache_mutex, NULL)) {
+            result = VK_ERROR_INITIALIZATION_FAILED;
+            goto done;
+        }
         shared_cache_mutex_initialized = 1;
     }
     object_create_ms = qpc_ms(timing_begin, qpc_now());
@@ -1003,27 +1084,17 @@ int main(int argc, char **argv)
         workers[i].count = base + (i < extra ? 1u : 0u);
         workers[i].thread_index = i;
         workers[i].first_error = VK_SUCCESS;
-        threads[i] = CreateThread(NULL, 0, worker_main, &workers[i], 0, NULL);
-        if (!threads[i]) {
+        if (pthread_create(&threads[i], NULL, worker_main, &workers[i])) {
             result = VK_ERROR_OUT_OF_HOST_MEMORY;
             failures++;
             break;
         }
         threads_created++;
     }
-    if (threads_created) {
-        DWORD wait_result = WaitForMultipleObjects(threads_created, threads,
-                TRUE, 600000);
-        if (wait_result != WAIT_OBJECT_0) {
-            result = wait_result == WAIT_TIMEOUT ? VK_TIMEOUT :
-                    VK_ERROR_INITIALIZATION_FAILED;
-            failures++;
-            WaitForMultipleObjects(threads_created, threads, TRUE, INFINITE);
-        }
-    }
+    for (i = 0; i < threads_created; i++)
+        pthread_join(threads[i], NULL);
     pipeline_create_ms = qpc_ms(timing_begin, qpc_now());
     for (i = 0; i < threads_created; i++) {
-        if (threads[i]) CloseHandle(threads[i]);
         attempted += workers[i].attempted;
         completed += workers[i].completed;
         failures += workers[i].failures;
@@ -1043,7 +1114,7 @@ int main(int argc, char **argv)
         result = render_and_validate(physical, device, queue, queue_family,
                 render_pass, pipelines[options.pipelines - 1u],
                 options.pipelines - 1u, &readback_ok, &actual_hash,
-                &expected_hash);
+                &expected_hash, &render_diagnostics);
         render_validate_ms = qpc_ms(timing_begin, qpc_now());
         if (result != VK_SUCCESS) failures++;
     }
@@ -1079,7 +1150,8 @@ done:
     write_result(&options, physical ? &properties : NULL, workers, attempted,
             completed, failures, first_failure_index, result, object_create_ms,
             pipeline_create_ms, render_validate_ms, object_destroy_ms,
-            sorted_latencies, readback_ok, actual_hash, expected_hash);
+            sorted_latencies, readback_ok, actual_hash, expected_hash,
+            &render_diagnostics);
     fprintf(stdout,
             "pso-storm status=%s result=%d requested=%u attempted=%u "
             "completed=%u failures=%u workers=%u cache=%s lifetime=%s "
@@ -1091,7 +1163,7 @@ done:
             lifetime_mode_name(options.lifetime_mode), pipeline_create_ms,
             readback_ok, actual_hash, expected_hash);
     if (shared_cache_mutex_initialized)
-        DeleteCriticalSection(&shared_cache_mutex);
+        pthread_mutex_destroy(&shared_cache_mutex);
     free(sorted_latencies);
     free(latencies);
     free(deferred_caches);

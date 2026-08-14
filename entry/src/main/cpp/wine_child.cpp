@@ -86,6 +86,28 @@ static const char *basename_of_path(const char *path)
     return slash ? slash + 1 : path;
 }
 
+struct host_module_spec {
+    const char *marker;
+    const char *module;
+    const char *entry;
+};
+
+static const host_module_spec *resolve_host_module(const char *requested)
+{
+    static const host_module_spec modules[] = {
+        {"heaven_exact_host_replay", "libwinehua_host_heaven_replay.so",
+         "winehua_host_replay_main"},
+        {"winehua_ohos_nativebuffer_vulkan_probe",
+         "libwinehua_ohos_nativebuffer_vulkan_probe.so",
+         "winehua_host_probe_main"},
+    };
+    const char *base = basename_of_path(requested);
+    for (const auto& module : modules)
+        if (base && !strcmp(base, module.marker))
+            return &module;
+    return nullptr;
+}
+
 static bool is_audio_test_exe(int argc, char *argv[])
 {
     const char *base;
@@ -400,7 +422,9 @@ static void prepare_host_elf_environment(const char *homeDir)
         if (key.rfind("BOX64_", 0) == 0 || key.rfind("VN_", 0) == 0 ||
             key == "USE_LIBBOX64" || key == "VK_DRIVER_FILES" ||
             key == "VK_ICD_FILENAMES" || key == "MESA_LOADER_DRIVER_OVERRIDE" ||
-            key == "LIBGL_DRIVERS_PATH")
+            key == "LIBGL_DRIVERS_PATH" || key == "LIBGL_ALWAYS_SOFTWARE" ||
+            key == "GALLIUM_DRIVER" || key == "EGL_PLATFORM" ||
+            key == "WAYLAND_DISPLAY")
             removeKeys.push_back(std::move(key));
     }
     for (const std::string& key : removeKeys) unsetenv(key.c_str());
@@ -524,24 +548,32 @@ extern "C" void Main(NativeChildProcess_Args args)
             free(buf);
             return;
         }
+        const host_module_spec *spec = resolve_host_module(argv[0]);
+        if (!spec) {
+            OH_LOG_ERROR(LOG_APP, "[HostChild] rejected unmanaged Host marker=%{public}s",
+                         argv[0]);
+            free(buf);
+            return;
+        }
         OH_LOG_INFO(LOG_APP,
-                    "[HostChild] loading signed replay module for=%{public}s loader=system-vulkan",
-                    argv[0]);
-        void *module = dlopen("libwinehua_host_heaven_replay.so", RTLD_NOW | RTLD_LOCAL);
+                    "[HostChild] loading signed module marker=%{public}s module=%{public}s "
+                    "entry=%{public}s loader=system-vulkan",
+                    spec->marker, spec->module, spec->entry);
+        void *module = dlopen(spec->module, RTLD_NOW | RTLD_LOCAL);
         if (!module) {
-            OH_LOG_ERROR(LOG_APP, "[HostChild] replay module load failed: %{public}s", dlerror());
+            OH_LOG_ERROR(LOG_APP, "[HostChild] module load failed: %{public}s", dlerror());
             free(buf);
             return;
         }
-        auto replayMain = reinterpret_cast<int (*)(int, char **)>(
-            dlsym(module, "winehua_host_replay_main"));
-        if (!replayMain) {
-            OH_LOG_ERROR(LOG_APP, "[HostChild] replay entry lookup failed: %{public}s", dlerror());
+        auto moduleMain = reinterpret_cast<int (*)(int, char **)>(
+            dlsym(module, spec->entry));
+        if (!moduleMain) {
+            OH_LOG_ERROR(LOG_APP, "[HostChild] module entry lookup failed: %{public}s", dlerror());
             free(buf);
             return;
         }
-        int replayResult = replayMain(argc, argv);
-        OH_LOG_INFO(LOG_APP, "[HostChild] replay module returned rc=%{public}d", replayResult);
+        int moduleResult = moduleMain(argc, argv);
+        OH_LOG_INFO(LOG_APP, "[HostChild] module returned rc=%{public}d", moduleResult);
         free(buf);
         return;
     }
