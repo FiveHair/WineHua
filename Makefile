@@ -175,6 +175,7 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_gnutls.sh $(SCRIPTS)/b
 	    ! [ "$(SCRIPTS)/build_ohos_guest_gfx.sh" -nt $@ ] && \
 	    ! [ "$(SCRIPTS)/build_ohos_guest_vulkan.sh" -nt $@ ] && \
 	    ! [ "$(SCRIPTS)/build_gnutls.sh" -nt $@ ] && \
+	    ! [ "$(SCRIPTS)/build_gstreamer.sh" -nt $@ ] && \
 	    ! [ "$(SCRIPTS)/build_deps.sh" -nt $@ ] && \
 	    ! [ "$(SCRIPTS)/build_libffi.sh" -nt $@ ] && \
 	    ! [ "$(SCRIPTS)/build_freetype.sh" -nt $@ ] && \

@@ -14,7 +14,39 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
 STAGING="$BUILD_DIR/gnutls_staging"
-GNULIB_DIR="$ROOT/thirdparty/gnutls/gnulib"   # gnutls 的 gnulib submodule, 共享给 libtasn1
+TARBALL_DIR="$BUILD_DIR/gnutls_tarballs"
+
+# release tarball 源: 自带 configure/Makefile.in, 免 gnulib bootstrap。
+# git 树的 bootstrap 依赖 gnulib 且与 libtasn1 等库存在版本错配
+# (src/gl/lib/malloc.c.diff 打不上), 远端 core-extract 用 .temp/crossover
+# 预生成文件规避; 这里直接用同版本官方 release, 语义等价且可复现。
+fetch_tarball() {
+    local name="$1" url="$2"
+    local out="$TARBALL_DIR/$name"
+    local archive="$TARBALL_DIR/$(basename "$url")"
+    if [ -d "$out" ]; then return 0; fi
+    mkdir -p "$TARBALL_DIR"
+    log "--- 下载 $name ---"
+    curl -fL --retry 3 -o "$archive" "$url"
+    case "$archive" in
+        *.tar.xz) tar -xJf "$archive" -C "$TARBALL_DIR" ;;
+        *) tar -xzf "$archive" -C "$TARBALL_DIR" ;;
+    esac
+    # GNU release tarball 顶层目录即 <name>-<version>, 直接推导;
+    # 不再次 tar -t (xz 归档需 -tJ, 避免误用 gzip 报错)
+    if [ ! -d "$out" ]; then
+        local base="${archive##*/}"
+        local top="${base%.tar.*}"
+        [ -n "$top" ] && [ -d "$TARBALL_DIR/$top" ] && mv "$TARBALL_DIR/$top" "$out"
+    fi
+    log "--- $name 就绪: $out ---"
+}
+
+fetch_tarball gmp "https://ftp.gnu.org/gnu/gmp/gmp-6.2.1.tar.xz"
+fetch_tarball nettle "https://ftp.gnu.org/gnu/nettle/nettle-3.10.2.tar.gz"
+fetch_tarball libtasn1 "https://ftp.gnu.org/gnu/libtasn1/libtasn1-4.20.0.tar.gz"
+fetch_tarball libunistring "https://ftp.gnu.org/gnu/libunistring/libunistring-1.3.tar.xz"
+fetch_tarball gnutls "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.3.tar.xz"
 
 # 幂等跳过: 5 个库的关键产物全部就位
 idempotent_done() {
@@ -129,28 +161,28 @@ build_one() {
 }
 
 # ── 1. gmp (nettle 的 bignum 后端) ──
-build_one gmp "$ROOT/thirdparty/gmp" none \
+build_one gmp "$TARBALL_DIR/gmp" none \
     --disable-assembly --enable-cxx=no --disable-dependency-tracking
 stage_libs libgmp
 stage_headers gmp.h
 stage_pc gmp.pc
 
 # ── 2. libtasn1 (gnutls 的 ASN.1 解析) ──
-build_one libtasn1 "$ROOT/thirdparty/libtasn1" gnulib \
+build_one libtasn1 "$TARBALL_DIR/libtasn1" none \
     --disable-doc --disable-dependency-tracking --disable-tests
 stage_libs libtasn1
 stage_headers libtasn1.h
 stage_pc libtasn1.pc
 
 # ── 3. libunistring (gnutls 的字符串/IDN 依赖) ──
-build_one libunistring "$ROOT/thirdparty/libunistring" autogen \
+build_one libunistring "$TARBALL_DIR/libunistring" none \
     --disable-dependency-tracking --without-libiconv-prefix
 stage_libs libunistring
 stage_headers unistring
 stage_pc libunistring.pc
 
 # ── 4. nettle (+hogweed, gnutls 的 crypto 后端) ──
-build_one nettle "$ROOT/thirdparty/nettle" nettle \
+build_one nettle "$TARBALL_DIR/nettle" none \
     --disable-documentation --disable-openssl --disable-assembler \
     --disable-dependency-tracking
 stage_libs libnettle
@@ -160,7 +192,7 @@ stage_pc nettle.pc
 stage_pc hogweed.pc
 
 # ── 5. gnutls (schannel 的 TLS 后端) ──
-build_one gnutls "$ROOT/thirdparty/gnutls" gnulib \
+build_one gnutls "$TARBALL_DIR/gnutls" none \
     --disable-doc --disable-tools --disable-tests --disable-full-test-suite --disable-gtk-doc --disable-cxx \
     --disable-guile --disable-valgrind-tests --disable-code-coverage \
     --without-p11-kit --without-tpm --without-brotli --without-zstd \
