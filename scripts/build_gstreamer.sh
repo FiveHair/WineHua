@@ -17,9 +17,13 @@ source "$SCRIPT_DIR/env.sh"
 GLIB_SRC="$ROOT/thirdparty/glib"
 GST_SRC="$ROOT/thirdparty/gstreamer"
 PCRE2_SRC="$ROOT/thirdparty/pcre2"
-# gst-plugins-base: fd.o 独立仓库停在 1.12, 1.24 只在 monorepo subproject
-# (wrap 下载描述, 违反 submodule 要求) → 复用 CrossOver vendored 目录 (同版本同源 release 提取)
-BASE_SRC="$ROOT/.temp/crossover/gstreamer/subprojects/gst-plugins-base"
+# gst-plugins-base: fd.o 独立仓库停在 1.12, 1.24 只在 monorepo subproject。
+# gstreamer 子模块已直接跟踪 subprojects/gst-plugins-base (1.24.4, 与 core 同源),
+# 直接用它, 无需外部 .temp/crossover staging。
+BASE_SRC="$ROOT/thirdparty/gstreamer/subprojects/gst-plugins-base"
+GOOD_SRC="$ROOT/thirdparty/gstreamer/subprojects/gst-plugins-good"
+LIBAV_SRC="$ROOT/thirdparty/gstreamer/subprojects/gst-libav"
+FFMPEG_SRC="$BUILD_DIR/ffmpeg_src"
 
 GST_PREFIX="$SYSROOT_EXT/usr"
 GST_LIBDIR="$GST_PREFIX/lib/x86_64-linux-ohos"
@@ -34,12 +38,7 @@ idempotent_done() {
         && [ -f "$SYSROOT_EXT_INC/glib.h" ]
 }
 
-if idempotent_done; then
-    log "GStreamer 链已就绪，跳过"
-    exit 0
-fi
-
-log "=== 构建 GStreamer 链 (pcre2/glib/gstreamer/plugins-base, x86_64) → sysroot-ext ==="
+log "=== 构建 GStreamer 链 (core + plugins-base/good + libav, x86_64) → sysroot-ext ==="
 
 mkdir -p "$SYSROOT_EXT_INC" "$SYSROOT_EXT_LIB" "$SYSROOT_EXT_PC" "$BUILD_DIR"
 
@@ -124,7 +123,8 @@ if [ ! -f "$SYSROOT_EXT_LIB/libglib-2.0.so.0" ]; then
         -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
         -Dselinux=disabled -Dxattr=false -Dlibmount=disabled -Dman=false \
         -Ddtrace=false -Dsystemtap=false -Dgtk_doc=false -Dtests=false \
-        -Dinstalled_tests=false -Dlibelf=disabled
+        -Dinstalled_tests=false -Dlibelf=disabled \
+        -Dnls=disabled
     meson compile -C "$build" -j "$JOBS"
     DESTDIR=/ meson install -C "$build"
     stage_pcs
@@ -150,8 +150,11 @@ else
     log "gstreamer core 已就绪，跳过"
 fi
 
-# ── 4. gst-plugins-base 1.24.4 (meson, crossover vendored; 只编 gst-libs 出 .pc) ──
-if [ ! -f "$SYSROOT_EXT_PC/gstreamer-video-1.0.pc" ]; then
+# ── 4. gst-plugins-base 1.24.4 (meson, monorepo subproject) ──
+# 既出 gst-libs 的 .pc (wine configure 探测用), 也编基础插件
+# (typefind/playback/app/audioconvert 等, winegstreamer 运行时必需)。
+if [ ! -f "$SYSROOT_EXT_PC/gstreamer-video-1.0.pc" ] || \
+   [ ! -d "$GST_LIBDIR/gstreamer-1.0" ]; then
     log "--- 构建 gst-plugins-base ---"
     build="$BUILD_DIR/gst_base_build"
     rm -rf "$build"
@@ -160,15 +163,11 @@ if [ ! -f "$SYSROOT_EXT_PC/gstreamer-video-1.0.pc" ]; then
         -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
         -Dtests=disabled -Dexamples=disabled -Dintrospection=disabled -Ddoc=disabled \
         -Dorc=disabled -Dnls=disabled \
-        -Dadder=disabled -Dapp=disabled -Daudioconvert=disabled -Daudiomixer=disabled \
-        -Daudiorate=disabled -Daudioresample=disabled -Daudiotestsrc=disabled \
-        -Dcompositor=disabled -Ddebugutils=disabled -Dencoding=disabled -Dgio=disabled \
-        -Doverlaycomposition=disabled -Dpbtypes=disabled -Dplayback=disabled \
-        -Drawparse=disabled -Dsubparse=disabled -Dtcp=disabled -Dtypefind=disabled \
-        -Dvideoconvertscale=disabled -Dvideorate=disabled -Dvideotestsrc=disabled \
-        -Dvolume=disabled -Ddrm=disabled -Dgl=disabled -Dalsa=disabled -Dcdparanoia=disabled \
-        -Dlibvisual=disabled -Dogg=disabled -Dopus=disabled -Dpango=disabled \
-        -Dtheora=disabled -Dtremor=disabled -Dvorbis=disabled -Dxshm=disabled -Dxi=disabled
+        -Dcompositor=disabled -Ddebugutils=disabled -Dencoding=disabled \
+        -Doverlaycomposition=disabled -Ddrm=disabled -Dgl=disabled -Dalsa=disabled \
+        -Dcdparanoia=disabled -Dlibvisual=disabled -Dogg=disabled -Dopus=disabled \
+        -Dpango=disabled -Dtheora=disabled -Dtremor=disabled -Dvorbis=disabled \
+        -Dxshm=disabled -Dxi=disabled
     meson compile -C "$build" -j "$JOBS"
     DESTDIR=/ meson install -C "$build"
     stage_pcs
@@ -193,5 +192,79 @@ for pc in gstreamer-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-tag-1.
     grep -q "lgstbase-1.0" "$f" || \
         sed -i "/^Libs:/ s/\$/ -lgstbase-1.0 -lgstpbutils-1.0 -lglib-2.0 -lgobject-2.0 -lgmodule-2.0 -lgio-2.0/" "$f"
 done
+
+# ── 5. gst-plugins-good (demuxer: qtdemux/matroskademux/typefind 等) ──
+if [ ! -d "$GST_LIBDIR/gstreamer-1.0" ] || \
+   [ ! -f "$GST_LIBDIR/gstreamer-1.0/libgstqtdemux.so" ]; then
+    log "--- 构建 gst-plugins-good ---"
+    build="$BUILD_DIR/gst_good_build"
+    rm -rf "$build"
+    # zlib 来自 OHOS sysroot; vpx 插件已由 libvpx 提供。禁用外部音频/图像依赖。
+    meson setup "$build" "$GOOD_SRC" --cross-file "$(gen_cross_file)" \
+        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nodownload \
+        -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
+        -Dcairo=disabled -Ddv=disabled -Dflac=disabled -Djack=disabled \
+        -Djpeg=disabled -Dlame=disabled -Dlibcaca=disabled -Dmpg123=disabled \
+        -Dpulse=disabled -Dshout2=disabled -Dspeex=disabled -Dtaglib=disabled \
+        -Dtwolame=disabled -Dvpx=disabled -Dwavpack=disabled -Daalib=disabled \
+        -Damrnb=disabled -Damrwbdec=disabled -Ddv1394=disabled -Dgtk3=disabled \
+        -Doss=disabled -Doss4=disabled -Dosxaudio=disabled -Dosxvideo=disabled \
+        -Dqt5=disabled -Dqt6=disabled -Drpicamsrc=disabled -Dsoup=disabled \
+        -Dv4l2=disabled -Dximagesrc=disabled -Ddirectsound=disabled
+    meson compile -C "$build" -j "$JOBS"
+    DESTDIR=/ meson install -C "$build"
+    stage_pcs
+else
+    log "gst-plugins-good 已就绪，跳过"
+fi
+
+# ── 6. FFmpeg + gst-libav (通用解码: H.264/VP9/AAC 等) ──
+if [ ! -f "$SYSROOT_EXT_LIB/libavcodec.so" ] || \
+   [ ! -f "$GST_LIBDIR/gstreamer-1.0/libgstlibav.so" ]; then
+    log "--- 构建 FFmpeg (meson-ports) ---"
+    if [ ! -d "$FFMPEG_SRC/.git" ]; then
+        if [ ! -f "$FFMPEG_SRC/meson.build" ]; then
+            rm -rf "$FFMPEG_SRC"
+            if [ -f "$ROOT/build/ffmpeg-meson.tar.gz" ]; then
+                mkdir -p "$FFMPEG_SRC"
+                tar -xzf "$ROOT/build/ffmpeg-meson.tar.gz" -C "$FFMPEG_SRC" --strip-components=1
+            else
+                git clone --depth 1 --branch meson-6.1 \
+                    https://gitlab.freedesktop.org/gstreamer/meson-ports/ffmpeg.git "$FFMPEG_SRC" \
+                    || { echo "FFmpeg clone 失败, 跳过 libav"; FFMPEG_SRC=""; }
+            fi
+        fi
+    fi
+    if [ -n "${FFMPEG_SRC:-}" ] && [ -f "$FFMPEG_SRC/meson.build" ]; then
+        build="$BUILD_DIR/ffmpeg_build"
+        rm -rf "$build"
+        meson setup "$build" "$FFMPEG_SRC" --cross-file "$(gen_cross_file)" \
+            --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos \
+            -Ddefault_library=shared \
+            -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
+            -Dc_link_args="--target=$TARGET --sysroot=$SYSROOT -L$SYSROOT_EXT_LIB -lz" \
+            -Dprograms=disabled -Dtests=disabled \
+            -Dzlib=enabled -Diconv=disabled \
+            -Dlibx264=disabled -Dlibvpx=disabled -Dlibopus=disabled
+        meson compile -C "$build" -j "$JOBS"
+        DESTDIR=/ meson install -C "$build"
+        stage_pcs
+    fi
+    if [ -n "${FFMPEG_SRC:-}" ] && [ -f "$FFMPEG_SRC/meson.build" ] && \
+       [ -f "$SYSROOT_EXT_LIB/libavcodec.so" ]; then
+        log "--- 构建 gst-libav ---"
+        build="$BUILD_DIR/gst_libav_build"
+        rm -rf "$build"
+        meson setup "$build" "$LIBAV_SRC" --cross-file "$(gen_cross_file)" \
+            --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nodownload \
+            -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
+            -Dtests=disabled -Ddoc=disabled
+        meson compile -C "$build" -j "$JOBS"
+        DESTDIR=/ meson install -C "$build"
+        stage_pcs
+    fi
+else
+    log "gst-libav 已就绪，跳过"
+fi
 
 log "GStreamer 链就绪: $SYSROOT_EXT"

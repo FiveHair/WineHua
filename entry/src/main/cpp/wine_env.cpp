@@ -85,6 +85,9 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "PATH=/usr/local/bin:/data/app/bin:/usr/bin:/vendor/bin:" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
         "TMPDIR=" WINE_TMPDIR,
         "MIDI_SOUNDFONT_PATH=" + midiSoundfontPath,
+        // winegstreamer 运行时加载 GStreamer 插件 (gst-plugins-base/good/libav)
+        "GST_PLUGIN_PATH=" + binDir + "/x86_64-unix/gstreamer-1.0",
+        "GST_PLUGIN_SYSTEM_PATH=" + binDir + "/x86_64-unix/gstreamer-1.0",
     };
     // ==== Layer 1: Box64 性能调优 (仅 ARM64) ====
     // NOTE: BOX64_DYNAREC_WEAKBARRIER=2 在桌面 DXVK 下会被 AppendStableDesktopDxvkEnv 覆盖为 0
