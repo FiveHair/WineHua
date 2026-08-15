@@ -386,6 +386,10 @@ bool AudioBroker::EnsureRendererLocked()
         result = OH_AudioStreamBuilder_SetFrameSizeInCallback(builder, kAudioTargetCallbackFrames);
     if (result == AUDIOSTREAM_SUCCESS)
         result = OH_AudioStreamBuilder_SetRendererWriteDataCallback(builder, OnWriteData, this);
+    // 注册打断回调：来电/通话等高优先级音频会打断 GAME 流，挂断后系统发送
+    // RESUME，必须在此回调里显式重新 Start 渲染流，否则音频永久无声。
+    if (result == AUDIOSTREAM_SUCCESS)
+        result = OH_AudioStreamBuilder_SetRendererInterruptCallback(builder, OnInterrupt, this);
 
     if (result != AUDIOSTREAM_SUCCESS)
     {
@@ -630,6 +634,34 @@ void AudioBroker::OnReadData(OH_AudioCapturer* capturer,
     if (!frames) return;
 
     broker->DistributeCaptureFramesS16(snapshot, static_cast<const int16_t*>(audioData), frames);
+}
+
+void AudioBroker::OnInterrupt(OH_AudioRenderer* renderer,
+                              void* userData,
+                              OH_AudioInterrupt_ForceType type,
+                              OH_AudioInterrupt_Hint hint)
+{
+    auto* broker = static_cast<AudioBroker*>(userData);
+
+    (void)renderer;
+    OH_LOG_INFO(LOG_APP, "[AudioBroker] renderer interrupt hint=%{public}d force=%{public}d",
+                static_cast<int>(hint), static_cast<int>(type));
+    if (!broker) return;
+
+    // 来电/通话等高优先级音频以 FORCE 方式打断 GAME 渲染流，系统会把流暂停；
+    // 挂断后系统发送 RESUME，若此时不显式重新 Start，渲染流将停在暂停态，
+    // Wine 内所有音频永久无声。RESUME 时重新启动即可恢复发声。
+    if (hint == AUDIOSTREAM_INTERRUPT_HINT_RESUME)
+    {
+        std::lock_guard<std::mutex> lock(broker->mutex_);
+        if (broker->renderer_)
+        {
+            OH_AudioRenderer_Start(broker->renderer_);
+            OH_LOG_INFO(LOG_APP, "[AudioBroker] renderer resumed after interrupt");
+        }
+    }
+    // PAUSE/STOP/DUCK/UNDUCK/MUTE/UNMUTE：系统已代为处理（暂停/停止/音量），
+    // 应用侧无需额外动作；恢复统一由 RESUME 驱动。
 }
 
 } // namespace winehua
