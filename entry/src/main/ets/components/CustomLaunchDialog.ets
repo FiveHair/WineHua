@@ -37,7 +37,9 @@ const WINVER_OPTIONS: WinverOption[] = [
 // 渲染策略 + 兼容模式档位 + Windows 版本, 点「启动」按所选参数启动一次 —
 // 不写入持久化配置。
 // 每套选择第一项都是「跟随全局」= 不覆盖 (启动时映射为 undefined 传 onLaunch)。
-// 兼容模式为 Box64 动态翻译档位 (仅 ARM 设备生效, x86_64 原生跑无效果)。
+// 兼容模式为 Box64 动态翻译档位 (仅 ARM 设备生效, x86_64 原生跑无效果),
+// 对齐 Winlator 4 档位: 稳定/保守/均衡/性能, 每档完整 11 个 BOX64_DYNAREC_*
+// 参数注入 (见 AppLibraryService.BOX64_DYNAREC_PRESETS), 覆盖压过全局基线。
 // Windows 版本注入 WINEHUA_WINDOWS_VERSION 环境变量, 逐进程生效 (两架构都
 // 有效)。版本项多 (18), SegmentButton 上限 5 个按钮放不下, 用 Select 下拉
 // (winecfg 同款交互)。
@@ -47,11 +49,11 @@ export struct CustomLaunchDialog {
   controller?: CustomDialogController;
   exeName: string = '';   // 标题 "自定义启动 · <exe>"
   onLaunch: (graphics?: 'dxvk' | 'wined3d',
-             compatMode?: 'compat' | 'balanced' | 'perf',
+             compatMode?: 'stability' | 'conservative' | 'intermediate' | 'performance',
              winver?: string) => void = () => {};
   // 渲染策略: 0=跟随全局 1=dxvk 2=wined3d
   @State graphicsSel: number[] = [0];
-  // 兼容模式: 0=跟随全局 1=兼容优先 2=均衡 3=性能优先
+  // 兼容模式: 0=跟随全局 1=稳定 2=保守 3=均衡 4=性能 (对齐 Winlator 4 档位)
   @State compatSel: number[] = [0];
   // Windows 版本: 按钮显示文本 (选中菜单项后按钮文本自动更新, 回写本状态)。
   // 用 .value() 驱动而不是 .selected(索引): selected 只设"初始选中态/高亮",
@@ -67,7 +69,8 @@ export struct CustomLaunchDialog {
     const opt = WINVER_OPTIONS.find((o: WinverOption) => o.label == this.winverLabel);
     const winver = opt?.value || undefined;
     this.onLaunch(g == 1 ? 'dxvk' : g == 2 ? 'wined3d' : undefined,
-      c == 1 ? 'compat' : c == 2 ? 'balanced' : c == 3 ? 'perf' : undefined,
+      c == 1 ? 'stability' : c == 2 ? 'conservative'
+        : c == 3 ? 'intermediate' : c == 4 ? 'performance' : undefined,
       winver);
     this.controller?.close();
   }
@@ -105,7 +108,8 @@ export struct CustomLaunchDialog {
         SegmentButton({
           options: SegmentButtonOptions.capsule({
             buttons: [
-              { text: '跟随全局' }, { text: '兼容优先' }, { text: '均衡' }, { text: '性能优先' }
+              { text: '跟随全局' }, { text: '稳定' }, { text: '保守' },
+              { text: '均衡' }, { text: '性能' }
             ],
             multiply: false
           }),

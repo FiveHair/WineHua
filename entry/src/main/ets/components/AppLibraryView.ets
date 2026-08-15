@@ -311,7 +311,7 @@ export struct AppLibraryView {
       builder: CustomLaunchDialog({
         exeName: entry.name,
         onLaunch: (graphics?: 'dxvk' | 'wined3d',
-                   compatMode?: 'compat' | 'balanced' | 'perf',
+                   compatMode?: 'stability' | 'conservative' | 'intermediate' | 'performance',
                    winver?: string) => {
           this.launch(entry, { graphics: graphics, compatMode: compatMode, winver: winver });
         }

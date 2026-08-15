@@ -789,7 +789,7 @@ export struct FileBrowserView {
       builder: CustomLaunchDialog({
         exeName: entry.name,
         onLaunch: (graphics?: 'dxvk' | 'wined3d',
-                   compatMode?: 'compat' | 'balanced' | 'perf',
+                   compatMode?: 'stability' | 'conservative' | 'intermediate' | 'performance',
                    winver?: string) => {
           this.launchExe(path, { graphics: graphics, compatMode: compatMode, winver: winver });
         }

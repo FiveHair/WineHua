@@ -17,12 +17,74 @@ const WINE_PREFIX = '/data/storage/el2/base/files/.wine';
 const SCAN_MAX_DEPTH = 6;
 const SCAN_MAX_EXE = 200;
 
+// Box64 动态翻译档位 → BOX64_DYNAREC_* 完整参数组合 (对齐 .temp/winlator
+// Box64PresetManager.getEnvVars 的 4 档位, 每档完整 11 参数, 不含全局基线
+// 的 BOX64_AVX / BOX64_DYNAREC_VOLATILE_METADATA — 那两项随全局基线保留)。
+// 仅 arm64 (Box64 模拟) 生效; x86_64 原生跑忽略。档位语义从保守到激进:
+// stability 最稳, performance 最快。注入时整体覆盖对应 key (完整档位语义,
+// 不受全局基线残留参数干扰)。
+export const BOX64_DYNAREC_PRESETS: Record<string, Record<string, string>> = {
+  'stability': {
+    'BOX64_DYNAREC_SAFEFLAGS': '2',
+    'BOX64_DYNAREC_FASTNAN': '0',
+    'BOX64_DYNAREC_FASTROUND': '0',
+    'BOX64_DYNAREC_X87DOUBLE': '1',
+    'BOX64_DYNAREC_BIGBLOCK': '0',
+    'BOX64_DYNAREC_STRONGMEM': '2',
+    'BOX64_DYNAREC_FORWARD': '128',
+    'BOX64_DYNAREC_CALLRET': '0',
+    'BOX64_DYNAREC_WAIT': '0',
+    'BOX64_DYNAREC_NATIVEFLAGS': '0',
+    'BOX64_DYNAREC_WEAKBARRIER': '0'
+  },
+  'conservative': {
+    'BOX64_DYNAREC_SAFEFLAGS': '2',
+    'BOX64_DYNAREC_FASTNAN': '0',
+    'BOX64_DYNAREC_FASTROUND': '0',
+    'BOX64_DYNAREC_X87DOUBLE': '1',
+    'BOX64_DYNAREC_BIGBLOCK': '1',
+    'BOX64_DYNAREC_STRONGMEM': '1',
+    'BOX64_DYNAREC_FORWARD': '128',
+    'BOX64_DYNAREC_CALLRET': '0',
+    'BOX64_DYNAREC_WAIT': '1',
+    'BOX64_DYNAREC_NATIVEFLAGS': '0',
+    'BOX64_DYNAREC_WEAKBARRIER': '1'
+  },
+  'intermediate': {
+    'BOX64_DYNAREC_SAFEFLAGS': '2',
+    'BOX64_DYNAREC_FASTNAN': '1',
+    'BOX64_DYNAREC_FASTROUND': '0',
+    'BOX64_DYNAREC_X87DOUBLE': '1',
+    'BOX64_DYNAREC_BIGBLOCK': '2',
+    'BOX64_DYNAREC_STRONGMEM': '0',
+    'BOX64_DYNAREC_FORWARD': '128',
+    'BOX64_DYNAREC_CALLRET': '0',
+    'BOX64_DYNAREC_WAIT': '1',
+    'BOX64_DYNAREC_NATIVEFLAGS': '0',
+    'BOX64_DYNAREC_WEAKBARRIER': '2'
+  },
+  'performance': {
+    'BOX64_DYNAREC_SAFEFLAGS': '1',
+    'BOX64_DYNAREC_FASTNAN': '1',
+    'BOX64_DYNAREC_FASTROUND': '1',
+    'BOX64_DYNAREC_X87DOUBLE': '0',
+    'BOX64_DYNAREC_BIGBLOCK': '3',
+    'BOX64_DYNAREC_STRONGMEM': '0',
+    'BOX64_DYNAREC_FORWARD': '512',
+    'BOX64_DYNAREC_CALLRET': '1',
+    'BOX64_DYNAREC_WAIT': '1',
+    'BOX64_DYNAREC_NATIVEFLAGS': '1',
+    'BOX64_DYNAREC_WEAKBARRIER': '2'
+  }
+};
+
 // 自定义启动临时参数 (弹窗选一次, 不持久化): graphics 渲染策略覆盖,
-// compatMode 兼容模式档位, winver Windows 版本; 字段全可选, 缺省 =
-// 跟随全局 (不注入覆盖)。ArkTS 禁止内联对象字面量作类型声明, 故抽成显式 interface
+// compatMode 兼容模式档位 (Box64 dynarec 档位, 对齐 Winlator 4 档, 完整
+// 11 参数注入), winver Windows 版本; 字段全可选, 缺省 = 跟随全局 (不注入
+// 覆盖)。ArkTS 禁止内联对象字面量作类型声明, 故抽成显式 interface
 export interface LaunchOverrides {
   graphics?: 'dxvk' | 'wined3d';
-  compatMode?: 'compat' | 'balanced' | 'perf';
+  compatMode?: 'stability' | 'conservative' | 'intermediate' | 'performance';
   // Windows 版本 (wine 侧 ntdll/version.c version_names 表的合法值, 如
   // 'win95'/'winxp'/'win7'/'win10'/'win11', 全小写精确匹配):
   // winehua 定制版 version_init 优先读环境变量 WINEHUA_WINDOWS_VERSION
@@ -448,7 +510,8 @@ export class AppLibraryService {
   // 启动: 走 runWineProgram (与游戏/smoke 同一条 broker 通道, 逐进程注入 env)。
   // overrides 为"自定义启动"临时参数 (弹窗选一次, 不持久化):
   //   graphics    'wined3d'→WineD3D, 'dxvk'→DXVK; undefined = 跟随全局 d3dBackend
-  //   compatMode  'compat'(全保守) / 'perf'(激进) / 'balanced'(= 全局基线, 不注入);
+  //   compatMode  'stability'/'conservative'/'intermediate'/'performance'
+  //               (对齐 Winlator 4 档位, 完整 11 参数注入);
   //               undefined = 跟随全局 (不注入 BOX64_DYNAREC 覆盖)
   // 覆盖经 UpsertEnvLine 压过 BuildWineEnv 基线, 只作用于本进程。
   // 返回 broker 受理的 pid (<=0 = 受理失败, 调用方立即报启动失败);
@@ -467,19 +530,23 @@ export class AppLibraryService {
     // 默认 zh_CN, 程序永远是中文
     environment['LANG'] = `${env.getWineLang()}.UTF-8`;
     environment['LC_ALL'] = `${env.getWineLang()}.UTF-8`;
-    // 兼容模式档位 → BOX64 dynarec 覆盖 (仅 arm64 生效; 映射见 usage_cn.json,
-    // 'balanced'/undefined = 全局基线 SAFEFLAGS=1+BIGBLOCK=3+CALLRET=2+
-    // FORWARD=1024+WEAKBARRIER=2, 不注入覆盖)
-    const compatMode = overrides?.compatMode ?? 'global';
-    if (compatMode == 'compat') {
-      environment['BOX64_DYNAREC_SAFEFLAGS'] = '2';
-      environment['BOX64_DYNAREC_BIGBLOCK'] = '0';
-      environment['BOX64_DYNAREC_CALLRET'] = '0';
-      environment['BOX64_DYNAREC_FORWARD'] = '0';
+    // 兼容模式档位 → BOX64 dynarec 覆盖 (仅 arm64 生效): 对齐 Winlator 4 档位
+    // (BOX64_DYNAREC_PRESETS, 完整 11 参数注入), 覆盖经 UpsertEnvLine 压过
+    // BuildWineEnv 基线; undefined (跟随全局) = 不注入, 走全局基线
+    // SAFEFLAGS=1+BIGBLOCK=3+CALLRET=2+FORWARD=1024+WEAKBARRIER=2
+    const compatPreset = overrides?.compatMode ? BOX64_DYNAREC_PRESETS[overrides.compatMode] : undefined;
+    if (compatPreset) {
+      for (const k of Object.keys(compatPreset)) {
+        environment[k] = compatPreset[k];
+      }
+    }
+    // DXVK 约束以现状为准: SpawnWineProgramImpl 不应用 AppendStableDesktopDxvkEnv
+    // (那是 explorer 桌面会话路径), 档位注入的 WEAKBARRIER 经 UpsertEnvLine 最后
+    // 应用优先级最高, 会覆盖掉 DXVK 应有的 0 — Venus ring 期望 x86 定序, 激进的
+    // 弱屏障会损坏共享内存命令环 (随机 Vulkan 损坏), 与 d3dLaunchEnvironment
+    // 的现状约束一致, DXVK 下强制回 0
+    if (d3dBackend.startsWith('dxvk')) {
       environment['BOX64_DYNAREC_WEAKBARRIER'] = '0';
-    } else if (compatMode == 'perf') {
-      environment['BOX64_DYNAREC_SAFEFLAGS'] = '0';
-      environment['BOX64_DYNAREC_FORWARD'] = '2048';
     }
     // Windows 版本覆盖: 注入 WINEHUA_WINDOWS_VERSION (ntdll/version_init 优先读
     // 它, 回落注册表), 只作用于本进程; 两架构都生效 (版本逻辑在 ntdll 层)
