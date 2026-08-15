@@ -11,6 +11,7 @@
 #include "input_manager.h"
 #include "plugin_manager.h"
 #include "pointer_extras.h"
+#include "text_input.h"
 #include "compositor/compositor_utils.h"
 #include "compositor/compositor_constants.h"
 #include "include/viewporter-server-protocol.h"
@@ -1115,4 +1116,6 @@ extern "C" void RegisterWlCoreGlobals(wl_display* display) {
     // dinput 老游戏的指针扩展 (warp 回中/指针约束; relative 故意不注册,
     // 见 pointer_extras.h 头注释)
     PointerExtras::GetInstance()->Register(display);
+    // IME 文本输入 (Wine wayland_text_input.c 绑定, 软键盘文字经此注入)
+    TextInput::GetInstance()->Register(display);
 }

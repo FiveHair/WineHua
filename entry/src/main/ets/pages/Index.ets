@@ -1,7 +1,8 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
 import { fileIo as fs } from '@kit.CoreFileKit';
-import { deviceInfo } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
+import { inputMethod } from '@kit.IMEKit';
 import { SegmentButton, SegmentButtonOptions } from '@kit.ArkUI';
 import { WineEnvService } from '../service/WineEnvService';
 import { ProcessService, ProcessInfo } from '../service/ProcessService';
@@ -53,9 +54,91 @@ struct Index {
   // 升级提示日志只打一次 (master 版无弹卡 UI, 检测到不一致仅留痕 +
   // 快速操作按钮转为"应用更新"语义, 见 quickStart)
   private upgradeLogged: boolean = false;
+  // -- IME 桥接 (Wine 文本框聚焦 → attach 弹软键盘 → insertText 注入 Wine) --
+  private imeController: inputMethod.InputMethodController | null = null;
+
+  // 注册 C++ 侧激活回调: active=1 → attach 弹键盘, active=0 → 收起
+  private setupIme(): void {
+    testNapi.setImeCallback((active: number, x: number, y: number, w: number, h: number) => {
+      hilog.info(DOMAIN, 'IME-TEST', '[cb] active=%{public}d rect=[%{public}d,%{public}d %{public}dx%{public}d]',
+        active, x, y, w, h);
+      if (active === 1) {
+        this.imeAttach();
+      } else {
+        this.imeDetach();
+      }
+    });
+  }
+
+  private imeAttach(): void {
+    hilog.info(DOMAIN, 'IME-TEST', '[step] imeAttach begin');
+    try {
+      const controller = inputMethod.getController();
+      this.imeController = controller;
+      // 每次激活都会 attach; 先清掉可能已注册的回调, 否则 on() 累积
+      // 导致一个 insertText 触发多次注入 (重复字符)
+      controller.off('insertText');
+      controller.off('deleteLeft');
+      controller.off('deleteRight');
+      controller.off('sendKeyboardStatus');
+      controller.off('setPreviewText');
+      const attr: inputMethod.InputAttribute = {
+        textInputType: inputMethod.TextInputType.TEXT,
+        enterKeyType: inputMethod.EnterKeyType.DONE
+      };
+      const cfg: inputMethod.TextConfig = { inputAttribute: attr };
+      controller.attach(true, cfg).then(() => {
+        hilog.info(DOMAIN, 'IME-TEST', '[attach] OK, registering on() callbacks');
+        // attach 成功后注册事件 (12800009 detached 说明 on() 须在绑定后注册)
+        controller.on('insertText', (text: string) => {
+          hilog.info(DOMAIN, 'IME-TEST', '[insertText] "%{public}s"', text);
+          testNapi.sendImeCommit(text);   // 提交文本 → Wine commit_string
+        });
+        controller.on('deleteLeft', (len: number) => {
+          hilog.info(DOMAIN, 'IME-TEST', '[deleteLeft] len=%{public}d', len);
+          testNapi.imeBackspace();        // 退格 → Wine KEY_BACKSPACE
+        });
+        controller.on('deleteRight', (len: number) => {
+          hilog.info(DOMAIN, 'IME-TEST', '[deleteRight] len=%{public}d', len);
+          testNapi.imeBackspace();
+        });
+        controller.on('sendKeyboardStatus', (status: inputMethod.KeyboardStatus) => {
+          hilog.info(DOMAIN, 'IME-TEST', '[keyboardStatus] %{public}d (NONE=0 HIDE=1 SHOW=2)', status);
+        });
+        controller.on('setPreviewText', (text: string, range: inputMethod.Range) => {
+          hilog.info(DOMAIN, 'IME-TEST', '[previewText] "%{public}s" range=[%{public}d,%{public}d]', text, range.start, range.end);
+          testNapi.sendImePreedit(text, range.start, range.end);  // 预上屏 → Wine preedit_string
+        });
+      }).catch((err: BusinessError) => {
+        hilog.error(DOMAIN, 'IME-TEST', '[attach] FAILED code=%{public}d msg=%{public}s', err.code, err.message);
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, 'IME-TEST', '[step] EXCEPTION: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  private imeDetach(): void {
+    hilog.info(DOMAIN, 'IME-TEST', '[step] imeDetach');
+    const c = this.imeController;
+    if (c) {
+      try {
+        c.off('insertText');
+        c.off('deleteLeft');
+        c.off('deleteRight');
+        c.off('sendKeyboardStatus');
+        c.off('setPreviewText');
+        c.hideTextInput();
+        c.detach();
+      } catch (e) {
+        hilog.error(DOMAIN, 'IME-TEST', '[detach] EXCEPTION: %{public}s', JSON.stringify(e));
+      }
+      this.imeController = null;
+    }
+  }
 
   aboutToAppear(): void {
     this.d3dBackend = this.d3dBackendText === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
+    this.setupIme();
     const env = this.env;
     const mirror = (): void => {
       this.state = env.engineState;
