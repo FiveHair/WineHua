@@ -98,9 +98,11 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
      *   key 移出 zeroCopySurfaceKeys_, 该层自动恢复为普通 subsurface
      *   (CPU 合成置顶, 命中也置顶), 无需特判。
      * - 黑边命中: 归属仍是全屏窗口但标 swallow — 调用方只吞 PRESS (防幻影
-     *   点击/焦点切换), MOVE/RELEASE 照常透传: 坐标越界由 winewayland 的
-     *   motion clamp 夹回窗口边缘; 若连 RELEASE 一起吞, 内容区按下拖到黑边
-     *   松手会丢失 release, pressedButtons_ 按键状态永久卡死。
+     *   点击/焦点切换), MOVE/RELEASE 照常透传: 越界坐标由调用方按
+     *   contentW/contentH 钳到内容区边缘 (host 侧钳制, 与相对增量差分
+     *   同源, 防黑边位移被累积成游戏内幽灵位移); 若连 RELEASE 一起吞,
+     *   内容区按下拖到黑边松手会丢失 release, pressedButtons_ 按键状态
+     *   永久卡死。
      */
     for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
         const auto& layer = *it;
@@ -164,15 +166,19 @@ bool InputResolver::FindInputTargetAt(int x, int y, InputTarget& out)
                     out.originX = transform.offX;
                     out.originY = transform.offY;
                     out.scale = static_cast<float>(transform.scale);
+                    out.contentW = transform.srcW;
+                    out.contentH = transform.srcH;
                     return out.surface != nullptr;
                 }
                 // 黑边: 更高层已检查未命中, 黑边归属全屏窗口 (渲染时填黑),
-                // 标 swallow — 调用方只吞 PRESS, MOVE/RELEASE 照常透传
+                // 标 swallow — 调用方只吞 PRESS, MOVE/RELEASE 钳到内容边缘透传
                 out.toplevelId = fullscreenId;
                 out.surface = tmgr_.GetSurfaceForToplevel(fullscreenId);
                 out.originX = transform.offX;
                 out.originY = transform.offY;
                 out.scale = static_cast<float>(transform.scale);
+                out.contentW = transform.srcW;
+                out.contentH = transform.srcH;
                 out.swallow = true;
                 return out.surface != nullptr;
             }

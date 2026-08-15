@@ -14,9 +14,12 @@ struct InputTarget {
     // 全屏窗口保比例缩放显示, 局部坐标 = (桌面坐标 - origin) / scale; 普通窗口为 1
     float scale = 1.0f;
     // true = 该点落在全屏黑边内: 调用方只吞 PRESS (防幻影点击/焦点切换);
-    // MOVE/RELEASE 照常按 origin/scale 透传给全屏窗口 (越界坐标由
-    // winewayland clamp, 吞掉会导致按键状态卡死)
+    // MOVE/RELEASE 照常按 origin/scale 透传给全屏窗口 (越界坐标由调用方
+    // 用 contentW/contentH 钳到内容区边缘, 吞掉会导致按键状态卡死)
     bool swallow = false;
+    // 全屏窗口的内容尺寸 (fit 变换 src 尺寸, 即表面局部坐标有效域);
+    // 非全屏目标为 0 = 调用方不做内容区钳制
+    int contentW = 0, contentH = 0;
 };
 
 // 输入命中裁决 (依赖 ToplevelManager + DesktopCompositor)
