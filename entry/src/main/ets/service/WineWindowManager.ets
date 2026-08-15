@@ -855,6 +855,26 @@ export class WineWindowManager {
     this.notify();
   }
 
+  // 虚拟桌面窗口沉浸全屏还原 (VirtualDesktop 页面悬浮按钮点击)。
+  // DISABLE_TITLE_AND_DOCK_HOVER 禁用了系统 hover 唤出 → 无系统还原入口,
+  // 必须自建: 经 desktopWinCtx 取 VDA 主窗口 recover() (普通 FLOATING 态
+  // 标题栏自带还原, 沉浸态才需要此入口)。
+  async recoverDesktopWindow(): Promise<void> {
+    if (!this.desktopWinCtx) {
+      hilog.warn(DOMAIN, TAG, '[MW] recoverDesktopWindow: no desktop ctx');
+      return;
+    }
+    try {
+      const win = await window.getLastWindow(this.desktopWinCtx);
+      if (win) {
+        await win.recover();
+        hilog.info(DOMAIN, TAG, '[MW] recoverDesktopWindow OK');
+      }
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, '[MW] recoverDesktopWindow failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
   // 主动打开虚拟桌面独立窗口 (Index 悬浮窗点击; 初始化完毕不再自动拉起,
   // 主界面呈现悬浮窗桌面, 用户点击才开窗口)
   openDesktopWindow(): void {

@@ -41,6 +41,12 @@ export default class VirtualDesktopAbility extends UIAbility {
       return;
     }
     try {
+      // 重新打开窗口: 重置沉浸态 — 上次会话可能停在沉浸最大化, 不重置则
+      // immersiveMaximized / AppStorage vdImmersive 残留 → 悬浮"退出全屏"
+      // 按钮误显示。新窗口一律从普通浮动 (FLOATING) 态开始。
+      this.immersiveMaximized = false;
+      AppStorage.setOrCreate('vdImmersive', false);
+
       const mainWindow = windowStage.getMainWindowSync();
       if (!mainWindow) {
         hilog.error(DOMAIN, TAG, '[VDA] ERR getMainWindowSync NULL');
@@ -63,9 +69,11 @@ export default class VirtualDesktopAbility extends UIAbility {
         }
       });
 
-      // 最大化 → 沉浸全屏, 与游戏全屏同款路径: win.maximize() 无参数 =
-      // ENTER_IMMERSIVE (铺满屏幕、自动隐藏 dock/状态栏/标题栏, hover 热区
-      // 系统自动唤出, 还原入口由系统标题栏/dock 提供)。
+      // 最大化 → 沉浸全屏, 与游戏全屏同款路径:
+      // ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER (API 14+): 铺满屏幕、
+      // 自动隐藏 dock/状态栏/标题栏, 且鼠标悬停屏幕边缘热区时不唤出标题栏/
+      // Dock — 默认 ENTER_IMMERSIVE 会 hover 底部浮现 dock, 抢走虚拟桌面里
+      // 全屏游戏的边缘鼠标事件 (FPS 转向/边缘 UI 失效), 与游戏全屏同因。
       // 还原 → win.recover() 回普通窗口。
       // WindowStatusType (API≥14): 2=MAXIMIZE 4=FLOATING(普通自由窗口)。
       // 实测: 点最大化按钮发 2, 还原发 4。immersiveMaximized 防递归:
@@ -73,21 +81,34 @@ export default class VirtualDesktopAbility extends UIAbility {
       mainWindow.on('windowStatusChange', (statusType: number) => {
         hilog.info(DOMAIN, TAG, '[VDA] windowStatusChange status=%{public}d immersive=%{public}s',
           statusType, this.immersiveMaximized ? 'yes' : 'no');
-        if (statusType === 2 && !this.immersiveMaximized) {
-          this.immersiveMaximized = true;
-          mainWindow.maximize().then(() => {
-            hilog.info(DOMAIN, TAG, '[VDA] maximize(ENTER_IMMERSIVE) OK');
-          }).catch((e: Error) => {
-            hilog.warn(DOMAIN, TAG, '[VDA] maximize failed: %{public}s', JSON.stringify(e));
+        if (statusType === window.WindowStatusType.MAXIMIZE) {
+          // 2 = MAXIMIZE: 用户点最大化按钮。发起进入沉浸全屏 (DISABLE_HOVER:
+          // hover 热区不唤出标题栏/dock, 不抢虚拟桌面边缘鼠标)。
+          // maximize() 自身会触发回调, !immersiveMaximized 防递归。
+          // 真正进入沉浸全屏后系统发 FULL_SCREEN(1), 由下个分支显示按钮。
+          if (!this.immersiveMaximized) {
+            this.immersiveMaximized = true;
+            mainWindow.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER).then(() => {
+              hilog.info(DOMAIN, TAG, '[VDA] maximize(DISABLE_TITLE_AND_DOCK_HOVER) OK');
+            }).catch((e: Error) => {
+              hilog.warn(DOMAIN, TAG, '[VDA] maximize failed: %{public}s', JSON.stringify(e));
+              this.immersiveMaximized = false;
+              AppStorage.setOrCreate('vdImmersive', false);
+            });
+          }
+        } else if (statusType === window.WindowStatusType.FULL_SCREEN) {
+          // 1 = FULL_SCREEN: 沉浸全屏稳定态 (maximize(DISABLE) 完成)。此时
+          // 才是真正铺满屏幕盖住 dock 的状态 → 显示悬浮"退出全屏"按钮。
+          // status=1 可能重复触发 (日志实测), setOrCreate 幂等无副作用
+          AppStorage.setOrCreate('vdImmersive', true);
+        } else {
+          // 非全屏 (3 最小化 / 4 浮动 / 5 分屏): 一律隐藏还原按钮 + 重置
+          // 沉浸态, 保证"只有全屏才显示退出全屏按钮"。窗口退出沉浸
+          // (还原按钮 recover 或系统手势) 后系统已切到 FLOATING, 无需显式 recover。
+          if (this.immersiveMaximized) {
             this.immersiveMaximized = false;
-          });
-        } else if (statusType === 4 && this.immersiveMaximized) {
-          this.immersiveMaximized = false;
-          mainWindow.recover().then(() => {
-            hilog.info(DOMAIN, TAG, '[VDA] recover OK');
-          }).catch((e: Error) => {
-            hilog.warn(DOMAIN, TAG, '[VDA] recover failed: %{public}s', JSON.stringify(e));
-          });
+          }
+          AppStorage.setOrCreate('vdImmersive', false);
         }
       });
 
