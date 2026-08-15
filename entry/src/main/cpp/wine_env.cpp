@@ -190,7 +190,31 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
             "libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:"
             "libwayland-client.so:libwayland-client.so.0:libwayland-server.so:"
             "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
-            "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8",
+            "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8:"
+            // GStreamer 链 (winegstreamer): glib + gst core/base + bad/ugly 依赖库
+            "libglib-2.0.so:libglib-2.0.so.0:"
+            "libgobject-2.0.so:libgobject-2.0.so.0:"
+            "libgio-2.0.so:libgio-2.0.so.0:"
+            "libgmodule-2.0.so:libgmodule-2.0.so.0:"
+            "libgstreamer-1.0.so:libgstreamer-1.0.so.0:"
+            "libgstbase-1.0.so:libgstbase-1.0.so.0:"
+            "libgstvideo-1.0.so:libgstvideo-1.0.so.0:"
+            "libgstaudio-1.0.so:libgstaudio-1.0.so.0:"
+            "libgsttag-1.0.so:libgsttag-1.0.so.0:"
+            "libgstpbutils-1.0.so:libgstpbutils-1.0.so.0:"
+            "libgstallocators-1.0.so:libgstallocators-1.0.so.0:"
+            "libgstapp-1.0.so:libgstapp-1.0.so.0:"
+            "libgstcontroller-1.0.so:libgstcontroller-1.0.so.0:"
+            "libgstfft-1.0.so:libgstfft-1.0.so.0:"
+            "libgstnet-1.0.so:libgstnet-1.0.so.0:"
+            "libgstriff-1.0.so:libgstriff-1.0.so.0:"
+            "libgstrtp-1.0.so:libgstrtp-1.0.so.0:"
+            "libgstrtsp-1.0.so:libgstrtsp-1.0.so.0:"
+            "libgstsdp-1.0.so:libgstsdp-1.0.so.0:"
+            // bad/ugly 插件依赖: videoparsersbad 需 codecparsers, mpegtsdemux 需 mpegts
+            "libgstcodecparsers-1.0.so:libgstcodecparsers-1.0.so.0:"
+            "libgstmpegts-1.0.so:libgstmpegts-1.0.so.0:"
+            "libxml2.so:libxml2.so.2:libz.so:libz.so.1",
 #endif
         "VK_DRIVER_FILES=" + guestVulkanIcd,
         "VK_ICD_FILENAMES=" + guestVulkanIcd,
