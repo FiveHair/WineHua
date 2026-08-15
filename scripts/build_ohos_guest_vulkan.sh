@@ -1,13 +1,19 @@
 #!/bin/bash
-# Build the B1 x86_64 guest Vulkan stack for an ARM64 HarmonyOS device:
+# Build the guest Vulkan stack for the active WINE_ARCH:
 # Vulkan Loader -> Mesa Venus ICD -> vtest -> host virglrenderer/Vulkan.
+# arm64 原生 wine → aarch64-linux-ohos venus guest (与 wine 同架构, 系统 linker 直接 dlopen);
+# x86_64 → x86_64-linux-ohos。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
-GUEST_ARCH="${NATIVE_ARCH:-x86_64}"
-[ "$GUEST_ARCH" = "x86_64" ] || err "guest Vulkan must be built as x86_64, got $GUEST_ARCH"
+# guest 栈架构与 Wine 对齐, 值域 aarch64|x86_64 (不是 NATIVE_ARCH 的 arm64-v8a)
+GUEST_ARCH="${GUEST_ARCH:-$WINE_ARCH}"
+case "$GUEST_ARCH" in
+    aarch64|x86_64) ;;
+    *) err "guest Vulkan requires GUEST_ARCH=aarch64 or x86_64, got $GUEST_ARCH" ;;
+esac
 
 LOADER_TAG="v1.3.290"
 LOADER_COMMIT="f8616928ee19f6c7fd648c1cf1f456cba3771855"
@@ -50,12 +56,12 @@ fi
 
 mkdir -p "$BUILD_ROOT"
 
-log "--- Mesa Venus ICD (x86_64-linux-ohos, offscreen) ---"
+log "--- Mesa Venus ICD ($TARGET, offscreen) ---"
 WINEHUA_GUEST_VULKAN_ONLY=1 \
 WINEHUA_GUEST_GFX_PLATFORM=wayland \
 WINEHUA_GUEST_GFX_BUILD_ROOT="$BUILD_ROOT/mesa-venus-offscreen-v2" \
 WINEHUA_GUEST_GFX_INSTALL_ROOT="$MESA_INSTALL" \
-NATIVE_ARCH=x86_64 \
+NATIVE_ARCH="$NATIVE_ARCH" \
     bash "$SCRIPT_DIR/build_ohos_guest_gfx.sh" --platform wayland --no-package
 [ -f "$MESA_INSTALL/lib/libvulkan_virtio.so" ] || \
     err "Mesa Venus ICD build did not produce libvulkan_virtio.so"
@@ -67,10 +73,10 @@ cmake -S "$HEADERS_SOURCE" -B "$BUILD_ROOT/headers" -G Ninja \
     -DVULKAN_HEADERS_ENABLE_TESTS=OFF
 cmake --build "$BUILD_ROOT/headers" --target install --parallel "$JOBS"
 
-log "--- Vulkan-Loader $LOADER_TAG (x86_64-linux-ohos) ---"
+log "--- Vulkan-Loader $LOADER_TAG ($TARGET) ---"
 cmake -S "$LOADER_SOURCE" -B "$BUILD_ROOT/loader" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$OHOS_SDK/native/build/cmake/ohos.toolchain.cmake" \
-    -DOHOS_ARCH=x86_64 \
+    -DOHOS_ARCH="$OHOS_ARCH" \
     -DOHOS_PLATFORM=OHOS \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$LOADER_INSTALL" \
@@ -96,17 +102,25 @@ cp -L "$loader_binary" "$OUTPUT_ROOT/lib/libvulkan.so.1"
 cp -L "$loader_binary" "$OUTPUT_ROOT/lib/libvulkan.so"
 cp -L "$MESA_INSTALL/lib/libvulkan_virtio.so" "$OUTPUT_ROOT/lib/libvulkan_virtio.so"
 
-cat > "$OUTPUT_ROOT/share/vulkan/icd.d/venus_icd.x86_64.json" <<'EOF'
+# ICD library_path 决定 loader dlopen 哪个 libvulkan_virtio.so。arm64 下 guest 原生库
+# 必须放 el1 bundle (el2 data 区 dlopen 被拒), 用 app 视角绝对路径; x86_64 保留 el2
+# bundle 相对路径 (box64 加载)。
+if [ "$WINE_ARCH" = "aarch64" ]; then
+    ICD_LIBRARY_PATH="/data/storage/el1/bundle/libs/arm64/libvulkan_virtio.so"
+else
+    ICD_LIBRARY_PATH="../../../lib/libvulkan_virtio.so"
+fi
+cat > "$OUTPUT_ROOT/share/vulkan/icd.d/venus_icd.$GUEST_ARCH.json" <<EOF
 {
   "file_format_version": "1.0.0",
   "ICD": {
-    "library_path": "../../../lib/libvulkan_virtio.so",
+    "library_path": "$ICD_LIBRARY_PATH",
     "api_version": "1.3.0"
   }
 }
 EOF
 
-log "--- winehua_guest_vulkan_smoke (x86_64-linux-ohos) ---"
+log "--- winehua_guest_vulkan_smoke ($TARGET) ---"
 SHADER_OUTPUT="$OUTPUT_ROOT/share/winehua"
 GLSLANG_VALIDATOR="${GLSLANG_VALIDATOR:-glslangValidator}"
 mkdir -p "$SHADER_OUTPUT"
@@ -987,38 +1001,41 @@ if [ -f "$HEAVEN_EXACT_INPUT/frame-180-geometry.jsonl" ] &&
     spirv-val --target-env vulkan1.1 \
         "$HEAVEN_EXACT_OUTPUT/heaven_exact_fs_ccp.spv"
 fi
+# 鸿蒙沙箱不支持 exec: guest 程序编译为 .so 共享库 (不再是 -pie 可执行),
+# 统一导出入口 winehua_guest_program_main (main 经 -Dmain=... 重命名),
+# wine_child.cpp guestElfMode 以 dlopen + dlsym 加载 (与 hostElfMode 同模式)。
 "$CLANG" --target="$TARGET" --sysroot="$SYSROOT" \
-    -std=c11 -O2 -fPIE -fno-emulated-tls \
+    -std=c11 -O2 -shared -fPIC -fno-emulated-tls \
+    -Dmain=winehua_guest_program_main \
     -I"$HEADERS_INSTALL/include" \
     "$ROOT/smoke/guest_vulkan_smoke.c" \
-    -L"$LOADER_INSTALL/lib" -Wl,-rpath,'$ORIGIN/../lib' \
-    -Wl,--enable-new-dtags -pie -lvulkan -ldl -lpthread \
-    -o "$OUTPUT_ROOT/bin/winehua_guest_vulkan_smoke"
-chmod +x "$OUTPUT_ROOT/bin/winehua_guest_vulkan_smoke"
+    -L"$LOADER_INSTALL/lib" -Wl,-rpath,'$ORIGIN/../lib:$ORIGIN' \
+    -Wl,--enable-new-dtags -lvulkan -ldl -lpthread \
+    -o "$OUTPUT_ROOT/bin/libwinehua_guest_vulkan_smoke.so"
 "$CLANG" --target="$TARGET" --sysroot="$SYSROOT" \
-    -std=c11 -O2 -fPIE -fno-emulated-tls \
+    -std=c11 -O2 -shared -fPIC -fno-emulated-tls \
+    -Dmain=winehua_guest_program_main \
     -I"$HEADERS_INSTALL/include" \
     "$ROOT/smoke/venus_sampled_image_probe.c" \
-    -L"$LOADER_INSTALL/lib" -Wl,-rpath,'$ORIGIN/../lib' \
-    -Wl,--enable-new-dtags -pie -lvulkan -ldl -lpthread \
-    -o "$OUTPUT_ROOT/bin/venus_sampled_image_probe"
-chmod +x "$OUTPUT_ROOT/bin/venus_sampled_image_probe"
+    -L"$LOADER_INSTALL/lib" -Wl,-rpath,'$ORIGIN/../lib:$ORIGIN' \
+    -Wl,--enable-new-dtags -lvulkan -ldl -lpthread \
+    -o "$OUTPUT_ROOT/bin/libvenus_sampled_image_probe.so"
 "$CLANG" --target="$TARGET" --sysroot="$SYSROOT" \
-    -std=c11 -O2 -fPIE -fno-emulated-tls \
+    -std=c11 -O2 -shared -fPIC -fno-emulated-tls \
+    -Dmain=winehua_guest_program_main \
     -I"$HEADERS_INSTALL/include" \
     "$ROOT/smoke/venus_spirv_replay.c" \
-    -L"$LOADER_INSTALL/lib" -Wl,-rpath,'$ORIGIN/../lib' \
-    -Wl,--enable-new-dtags -pie -lvulkan -ldl -lpthread \
-    -o "$OUTPUT_ROOT/bin/venus_spirv_replay"
-chmod +x "$OUTPUT_ROOT/bin/venus_spirv_replay"
+    -L"$LOADER_INSTALL/lib" -Wl,-rpath,'$ORIGIN/../lib:$ORIGIN' \
+    -Wl,--enable-new-dtags -lvulkan -ldl -lpthread \
+    -o "$OUTPUT_ROOT/bin/libvenus_spirv_replay.so"
 "$CLANG" --target="$TARGET" --sysroot="$SYSROOT" \
-    -std=c11 -O2 -fPIE -fno-emulated-tls \
+    -std=c11 -O2 -shared -fPIC -fno-emulated-tls \
+    -Dmain=winehua_guest_program_main \
     -I"$HEADERS_INSTALL/include" \
     "$ROOT/smoke/venus_heaven_material_replay.c" \
-    -L"$LOADER_INSTALL/lib" -Wl,-rpath,'$ORIGIN/../lib' \
-    -Wl,--enable-new-dtags -pie -lvulkan -ldl -lpthread \
-    -o "$OUTPUT_ROOT/bin/venus_heaven_material_replay"
-chmod +x "$OUTPUT_ROOT/bin/venus_heaven_material_replay"
+    -L"$LOADER_INSTALL/lib" -Wl,-rpath,'$ORIGIN/../lib:$ORIGIN' \
+    -Wl,--enable-new-dtags -lvulkan -ldl -lpthread \
+    -o "$OUTPUT_ROOT/bin/libvenus_heaven_material_replay.so"
 
 # Optional exact replay of the first Heaven pass-2 material draw. This is a
 # generated diagnostic payload and is only staged when a local capture exists;
@@ -1118,24 +1135,24 @@ fi
 
 loader_sha="$(sha256sum "$OUTPUT_ROOT/lib/libvulkan.so.1" | awk '{print $1}')"
 icd_sha="$(sha256sum "$OUTPUT_ROOT/lib/libvulkan_virtio.so" | awk '{print $1}')"
-smoke_sha="$(sha256sum "$OUTPUT_ROOT/bin/winehua_guest_vulkan_smoke" | awk '{print $1}')"
-probe_sha="$(sha256sum "$OUTPUT_ROOT/bin/venus_sampled_image_probe" | awk '{print $1}')"
-replay_sha="$(sha256sum "$OUTPUT_ROOT/bin/venus_spirv_replay" | awk '{print $1}')"
-heaven_replay_sha="$(sha256sum "$OUTPUT_ROOT/bin/venus_heaven_material_replay" | awk '{print $1}')"
+smoke_sha="$(sha256sum "$OUTPUT_ROOT/bin/libwinehua_guest_vulkan_smoke.so" | awk '{print $1}')"
+probe_sha="$(sha256sum "$OUTPUT_ROOT/bin/libvenus_sampled_image_probe.so" | awk '{print $1}')"
+replay_sha="$(sha256sum "$OUTPUT_ROOT/bin/libvenus_spirv_replay.so" | awk '{print $1}')"
+heaven_replay_sha="$(sha256sum "$OUTPUT_ROOT/bin/libvenus_heaven_material_replay.so" | awk '{print $1}')"
 cat > "$OUTPUT_ROOT/manifest.json" <<EOF
 {
   "schemaVersion": 1,
   "runtimeVersion": "phase2-venus-b1-v1",
-  "architecture": "x86_64-linux-ohos",
+  "architecture": "$TARGET",
   "loaderVersion": "$LOADER_TAG",
   "loaderCommit": "$LOADER_COMMIT",
   "headersVersion": "$HEADERS_TAG",
   "headersCommit": "$HEADERS_COMMIT",
   "files": {
-    "bin/winehua_guest_vulkan_smoke": "$smoke_sha",
-    "bin/venus_sampled_image_probe": "$probe_sha",
-    "bin/venus_spirv_replay": "$replay_sha",
-    "bin/venus_heaven_material_replay": "$heaven_replay_sha",
+    "bin/libwinehua_guest_vulkan_smoke.so": "$smoke_sha",
+    "bin/libvenus_sampled_image_probe.so": "$probe_sha",
+    "bin/libvenus_spirv_replay.so": "$replay_sha",
+    "bin/libvenus_heaven_material_replay.so": "$heaven_replay_sha",
     "lib/libvulkan.so.1": "$loader_sha",
     "lib/libvulkan_virtio.so": "$icd_sha"
   }
@@ -1143,7 +1160,7 @@ cat > "$OUTPUT_ROOT/manifest.json" <<EOF
 EOF
 
 cat > "$OUTPUT_ROOT/BUILD_INFO.txt" <<EOF
-arch=x86_64-linux-ohos
+arch=$TARGET
 loader_tag=$LOADER_TAG
 loader_commit=$LOADER_COMMIT
 headers_tag=$HEADERS_TAG
@@ -1152,7 +1169,7 @@ mesa_commit=$(git -c safe.directory="$ROOT/thirdparty/mesa" -C "$ROOT/thirdparty
 built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
-file "$OUTPUT_ROOT/bin/winehua_guest_vulkan_smoke" \
-    "$OUTPUT_ROOT/bin/venus_heaven_material_replay" "$OUTPUT_ROOT/lib/libvulkan.so.1" \
+file "$OUTPUT_ROOT/bin/libwinehua_guest_vulkan_smoke.so" \
+    "$OUTPUT_ROOT/bin/libvenus_heaven_material_replay.so" "$OUTPUT_ROOT/lib/libvulkan.so.1" \
     "$OUTPUT_ROOT/lib/libvulkan_virtio.so"
 log "guest Vulkan runtime ready: $OUTPUT_ROOT"

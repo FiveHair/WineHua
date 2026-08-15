@@ -10,7 +10,7 @@ HOST_TOOLS_DIR="$BUILD_DIR/host-tools"
 WRAPPER_DIR="$BUILD_DIR/tool-wrappers"
 SYSROOT_EXT="$BUILD_DIR/sysroot-ext"
 SYSROOT_EXT_INC="$SYSROOT_EXT/usr/include"
-SYSROOT_EXT_LIB="$SYSROOT_EXT/usr/lib/x86_64-linux-ohos"
+SYSROOT_EXT_LIB="$SYSROOT_EXT/usr/lib/$TARGET"
 SYSROOT_EXT_PC="$SYSROOT_EXT/usr/lib/pkgconfig"
 
 MODE="${GUEST_GFX_MODE:-virpipe}"
@@ -48,8 +48,8 @@ What it does:
     --no-package is passed.
 
 Notes:
-  - This path is currently implemented for x86_64 only, which matches the
-    active Wine userland on the HarmonyOS PC emulator.
+  - Builds the guest Mesa receiver for the active WINE_ARCH (aarch64-linux-ohos
+    for arm64 native wine, x86_64-linux-ohos for the x86_64 target).
   - The resulting bundle is intended for Step 1 VirGL/vtest smoke:
       MESA_LOADER_DRIVER_OVERRIDE=swrast
       GALLIUM_DRIVER=virpipe
@@ -272,6 +272,7 @@ setup_build_env() {
     sdk_source="$(normalize_host_path_input "$sdk_source")"
     if [ -z "$sdk_source" ]; then
         sdk_source="$(find_first_existing_dir \
+            '/apps/harmony/sdk/default/openharmony' \
             '/mnt/c/Program Files/Huawei/DevEco Studio/sdk/default/openharmony' \
             '/mnt/d/Program Files/Huawei/DevEco Studio/sdk/default/openharmony' \
             || true)"
@@ -289,12 +290,11 @@ setup_build_env() {
 
     export OHOS_SDK="$sdk_source"
     export SYSROOT="$OHOS_SDK/native/sysroot"
-    export TARGET="x86_64-linux-ohos"
+    # TARGET / SYSROOT_EXT_LIB 由 env.sh 按 WINE_ARCH 推导 (aarch64|x86_64-linux-ohos)
 
     [ -d "$SYSROOT" ] || err "OHOS sysroot does not exist: $SYSROOT"
-    [ -d "$SYSROOT_EXT_LIB" ] || err "sysroot-ext lib directory is missing: $SYSROOT_EXT_LIB"
-    [ -d "$SYSROOT_EXT_INC" ] || err "sysroot-ext include directory is missing: $SYSROOT_EXT_INC"
-    [ -d "$SYSROOT_EXT_PC" ] || err "sysroot-ext pkg-config directory is missing: $SYSROOT_EXT_PC"
+    # sysroot-ext 架构子目录由 ensure_target_libdrm 创建 (aarch64 首次构建时不存在)
+    mkdir -p "$SYSROOT_EXT_LIB" "$SYSROOT_EXT_INC" "$SYSROOT_EXT_PC"
 
     clang_root="$OHOS_SDK/native/llvm/bin"
     CLANG_REAL="$(resolve_first_executable "$clang_root/clang.exe" "$clang_root/clang" || true)"
@@ -355,7 +355,7 @@ setup_build_env() {
 }
 
 gen_guest_gfx_cross_file() {
-    local cross="$BUILD_DIR/guest-gfx-x86_64-cross.txt"
+    local cross="$BUILD_DIR/guest-gfx-${WINE_ARCH}-cross.txt"
     local guest_system="linux"
     if [ "$VULKAN_ONLY" = "1" ]; then
         # Describe the real target OS so Mesa does not assume Linux KMS/DRM
@@ -381,8 +381,8 @@ pkg_config_path = ['$SYSROOT_EXT_PC', '$SYSROOT/usr/lib/pkgconfig']
 
 [host_machine]
 system = '$guest_system'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
+cpu_family = '$WINE_ARCH'
+cpu = '$WINE_ARCH'
 endian = 'little'
 XEOF
     printf '%s\n' "$cross"
@@ -444,7 +444,7 @@ fetch_modern_wayland_protocols_root() {
 
 ensure_target_libdrm() {
     local build_root="$ROOT/build/libdrm_build/${NATIVE_ARCH}"
-    local arch_pc_dir="$SYSROOT_EXT/usr/lib/x86_64-linux-ohos/pkgconfig"
+    local arch_pc_dir="$SYSROOT_EXT/usr/lib/$TARGET/pkgconfig"
     local meson_args=()
 
     if [ -f "$SYSROOT_EXT_LIB/libdrm.so" ] \
@@ -474,7 +474,7 @@ ensure_target_libdrm() {
     meson_args=(
         "--cross-file=$CROSS_FILE"
         "--prefix=$SYSROOT_EXT/usr"
-        "--libdir=lib/x86_64-linux-ohos"
+        "--libdir=lib/$TARGET"
         "-Dbuildtype=release"
         "-Dtests=false"
         "-Dinstall-test-programs=false"
@@ -590,7 +590,7 @@ ensure_wayland_pkgconfig_metadata() {
         cat > "$SYSROOT_EXT_PC/wayland-server.pc" <<EOF
 prefix=$prefix_path
 includedir=\${prefix}/include
-libdir=\${prefix}/lib/x86_64-linux-ohos
+libdir=\${prefix}/lib/$TARGET
 datarootdir=\${prefix}/share
 pkgdatadir=\${datarootdir}/wayland
 
@@ -647,7 +647,7 @@ copy_if_missing() {
 ensure_wayland_dev_headers() {
     local wl_src="$ROOT/thirdparty/wayland/src"
     local wl_egl="$ROOT/thirdparty/wayland/egl"
-    local wl_build="$BUILD_DIR/wayland_build/x86_64/src"
+    local wl_build="$BUILD_DIR/wayland_build/$WINE_ARCH/src"
 
     mkdir -p "$SYSROOT_EXT_INC"
 
@@ -673,7 +673,8 @@ ensure_wayland_dev_headers() {
 
 setup_build_env
 
-# guest_gfx 始终编译为 x86_64-linux-ohos (Wine 是 x86_64 程序, 即使在 arm64 设备上也通过 Box64 运行)
+# guest_gfx 按 WINE_ARCH 编译: arm64 原生 wine → aarch64-linux-ohos (guest 库与 wine 同架构, 系统 linker 直接 dlopen);
+# x86_64 → x86_64-linux-ohos。mesa venus/virgl 驱动架构无关, cross file 的 cpu_family/cpu 决定目标。
 
 case "$PLATFORM" in
     wayland) ;;

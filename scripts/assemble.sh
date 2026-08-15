@@ -12,10 +12,21 @@ assemble_pad() {
 
     local wine_data="$STAGING_DIR/wine-data"
     local guest_arch="${GUEST_ARCH:-x86_64}"
+    # Wine PE 目录 (arm64 原生: aarch64-windows 合并 arm64ec; x86_64: x86_64-windows)
+    local wine_pe_dir="x86_64-windows"
+    local pe_src_dirs="$wine_pe_dir"
+    local smoke_src_dir="x86_64-windows"
+    if [ "$WINE_ARCH" = "aarch64" ]; then
+        wine_pe_dir="aarch64-windows"
+        pe_src_dirs="aarch64-windows arm64ec-windows"
+        # system DLL/exe 为 ARM64EC+ARM64 混合, 统一在 aarch64-windows;
+        # arm64ec-windows 仅产 .o (ABI 编译验证) → smoke 也取 aarch64-windows
+        smoke_src_dir="aarch64-windows"
+    fi
     rm -rf "$STAGING_DIR"
     rm -rf "$wine_data"
-    mkdir -p "$wine_data/bin/x86_64-windows"
-    mkdir -p "$wine_data/bin/x86_64-unix"
+    mkdir -p "$wine_data/bin/$wine_pe_dir"
+    mkdir -p "$wine_data/bin/$WINE_ARCH-unix"
     mkdir -p "$wine_data/share/wine/nls"
     mkdir -p "$wine_data/share/wine/fonts"
     mkdir -p "$wine_data/share/wine/winmd"
@@ -52,8 +63,8 @@ assemble_pad() {
             local dest="$NATIVE_LIBS"
             if [ -f "$SYSROOT_EXT_LIB/$soname" ]; then
                 cp "$SYSROOT_EXT_LIB/$soname" "$dest/$soname"
-            elif [ -f "$SYSROOT/usr/lib/x86_64-linux-ohos/$name" ]; then
-                cp "$SYSROOT/usr/lib/x86_64-linux-ohos/$name" "$dest/$soname"
+            elif [ -f "$SYSROOT/usr/lib/$TARGET/$name" ]; then
+                cp "$SYSROOT/usr/lib/$TARGET/$name" "$dest/$soname"
             else
                 warn "$soname 未找到"
                 return 0
@@ -91,7 +102,7 @@ assemble_pad() {
         log "    交叉编译依赖 → libs/x86_64/"
 
         # libc.so → libs/x86_64/
-        cp "$SYSROOT/usr/lib/x86_64-linux-ohos/libc.so" "$NATIVE_LIBS/"
+        cp "$SYSROOT/usr/lib/$TARGET/libc.so" "$NATIVE_LIBS/"
 
         # libfreetype 已由 _pick_lib_pad 放入 libs/x86_64/，系统 linker 可直接找到
 
@@ -102,61 +113,24 @@ assemble_pad() {
         else
             warn "libwineserver.so 未找到！请先执行: bash scripts/build_wine.sh"
         fi
-    elif [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
-        # arm64 Pad: Wine .so 是 x86_64, 不放 libs/, 放 rawfile zip
-        # box64.so 由 build_box64.sh 放入 NATIVE_LIBS
-        log "  → Wine x86_64 .so → rawfile zip"
+    else
+        # arm64 原生 wine: Wine aarch64 .so 直接放 libs/ (与 x86_64 同构, 非 box64 整体模拟)
+        log "  → Wine aarch64 .so → libs/$NATIVE_ARCH/"
 
-        # ARM64 原生库 → libs/arm64-v8a/ (Box64 dlopen bridge libraries)
-        # Box64 模拟 x86_64 时需要加载 ARM64 原生的 freetype/xkbcommon 等,
-        # 系统 linker 搜索 libs/arm64-v8a/
-        local aarch64_lib="$SYSROOT_EXT/usr/lib/$NATIVE_TARGET"
-        _pick_arm64_native() {
-            local soname="$1" linker="${2:-}"
-            if [ -f "$aarch64_lib/$soname" ]; then
-                cp "$aarch64_lib/$soname" "$NATIVE_LIBS/$soname"
-            else
-                warn "ARM64 原生库 $soname 未找到, 跳过"
-                return 0
-            fi
-            if [ -n "$linker" ] && [ ! -f "$NATIVE_LIBS/$linker" ]; then
-                cp "$aarch64_lib/$soname" "$NATIVE_LIBS/$linker"  # HAP 不支持 symlink, 实体复制
-            fi
-        }
-        # Box64 native bridge libs: soname 文件 + linker 名拷贝
-        _pick_arm64_native "libfreetype.so.6"   "libfreetype.so"
-        _pick_arm64_native "libxkbcommon.so.0"   "libxkbcommon.so"
-        _pick_arm64_native "libxkbregistry.so.0" "libxkbregistry.so"
-        _pick_arm64_native "libxml2.so.2"        "libxml2.so"
-        _pick_arm64_native "libwayland-client.so.0" "libwayland-client.so"
-        _pick_arm64_native "libwayland-server.so.0" "libwayland-server.so"
-        _pick_arm64_native "libffi.so.8"         "libffi.so"
-
-        # box64.so → libs/arm64-v8a/ (ARM64 原生翻译器)
-        if [ -f "$BUILD_DIR/box64_build/box64.so" ]; then
-            cp "$BUILD_DIR/box64_build/box64.so" "$NATIVE_LIBS/"
-            log "    box64.so → libs/arm64-v8a/"
-        else
-            warn "box64.so 未找到！请先执行: bash scripts/build_box64.sh"
-        fi
-
-        # ntdll.so → rawfile
-        cp "$BUILD_DIR/wine-ohos/dlls/ntdll/ntdll.so" "$wine_data/bin/"
-
-        # x86_64-unix/ .so → rawfile
+        # 所有 Wine Unix .so → libs/ (系统 linker 通过文件名搜索)
         for so in "$BUILD_DIR/wine-ohos/dlls/"*/*.so; do
-            [ "$(basename "$so")" = "ntdll.so" ] && continue
-            cp "$so" "$wine_data/bin/x86_64-unix/"
+            cp "$so" "$NATIVE_LIBS/"
         done
+        log "    Wine .so: $(ls "$BUILD_DIR/wine-ohos/dlls/"*/*.so 2>/dev/null | wc -l) files"
 
-        # 交叉编译依赖 → rawfile
-        _pick_lib_pad_rf() {
+        # 交叉编译依赖 → libs/
+        _pick_lib_pad() {
             local name="$1" soname="$2" linker="${3:-}"
-            local dest="$wine_data/bin/x86_64-unix"
+            local dest="$NATIVE_LIBS"
             if [ -f "$SYSROOT_EXT_LIB/$soname" ]; then
                 cp "$SYSROOT_EXT_LIB/$soname" "$dest/$soname"
-            elif [ -f "$SYSROOT/usr/lib/x86_64-linux-ohos/$name" ]; then
-                cp "$SYSROOT/usr/lib/x86_64-linux-ohos/$name" "$dest/$soname"
+            elif [ -f "$SYSROOT/usr/lib/$TARGET/$name" ]; then
+                cp "$SYSROOT/usr/lib/$TARGET/$name" "$dest/$soname"
             else
                 warn "$soname 未找到"
                 return 0
@@ -165,25 +139,23 @@ assemble_pad() {
                 cp "$dest/$soname" "$dest/$linker"
             fi
         }
-        _pick_lib_pad_rf "libfreetype.so.6.20.2"       "libfreetype.so.6"   "libfreetype.so"
-        _pick_lib_pad_rf "libz.so"                      "libz.so"
-        _pick_lib_pad_rf "libwayland-client.so.0.22.0"  "libwayland-client.so.0"
-        _pick_lib_pad_rf "libwayland-egl.so.1.22.0"     "libwayland-egl.so.1"    "libwayland-egl.so"
-        _pick_lib_pad_rf "libxkbcommon.so.0.0.0"        "libxkbcommon.so.0"
-        _pick_lib_pad_rf "libxkbregistry.so.0.0.0"      "libxkbregistry.so.0"
-        _pick_lib_pad_rf "libxml2.so.2.12.0"            "libxml2.so.2"
-        _pick_lib_pad_rf "libffi.so.8.1.4"              "libffi.so.8"
-        # GnuTLS 链 (schannel TLS 后端, x86_64 guest) → rawfile
-        _pick_lib_pad_rf "libgnutls.so.30.37.1"         "libgnutls.so.30"   "libgnutls.so"
-        _pick_lib_pad_rf "libnettle.so.8.11"            "libnettle.so.8"
-        _pick_lib_pad_rf "libhogweed.so.6.11"           "libhogweed.so.6"
-        _pick_lib_pad_rf "libgmp.so.10.4.1"             "libgmp.so.10"
-        _pick_lib_pad_rf "libtasn1.so.6.6.4"            "libtasn1.so.6"
-        _pick_lib_pad_rf "libunistring.so.5.2.0"        "libunistring.so.5"
-        # libm.so: 补 OHOS 缺失的 frexpl/ldexpl (glib long double 数学)
-        # 系统 libm.so 是空壳, 必须用我们的版本 (含 math 符号需 libc 兜底)
-        _pick_lib_pad_rf "libm.so"                      "libm.so"
-        # GStreamer 链 (winegstreamer 后端: glib + gstreamer core + gst-libs)
+        _pick_lib_pad "libfreetype.so.6.20.2"       "libfreetype.so.6"   "libfreetype.so"
+        _pick_lib_pad "libz.so"                      "libz.so"
+        _pick_lib_pad "libwayland-client.so.0.22.0"  "libwayland-client.so.0"
+        _pick_lib_pad "libwayland-egl.so.1.22.0"     "libwayland-egl.so.1"
+        _pick_lib_pad "libxkbcommon.so.0.0.0"        "libxkbcommon.so.0"
+        _pick_lib_pad "libxkbregistry.so.0.0.0"      "libxkbregistry.so.0"
+        _pick_lib_pad "libxml2.so.2.12.0"            "libxml2.so.2"
+        _pick_lib_pad "libffi.so.8.1.4"              "libffi.so.8"
+        # GnuTLS 链 (schannel TLS 后端)
+        _pick_lib_pad "libgnutls.so.30.37.1"         "libgnutls.so.30"   "libgnutls.so"
+        _pick_lib_pad "libnettle.so.8.11"            "libnettle.so.8"
+        _pick_lib_pad "libhogweed.so.6.11"           "libhogweed.so.6"
+        _pick_lib_pad "libgmp.so.10.4.1"             "libgmp.so.10"
+        _pick_lib_pad "libtasn1.so.6.6.4"            "libtasn1.so.6"
+        _pick_lib_pad "libunistring.so.5.2.0"        "libunistring.so.5"
+        _pick_lib_pad "libm.so"                      "libm.so"
+        # GStreamer 链 (winegstreamer 后端)
         for so in libglib-2.0.so.0 libgobject-2.0.so.0 libgmodule-2.0.so.0 libgio-2.0.so.0 \
                   libgthread-2.0.so.0 libpcre2-8.so.0 libintl.so.8 libintl.so libm.so \
                   libgstreamer-1.0.so.0 libgstbase-1.0.so.0 libgstcontroller-1.0.so.0 \
@@ -191,48 +163,33 @@ assemble_pad() {
                   libgsttag-1.0.so.0 libgstpbutils-1.0.so.0 libgstallocators-1.0.so.0 \
                   libgstapp-1.0.so.0 libgstfft-1.0.so.0 libgstriff-1.0.so.0 \
                   libgstrtp-1.0.so.0 libgstrtsp-1.0.so.0 libgstsdp-1.0.so.0; do
-            # box64 按 SONAME 解析依赖时可能查找无版本名 (libgstvideo-1.0.so),
-            # 与 gnutls 链一致补上无版本软链, 否则 winegstreamer dlopen 报
-            # "Error loading shared library libgstvideo-1.0.so: No such file"
-            local unversioned="${so%.so.0}"
-            if [ "$unversioned" != "$so" ] && [[ "$so" == *.so.0 ]]; then
-                _pick_lib_pad_rf "$so" "$so" "$unversioned.so"
-            else
-                _pick_lib_pad_rf "$so" "$so"
-            fi
+            _pick_lib_pad "$so" "$so"
         done
-        # FFmpeg 解码库 (gst-libav 依赖) → rawfile
-        for so in libavcodec.so.60 libavformat.so.60 libavutil.so.58 \
-                  libswscale.so.7 libswresample.so.4 libavfilter.so.9; do
-            _pick_lib_pad_rf "$so" "$so"
-        done
-        # GStreamer 插件 (gst-plugins-base/good + gst-libav) → rawfile
-        local gst_plugin_dir="$SYSROOT_EXT_LIB/gstreamer-1.0"
-        if [ -d "$gst_plugin_dir" ]; then
-            mkdir -p "$wine_data/bin/x86_64-unix/gstreamer-1.0"
-            for pso in "$gst_plugin_dir"/*.so; do
-                [ -f "$pso" ] || continue
-                cp "$pso" "$wine_data/bin/x86_64-unix/gstreamer-1.0/"
-            done
-            log "    GStreamer 插件 ($(ls "$gst_plugin_dir"/*.so 2>/dev/null | wc -l) 个) → rawfile gstreamer-1.0/"
+        log "    交叉编译依赖 → libs/$NATIVE_ARCH/"
+
+        # libc.so → libs/
+        cp "$SYSROOT/usr/lib/$TARGET/libc.so" "$NATIVE_LIBS/"
+
+        # libwineserver.so (dlopen 入口)
+        if [ -f "$BUILD_DIR/wine_server/libwineserver.so" ]; then
+            cp "$BUILD_DIR/wine_server/libwineserver.so" "$NATIVE_LIBS/"
+            log "    libwineserver.so → libs/$NATIVE_ARCH/"
         else
-            warn "gstreamer-1.0 插件目录缺失: $gst_plugin_dir"
+            warn "libwineserver.so 未找到！请先执行: bash scripts/build_wine.sh"
         fi
 
-        # libgnutls → bin/ (box64 按名 dlopen 搜索路径: .)
-        cp "$wine_data/bin/x86_64-unix/libfreetype.so.6" "$wine_data/bin/"
-        cp "$wine_data/bin/x86_64-unix/libfreetype.so" "$wine_data/bin/"
+        # 注: 不需要 wine/wine-preloader ELF。winehua 部署以 wine 构建出的
+        # ntdll.so 作为 wine 启动 (wine_child.cpp dlopen ntdll.so → __wine_main);
+        # OHOS 下 spawn_process 走 ohos_broker_spawn_child (StartNativeChildProcess),
+        # 不走 exec_wineloader (ntdll/unix/process.c #ifdef __OHOS__ 分支)。
 
-        # libc.so → bin/ (当前目录) + x86_64-unix/ (BOX64_LD_LIBRARY_PATH)
-        cp "$SYSROOT/usr/lib/x86_64-linux-ohos/libc.so" "$wine_data/bin/"
-        cp "$SYSROOT/usr/lib/x86_64-linux-ohos/libc.so" "$wine_data/bin/x86_64-unix/"
-
-        # wine + wineserver (x86_64 ELF, 由 box64 加载)
-        cp "$BUILD_DIR/wine-ohos/loader/wine" "$wine_data/bin/"
-        if [ -f "$BUILD_DIR/wine_server/wineserver" ]; then
-            cp "$BUILD_DIR/wine_server/wineserver" "$wine_data/bin/"
-        elif [ -f "$BUILD_DIR/wine-ohos/server/wineserver" ]; then
-            cp "$BUILD_DIR/wine-ohos/server/wineserver" "$wine_data/bin/"
+        # FEX libarm64ecfex.dll → PE 目录 (arm64 原生转译 x64 应用)
+        if [ -f "$BUILD_DIR/fex-ec/Bin/libarm64ecfex.dll" ]; then
+            mkdir -p "$wine_data/bin/$wine_pe_dir"
+            cp "$BUILD_DIR/fex-ec/Bin/libarm64ecfex.dll" "$wine_data/bin/$wine_pe_dir/"
+            log "    libarm64ecfex.dll → rawfile $wine_pe_dir/"
+        else
+            warn "libarm64ecfex.dll 未找到！请先执行: bash scripts/build_fex.sh"
         fi
     fi
 
@@ -250,21 +207,25 @@ assemble_pad() {
         pe_exts="$pe_exts cpl"
     fi
     for ext in $pe_exts; do
-        for f in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.$ext; do
-            [ -f "$f" ] && cp "$f" "$wine_data/bin/x86_64-windows/"
+        for pe_src in $pe_src_dirs; do
+            for f in "$BUILD_DIR/wine-ohos/dlls/"*/$pe_src/*.$ext; do
+                [ -f "$f" ] && cp "$f" "$wine_data/bin/$wine_pe_dir/"
+            done
         done
     done
-    log "  x86_64-windows → $(ls "$wine_data/bin/x86_64-windows" | wc -l) files"
+    log "  $wine_pe_dir → $(ls "$wine_data/bin/$wine_pe_dir" | wc -l) files"
 
     # strip PE 调试符号 (DWARF .debug_*, 缩减 ~50%)
     log "  stripping debug symbols..."
-    if command -v x86_64-w64-mingw32-strip &>/dev/null; then
-        for f in "$wine_data/bin/x86_64-windows/"*.dll "$wine_data/bin/x86_64-windows/"*.drv "$wine_data/bin/x86_64-windows/"*.exe "$wine_data/bin/x86_64-windows/"*.sys; do
-            [ -f "$f" ] && x86_64-w64-mingw32-strip "$f" 2>/dev/null
+    local pe_strip="x86_64-w64-mingw32-strip"
+    [ "$WINE_ARCH" = "aarch64" ] && pe_strip="$LLVM_MINGW/bin/aarch64-w64-mingw32-strip"
+    if command -v "$pe_strip" &>/dev/null || [ -x "$pe_strip" ]; then
+        for f in "$wine_data/bin/$wine_pe_dir/"*.dll "$wine_data/bin/$wine_pe_dir/"*.drv "$wine_data/bin/$wine_pe_dir/"*.exe "$wine_data/bin/$wine_pe_dir/"*.sys; do
+            [ -f "$f" ] && "$pe_strip" "$f" 2>/dev/null
         done
-        log "  64-bit PE stripped"
+        log "  $wine_pe_dir PE stripped"
     else
-        warn "  x86_64-w64-mingw32-strip not found, skipping strip"
+        warn "  $pe_strip not found, skipping strip"
     fi
     # i386-windows/ (32-bit PE DLL for WoW64)
     # 主构建 --enable-archs=i386,x86_64 已产出全部 32-bit PE, 直接取自 wine-ohos,
@@ -298,14 +259,20 @@ assemble_pad() {
     fi
 
     # *.exe stubs → rawfile
-    for exe in "$BUILD_DIR/wine-ohos/programs/"*/x86_64-windows/*.exe; do
-        cp "$exe" "$wine_data/bin/"
+    # 注意: arm64 下 pe_src_dirs 含 arm64ec-windows, 该架构只产 .o 无 .exe
+    # (system DLL 为 ARM64EC+ARM64 混合, 统一在 aarch64-windows) → 需 -f 保护
+    for pe_src in $pe_src_dirs; do
+        for exe in "$BUILD_DIR/wine-ohos/programs/"*/$pe_src/*.exe; do
+            [ -f "$exe" ] && cp -f "$exe" "$wine_data/bin/"
+        done
     done
     # graphics smoke test (OHOS 交叉编译产物, 不在 build-native/)
-    if [ -f "$BUILD_DIR/wine-ohos/programs/winehua_graphics_smoke/x86_64-windows/winehua_graphics_smoke.exe" ]; then
-        cp "$BUILD_DIR/wine-ohos/programs/winehua_graphics_smoke/x86_64-windows/winehua_graphics_smoke.exe" "$wine_data/bin/x86_64-windows/"
-        log "  winehua_graphics_smoke.exe → x86_64-windows/"
-    fi
+    for pe_src in $pe_src_dirs; do
+        if [ -f "$BUILD_DIR/wine-ohos/programs/winehua_graphics_smoke/$pe_src/winehua_graphics_smoke.exe" ]; then
+            cp "$BUILD_DIR/wine-ohos/programs/winehua_graphics_smoke/$pe_src/winehua_graphics_smoke.exe" "$wine_data/bin/$wine_pe_dir/"
+            log "  winehua_graphics_smoke.exe → $wine_pe_dir/"
+        fi
+    done
 
     # Versioned, App-managed C:\smoke payload.  Keep it separate from Wine's
     # DLL search directories so a prefix refresh can update tests without
@@ -333,12 +300,15 @@ assemble_pad() {
     i686-w64-mingw32-gcc -O2 -s -municode -mwindows -o \
         "$smoke_dir/x86/winehua_win32_driver.exe" "$win32_driver_source" \
         -lshell32 -luser32
+    # venus shader assets: 随 guest_vulkan bundle 打包 (aarch64/x86_64 源驱动; 无 bundle 则跳过)
     local guest_shader_root="$BUILD_DIR/guest_vulkan/$guest_arch/share/winehua"
-    local smoke_shader
-    for smoke_shader in venus_storage_write venus_storage_read venus_image_fetch venus_combined_sample venus_separated_sample; do
-        [ -f "$guest_shader_root/$smoke_shader.spv" ] || err "Wine Vulkan sampled-image shader missing: $guest_shader_root/$smoke_shader.spv"
-        cp "$guest_shader_root/$smoke_shader.spv" "$smoke_dir/assets/$smoke_shader.spv"
-    done
+    if [ -d "$guest_shader_root" ]; then
+        local smoke_shader
+        for smoke_shader in venus_storage_write venus_storage_read venus_image_fetch venus_combined_sample venus_separated_sample; do
+            [ -f "$guest_shader_root/$smoke_shader.spv" ] || err "Wine Vulkan sampled-image shader missing: $guest_shader_root/$smoke_shader.spv"
+            cp "$guest_shader_root/$smoke_shader.spv" "$smoke_dir/assets/$smoke_shader.spv"
+        done
+    fi
     local dxvk_root="$DXVK_BUILD_ROOT"
     [ -f "$dxvk_root/x64/bin/d3d11.dll" ] || err "DXVK Legacy x64 d3d11.dll missing: $dxvk_root/x64/bin/d3d11.dll"
     [ -f "$dxvk_root/x64/bin/dxgi.dll" ] || err "DXVK Legacy x64 dxgi.dll missing: $dxvk_root/x64/bin/dxgi.dll"
@@ -356,7 +326,7 @@ assemble_pad() {
     # WINEDLLPATH only for a selected dxvk_* backend.
     local smoke_program
     for smoke_program in winehua_audio_smoke winehua_graphics_smoke winehua_vulkan_smoke winehua_d3d11_smoke; do
-        local smoke64="$BUILD_DIR/wine-ohos/programs/$smoke_program/x86_64-windows/$smoke_program.exe"
+        local smoke64="$BUILD_DIR/wine-ohos/programs/$smoke_program/$smoke_src_dir/$smoke_program.exe"
         local smoke32="$BUILD_DIR/wine-i386-pe/programs/$smoke_program/i386-windows/$smoke_program.exe"
         if [ ! -f "$smoke32" ]; then
             smoke32="$BUILD_DIR/wine-ohos/programs/$smoke_program/i386-windows/$smoke_program.exe"
@@ -383,11 +353,16 @@ assemble_pad() {
     d3d832_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d8_smoke.exe" | awk '{print $1}')"
     cube32_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d_switch_cube.exe" | awk '{print $1}')"
     driver32_sha="$(sha256sum "$smoke_dir/x86/winehua_win32_driver.exe" | awk '{print $1}')"
-    storage_write_sha="$(sha256sum "$smoke_dir/assets/venus_storage_write.spv" | awk '{print $1}')"
-    storage_read_sha="$(sha256sum "$smoke_dir/assets/venus_storage_read.spv" | awk '{print $1}')"
-    image_fetch_sha="$(sha256sum "$smoke_dir/assets/venus_image_fetch.spv" | awk '{print $1}')"
-    combined_sample_sha="$(sha256sum "$smoke_dir/assets/venus_combined_sample.spv" | awk '{print $1}')"
-    separated_sample_sha="$(sha256sum "$smoke_dir/assets/venus_separated_sample.spv" | awk '{print $1}')"
+    # venus shader 资产: 随 guest_vulkan bundle 打包 (源驱动)
+    if [ -f "$smoke_dir/assets/venus_storage_write.spv" ]; then
+        storage_write_sha="$(sha256sum "$smoke_dir/assets/venus_storage_write.spv" | awk '{print $1}')"
+        storage_read_sha="$(sha256sum "$smoke_dir/assets/venus_storage_read.spv" | awk '{print $1}')"
+        image_fetch_sha="$(sha256sum "$smoke_dir/assets/venus_image_fetch.spv" | awk '{print $1}')"
+        combined_sample_sha="$(sha256sum "$smoke_dir/assets/venus_combined_sample.spv" | awk '{print $1}')"
+        separated_sample_sha="$(sha256sum "$smoke_dir/assets/venus_separated_sample.spv" | awk '{print $1}')"
+    else
+        storage_write_sha="" storage_read_sha="" image_fetch_sha="" combined_sample_sha="" separated_sample_sha=""
+    fi
     local dxvk_commit
     dxvk_commit="$(git -c safe.directory="$DXVK_SRC" -C "$DXVK_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
     local dxvk64_d3d11_sha dxvk64_dxgi_sha dxvk32_d3d11_sha dxvk32_dxgi_sha
@@ -535,25 +510,26 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
         log "  guest_gfx: SKIP (build/guest_gfx/$guest_arch/lib not found)"
     fi
 
-    # x86_64: guest Mesa 库必须可被系统 dlopen (el1 bundle libs); el2 数据区 dlopen 被拒 (ENOENT).
-    # 仅复制 host libs 中不存在的 guest 专用库, 共享依赖 (libwayland-*/libffi/libz/libc++_shared)
-    # 直接复用 el1 中已有的 host 版本.
-    if [ "$NATIVE_ARCH" = "x86_64" ] && [ -d "$BUILD_DIR/guest_gfx/$guest_arch/lib" ]; then
-        log "  guest_gfx -> entry/libs/x86_64 (el1 dlopen for x86_64)"
-        mkdir -p "$ROOT/entry/libs/x86_64"
-        for pattern in libEGL.so libGLESv2.so libGLESv1_CM.so libgallium-*.so libdrm.so; do
+    # guest Mesa 库必须可被系统 dlopen (el1 bundle libs); el2 数据区 dlopen 被拒 (ENOENT).
+    # libwayland-*/libffi/libz 复用 el1 已有 host 版本; libc++_shared 设备 el1/系统都没有,
+    # 但 guest libgallium (C++) 动态依赖它, 必须随 guest 一起复制到 el1, 否则 guest libEGL
+    # dlopen 失败 → Wine 内 OpenGL 初始化失败 (ChoosePixelFormat 失败). aarch64/x86_64 都执行.
+    if [ -d "$BUILD_DIR/guest_gfx/$guest_arch/lib" ]; then
+        log "  guest_gfx -> entry/libs/$NATIVE_ARCH (el1 dlopen)"
+        mkdir -p "$ROOT/entry/libs/$NATIVE_ARCH"
+        for pattern in libEGL.so libGLESv2.so libGLESv1_CM.so libgallium-*.so libdrm.so libc++_shared.so; do
             for f in "$BUILD_DIR/guest_gfx/$guest_arch/lib"/$pattern*; do
-                [ -f "$f" ] && cp -a "$f" "$ROOT/entry/libs/x86_64/"
+                [ -f "$f" ] && cp -a "$f" "$ROOT/entry/libs/$NATIVE_ARCH/"
             done
         done
         for f in "$BUILD_DIR/guest_gfx/$guest_arch/lib"/dri/*.so; do
-            [ -f "$f" ] && cp -a "$f" "$ROOT/entry/libs/x86_64/"
+            [ -f "$f" ] && cp -a "$f" "$ROOT/entry/libs/$NATIVE_ARCH/"
         done
-        log "  guest_gfx el1: $(ls "$ROOT/entry/libs/x86_64"/libEGL.so* "$ROOT/entry/libs/x86_64"/libgallium-*.so 2>/dev/null | wc -l) libs + $(ls "$ROOT/entry/libs/x86_64"/*_dri.so 2>/dev/null | wc -l) dri drivers"
+        log "  guest_gfx el1: $(ls "$ROOT/entry/libs/$NATIVE_ARCH"/libEGL.so* "$ROOT/entry/libs/$NATIVE_ARCH"/libgallium-*.so 2>/dev/null | wc -l) libs + $(ls "$ROOT/entry/libs/$NATIVE_ARCH"/*_dri.so 2>/dev/null | wc -l) dri drivers"
     fi
 
-    # Guest Linux Vulkan runtime is intentionally outside C:\\smoke: it is an
-    # x86_64 OHOS ELF/Loader/ICD stack launched through Box64 for the B1 gate.
+    # Guest Linux Vulkan runtime is intentionally outside C:\smoke: Loader + Venus
+    # ICD + offscreen smoke, 按 GUEST_ARCH (aarch64/x86_64) 打包.
     if [ -f "$BUILD_DIR/guest_vulkan/$guest_arch/manifest.json" ]; then
         mkdir -p "$wine_data/bin/guest_vulkan"
         cp -a "$BUILD_DIR/guest_vulkan/$guest_arch/"* "$wine_data/bin/guest_vulkan/"
@@ -562,6 +538,35 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
         err "BUILD_GUEST_VULKAN=1 but build/guest_vulkan/$guest_arch/manifest.json is missing"
     else
         log "  guest_vulkan: SKIP"
+    fi
+
+    # guest_vulkan 关键 dlopen 库 → el1 bundle (loader + venus ICD + smoke 程序).
+    # arm64 必须: el2 data 区 dlopen 被拒 (ENOENT); x86_64 一并复制以支持 NCP dlopen smoke.
+    if [ -d "$BUILD_DIR/guest_vulkan/$guest_arch/lib" ]; then
+        log "  guest_vulkan -> entry/libs/$NATIVE_ARCH (el1 dlopen)"
+        mkdir -p "$ROOT/entry/libs/$NATIVE_ARCH"
+        # guest Vulkan Loader (libvulkan.so.1) 放 el1 顶层: guest smoke 进程的
+        # DT_NEEDED libvulkan.so.1 靠 LD_LIBRARY_PATH(el1 顶层) 名字搜索命中.
+        # host vkr 不再担心遮蔽 — vkr_library.c 已改为绝对路径
+        # dlopen("/system/lib64/libvulkan.so") 加载宿主系统 Vulkan (Maleoon 935),
+        # 不走名字搜索, 顶层 guest loader 不会遮蔽 host 驱动. libvirglrenderer.so.1
+        # 的 NEEDED 只有 libepoxy/libc (纯 dlopen vulkan), 无 NEEDED 绑定问题.
+        # 注意只清理旧布局残留: 不能碰 libvulkan_virtio.so (venus ICD, 放顶层).
+        rm -f "$ROOT/entry/libs/$NATIVE_ARCH"/libvulkan.so \
+              "$ROOT/entry/libs/$NATIVE_ARCH"/libvulkan.so.1
+        rm -rf "$ROOT/entry/libs/$NATIVE_ARCH/guest-vulkan-loader"
+        for f in "$BUILD_DIR/guest_vulkan/$guest_arch"/lib/libvulkan.so.1 \
+                 "$BUILD_DIR/guest_vulkan/$guest_arch"/lib/libvulkan.so; do
+            [ -f "$f" ] && cp -a "$f" "$ROOT/entry/libs/$NATIVE_ARCH/"
+        done
+        for f in "$BUILD_DIR/guest_vulkan/$guest_arch"/lib/libvulkan_virtio.so \
+                 "$BUILD_DIR/guest_vulkan/$guest_arch"/bin/libwinehua_guest_vulkan_smoke.so \
+                 "$BUILD_DIR/guest_vulkan/$guest_arch"/bin/libvenus_sampled_image_probe.so \
+                 "$BUILD_DIR/guest_vulkan/$guest_arch"/bin/libvenus_spirv_replay.so \
+                 "$BUILD_DIR/guest_vulkan/$guest_arch"/bin/libvenus_heaven_material_replay.so; do
+            [ -f "$f" ] && cp -a "$f" "$ROOT/entry/libs/$NATIVE_ARCH/"
+        done
+        log "  guest_vulkan el1: $(ls "$ROOT/entry/libs/$NATIVE_ARCH"/libvulkan.so* "$ROOT/entry/libs/$NATIVE_ARCH"/libvulkan_virtio.so 2>/dev/null | wc -l) vulkan libs (loader 顶层)"
     fi
 
     # Native offscreen replay runs in the App/NCP security domain and links the
