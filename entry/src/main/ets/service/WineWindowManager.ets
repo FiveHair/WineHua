@@ -659,12 +659,13 @@ export class WineWindowManager {
         break;
       case 'fullscreen':
         // PC 模式游戏 xdg fullscreen: OHOS 沉浸式全屏 (铺满屏幕、盖住 dock)。
-        // 与 maximize 的 EXIT_IMMERSIVE (工作区最大化) 区分 — 游戏全屏是
-        // 真正的全屏; win.maximize() 不带参数默认 ENTER_IMMERSIVE。
-        // 画面由 popup (全屏拉伸) 承载, 主窗口沉浸式保证无系统 UI 露出。
+        // 用 ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER (API 14+): 进入沉浸
+        // 全屏且鼠标悬停屏幕边缘热区时不唤出标题栏/Dock — 默认 ENTER_IMMERSIVE
+        // 会 hover 底部浮现 dock, 抢走游戏边缘的鼠标事件 (FPS 转向/边缘 UI
+        // 失效)。画面由 popup (全屏拉伸) 承载。
         try {
-          hilog.info(DOMAIN, TAG, '[MW] fullscreen #%{public}d → win.maximize() (ENTER_IMMERSIVE)', toplevelId);
-          win.maximize().then(() => {
+          hilog.info(DOMAIN, TAG, '[MW] fullscreen #%{public}d → win.maximize() (DISABLE_TITLE_AND_DOCK_HOVER)', toplevelId);
+          win.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER).then(() => {
             hilog.info(DOMAIN, TAG, '[MW] fullscreen OK #%{public}d', toplevelId);
           }).catch((err: Error) => {
             hilog.warn(DOMAIN, TAG, '[MW] fullscreen #%{public}d failed: %{public}s', toplevelId, JSON.stringify(err));
