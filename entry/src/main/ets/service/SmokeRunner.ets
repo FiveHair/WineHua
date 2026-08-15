@@ -113,6 +113,28 @@ function readText(path: string): string {
   }
 }
 
+// guest Vulkan 栈架构从 manifest.json 的 architecture 字段判断 (aarch64|x86_64),
+// arm64 原生 wine → aarch64, x86_64 → x86_64。无 manifest 时默认 x86_64 (旧行为)。
+interface GuestVulkanManifest {
+  architecture?: string;
+}
+
+function guestVulkanArch(): string {
+  const manifestPath = `${GUEST_VULKAN_ROOT}/manifest.json`;
+  if (pathExists(manifestPath)) {
+    const architecture = readText(manifestPath);
+    if (architecture.length > 0) {
+      try {
+        const manifest = JSON.parse(architecture) as GuestVulkanManifest;
+        const arch: string = manifest.architecture ?? '';
+        if (arch.startsWith('aarch64')) return 'aarch64';
+        if (arch.startsWith('x86_64')) return 'x86_64';
+      } catch (_) { /* fall through to default */ }
+    }
+  }
+  return 'x86_64';
+}
+
 function writeAtomic(path: string, text: string): void {
   const slash = path.lastIndexOf('/');
   if (slash > 0) ensureDirectory(path.substring(0, slash));
@@ -226,10 +248,10 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     'x86/winehua_vulkan_smoke.exe', 'x86/winehua_d3d11_smoke.exe',
     'x86/winehua_d3d8_smoke.exe', 'x86/winehua_d3d_switch_cube.exe',
     'x86/winehua_win32_driver.exe',
-    'assets/venus_storage_write.spv', 'assets/venus_storage_read.spv',
-    'assets/venus_image_fetch.spv', 'assets/venus_combined_sample.spv',
-    'assets/venus_separated_sample.spv',
   ];
+  /* venus shader assets 随 guest_vulkan 打包，仅 x86_64 有内容 (arm64 原生走
+   * 宿主 Vulkan, files/wine/smoke/assets 为空目录)。这部分按"源目录实际内容"
+   * 同步，不在此硬性要求——arm64 下缺失这些 .spv 不得让 C:\smoke 同步失败。 */
   /* DXVK is a WineHua runtime overlay, not part of C:\\smoke.  Remove the
    * four files from older payloads, but only inside this managed directory. */
   for (const file of ['x64/d3d11.dll', 'x64/dxgi.dll', 'x86/d3d11.dll', 'x86/dxgi.dll']) {
@@ -250,6 +272,16 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     if (!pathExists(`${target}/${file}`)) {
       complete = false;
       break;
+    }
+  }
+  /* venus shader assets 是 x86_64 guest_vulkan 专属 (arm64 空目录): 仅当源
+   * assets 有内容时才要求 target 同步其全部文件。 */
+  if (complete && pathExists(`${source}/assets`)) {
+    for (const name of fs.listFileSync(`${source}/assets`)) {
+      if (!pathExists(`${target}/assets/${name}`)) {
+        complete = false;
+        break;
+      }
     }
   }
   if (complete) return true;
@@ -385,192 +417,192 @@ export class SmokeRunner {
     }
     if (includeVenus) {
       tests.push({ id: 'venus-offscreen-x64', architecture: 'guest-x64',
-        executable: 'winehua_guest_vulkan_smoke', seconds: 0, timeoutMs: 60000 });
+        executable: 'libwinehua_guest_vulkan_smoke.so', seconds: 0, timeoutMs: 60000 });
     }
     if (includeVenusSampled) {
       tests.push({ id: 'venus-sampled-normal-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
       tests.push({ id: 'venus-sampled-general-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
       tests.push({ id: 'venus-sampled-only-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
     }
     if (includeVenusSampledIdle) {
       tests.push({ id: 'venus-sampled-idle-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
     }
     if (includeVenusDepthCube) {
       tests.push({ id: 'venus-depth-cube-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 60000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 60000 });
       tests.push({ id: 'venus-depth-cube-array-2d-golden-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 60000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 60000 });
       tests.push({ id: 'venus-depth-cube-array-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 60000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 60000 });
     }
     if (includeVenusDepthCubeArray2D) {
       tests.push({ id: 'venus-depth-cube-array-2d-golden-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 60000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 60000 });
     }
     if (includeVenusDepthCubeGraphics) {
       tests.push({ id: 'venus-depth-cube-graphics-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
       tests.push({ id: 'venus-depth-cube-graphics-golden-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
       tests.push({ id: 'venus-depth-cube-graphics-golden-dxvk-contract-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
       tests.push({ id: 'venus-depth-cube-graphics-initialized-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
       tests.push({ id: 'venus-depth-cube-graphics-optimized-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
       tests.push({ id: 'venus-depth-cube-graphics-coordinate-trace-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
       tests.push({ id: 'venus-depth-cube-graphics-padded-dref-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
       tests.push({ id: 'venus-depth-cube-graphics-no-float-controls-x64', architecture: 'guest-x64',
-        executable: 'venus_sampled_image_probe', seconds: 0, timeoutMs: 90000 });
+        executable: 'libvenus_sampled_image_probe.so', seconds: 0, timeoutMs: 90000 });
     }
     if (includeVenusHeavenMaterial) {
       tests.push({ id: 'venus-heaven-material-graphics-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-exact-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-exact-fragment-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-exact-probe-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-no-float-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-constant-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-contract-simple-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-constant-final-vertex-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-final-fragment-simple-vertex-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-bool-true-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-bool-false-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
     }
     if (includeVenusHeavenMaterialDepth) {
       tests.push({ id: 'venus-heaven-material-depth-pass0-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-depth-pass3-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-depth-pass0-no-float-controls-x64',
-        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        architecture: 'guest-x64', executable: 'libvenus_heaven_material_replay.so',
         seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-depth-pass3-no-float-controls-x64',
-        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        architecture: 'guest-x64', executable: 'libvenus_heaven_material_replay.so',
         seconds: 0, timeoutMs: 120000 });
     }
     if (includeVenusHeavenCaptured) {
       tests.push({ id: 'venus-heaven-material-captured-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-nodepth-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-constant-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
     }
     if (includeVenusHeavenDraw0) {
       tests.push({ id: 'venus-heaven-material-captured-draw0-loaded-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-draw0-clear-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-draw0-nodepth-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-draw0-input-verify-nodepth-x64',
-        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        architecture: 'guest-x64', executable: 'libvenus_heaven_material_replay.so',
         seconds: 0, timeoutMs: 180000 });
       tests.push({ id: 'venus-heaven-material-captured-draw0-always-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
     }
     if (includeVenusHeavenDraw170) {
       tests.push({ id: 'venus-heaven-material-captured-draw170-clear-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-draw170-nodepth-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-draw170-always-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
     }
     if (includeVenusHeavenF647) {
       tests.push({ id: 'venus-heaven-material-captured-f647-baseline-x64',
-        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        architecture: 'guest-x64', executable: 'libvenus_heaven_material_replay.so',
         seconds: 0, timeoutMs: 180000 });
       tests.push({ id: 'venus-heaven-material-captured-f647-input-verify-nodepth-x64',
-        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        architecture: 'guest-x64', executable: 'libvenus_heaven_material_replay.so',
         seconds: 0, timeoutMs: 180000 });
       tests.push({ id: 'venus-heaven-material-captured-f647-loaded-x64',
-        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        architecture: 'guest-x64', executable: 'libvenus_heaven_material_replay.so',
         seconds: 0, timeoutMs: 180000 });
       tests.push({ id: 'venus-heaven-material-captured-f647-nodepth-x64',
-        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        architecture: 'guest-x64', executable: 'libvenus_heaven_material_replay.so',
         seconds: 0, timeoutMs: 180000 });
       tests.push({ id: 'venus-heaven-material-captured-f647-always-x64',
-        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        architecture: 'guest-x64', executable: 'libvenus_heaven_material_replay.so',
         seconds: 0, timeoutMs: 180000 });
     }
     if (includeVenusHeavenInputs) {
       tests.push({ id: 'venus-heaven-material-captured-input-verify-nodepth-x64',
-        architecture: 'guest-x64', executable: 'venus_heaven_material_replay',
+        architecture: 'guest-x64', executable: 'libvenus_heaven_material_replay.so',
         seconds: 0, timeoutMs: 120000 });
     }
     if (includeVenusHeavenCapturedAb) {
       tests.push({ id: 'venus-heaven-material-captured-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-nodepth-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-depth-always-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-no-kill-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-force-opaque-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-t0-implicit-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-t0-lod0-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-explicit-kill-init-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-kill-direct-bit-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-kill-direct-compare-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-kill-recompare-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-local-kill-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-compare-color-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-inline-kill-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-uint-kill-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-compare-alpha-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-no-float-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-compare-alpha-no-float-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-sample-mask-discard-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-sample-mask-keep-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-inlined-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-inlined-local-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-return-compare-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-sample-mask-final-select-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-sample-mask-final-branch-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-terminate-invocation-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       tests.push({ id: 'venus-heaven-material-captured-ccp-x64', architecture: 'guest-x64',
-        executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
     }
     if (includeVenusHeavenDiscardAb) {
       for (const mode of ['captured-nodepth', 'captured-compare-alpha-nodepth',
@@ -579,13 +611,13 @@ export class SmokeRunner {
         'captured-return-compare-clean-omap-frozen-nodepth',
         'captured-sample-mask-direct-clean-omap-frozen-nodepth']) {
         tests.push({ id: `venus-heaven-material-${mode}-x64`, architecture: 'guest-x64',
-          executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+          executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       }
     }
     if (includeVenusHeavenMaterialLayout) {
       for (const mode of ['no-set', 'empty', 'small', 'ubo', 'dynamic', 'sampler', 'sampled', 'full', 'exact']) {
         tests.push({ id: `venus-heaven-material-${mode}-x64`, architecture: 'guest-x64',
-          executable: 'venus_heaven_material_replay', seconds: 0, timeoutMs: 120000 });
+          executable: 'libvenus_heaven_material_replay.so', seconds: 0, timeoutMs: 120000 });
       }
     }
     if (includeHostHeaven) {
@@ -649,7 +681,7 @@ export class SmokeRunner {
     }
     if (includeDxvkReplay) {
       tests.push({ id: 'dxvk-exact-replay-cs', architecture: 'guest-x64',
-        executable: 'venus_spirv_replay', seconds: 0, timeoutMs: 120000 });
+        executable: 'libvenus_spirv_replay.so', seconds: 0, timeoutMs: 120000 });
     }
     if (includeDxvkLayoutGeneral) {
       tests.push({ id: 'dxvk-layout-general-x86', architecture: 'x86',
@@ -854,7 +886,7 @@ export class SmokeRunner {
       if (!pathExists(`${GUEST_VULKAN_ROOT}/manifest.json`) || !pathExists(executablePath))
         return this.failureResult(spec, 'startup', 'managed Guest Vulkan runtime is missing', null);
       const currentReplayDirectory = `${this.prefix}/drive_c/smoke/results/${this.request.runId}`;
-      const replaySpvDirectory = spec.executable === 'venus_spirv_replay' &&
+      const replaySpvDirectory = spec.executable === 'libvenus_spirv_replay.so' &&
         !hasReplayShader(currentReplayDirectory) ?
         latestReplayShaderDirectory(this.prefix, currentReplayDirectory) : currentReplayDirectory;
       const heavenFragment = spec.id.indexOf('no-float') >= 0 ?
@@ -1158,7 +1190,7 @@ export class SmokeRunner {
             ['--depth-cube-array'] : []),
           ...(spec.id === 'venus-depth-cube-array-2d-golden-x64' ?
             ['--depth-cube-array-2d-golden'] : []),
-          ...(spec.executable === 'venus_spirv_replay' ? ['--spv-dir', replaySpvDirectory] : [])],
+          ...(spec.executable === 'libvenus_spirv_replay.so' ? ['--spv-dir', replaySpvDirectory] : [])],
         environment: {
           'WINEHUA_SMOKE_RUN_ID': this.request.runId,
           'WINEHUA_SMOKE_TEST_ID': spec.id,
@@ -1200,27 +1232,21 @@ export class SmokeRunner {
       spec.executable === 'winehua_d3d_switch_cube.exe');
     let process: ProcessInfo;
     if (isWineVulkan || isDxvk) {
+      // guest 栈架构从 guest_vulkan manifest 读取 (aarch64|x86_64)
+      const guestArch = guestVulkanArch();
       const guestVulkanLibrary = `${GUEST_VULKAN_ROOT}/lib`;
-      const guestVulkanIcd = `${GUEST_VULKAN_ROOT}/share/vulkan/icd.d/venus_icd.x86_64.json`;
+      const guestVulkanIcd = `${GUEST_VULKAN_ROOT}/share/vulkan/icd.d/venus_icd.${guestArch}.json`;
+      const wineUnixDir = guestArch === 'aarch64' ? 'aarch64-unix' : 'x86_64-unix';
       const box64LibraryPath = `${guestVulkanLibrary}:${WINE_ROOT}/bin/guest_gfx/lib:` +
-        `${WINE_ROOT}/bin:${WINE_ROOT}/bin/x86_64-unix:${WINE_ROOT}/lib/x86_64`;
+        `${WINE_ROOT}/bin:${WINE_ROOT}/bin/${wineUnixDir}:${WINE_ROOT}/lib/${guestArch === 'aarch64' ? 'arm64' : 'x86_64'}`;
       const isPresent = isWineVulkanPresent || isDxvk;
       const smokeEnvironment: Record<string, string> = {
         'WINEHUA_SMOKE_RUN_ID': this.request.runId,
         'WINEHUA_SMOKE_TEST_ID': spec.id,
         'WINEHUA_SMOKE_ASSETS': 'C:\\smoke\\assets',
         'WINEHUA_VULKAN_RUNTIME': '1',
-        'WINEHUA_VULKAN_LOADER_ARCH': 'x86_64',
-        'WINEHUA_VENUS_ICD_ARCH': 'x86_64',
-        'USE_LIBBOX64': '1',
-        'BOX64_LOG': '1',
-        'BOX64_LD_LIBRARY_PATH': box64LibraryPath,
-        'BOX64_EMULATED_LIBS': 'libvulkan.so:libvulkan.so.1:' +
-          'libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:' +
-          'libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:' +
-          'libwayland-client.so:libwayland-client.so.0:libwayland-server.so:' +
-          'libwayland-server.so.0:libwayland-server.so.0:libwayland-egl.so:' +
-          'libwayland-egl.so.1:libdrm.so:libdrm.so.2:libffi.so:libffi.so.8',
+        'WINEHUA_VULKAN_LOADER_ARCH': guestArch,
+        'WINEHUA_VENUS_ICD_ARCH': guestArch,
         'VK_DRIVER_FILES': guestVulkanIcd,
         'VK_ICD_FILENAMES': guestVulkanIcd,
         'VN_DEBUG': 'vtest',
@@ -1237,6 +1263,18 @@ export class SmokeRunner {
          * diagnostic run through runWineProgram. */
         'WINEDEBUG': '+loaddll,+module'
       };
+      // x86_64 (box64 时代): guest venus ELF 经 box64 加载; arm64 原生 aarch64 不需要
+      if (guestArch === 'x86_64') {
+        smokeEnvironment['USE_LIBBOX64'] = '1';
+        smokeEnvironment['BOX64_LOG'] = '1';
+        smokeEnvironment['BOX64_LD_LIBRARY_PATH'] = box64LibraryPath;
+        smokeEnvironment['BOX64_EMULATED_LIBS'] = 'libvulkan.so:libvulkan.so.1:' +
+          'libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:' +
+          'libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:' +
+          'libwayland-client.so:libwayland-client.so.0:libwayland-server.so:' +
+          'libwayland-server.so.0:libwayland-server.so.0:libwayland-egl.so:' +
+          'libwayland-egl.so.1:libdrm.so:libdrm.so.2:libffi.so:libffi.so.8';
+      }
       if (isDxvk) {
         smokeEnvironment['BOX64_DYNAREC_WEAKBARRIER'] = '0';
         smokeEnvironment['WINEHUA_DXVK_VERSION'] = '1.10.3';

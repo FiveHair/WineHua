@@ -308,9 +308,6 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
      * this through runWineProgram's per-process environment. */
     UpsertEnvLine(env, "DXVK_LOG_LEVEL=warn");
     UpsertEnvLine(env, "DXVK_LOG_PATH=C:\\windows\\temp");
-#ifdef __aarch64__
-    UpsertEnvLine(env, "BOX64_DYNAREC_WEAKBARRIER=0");
-#endif
     UpsertEnvLine(env, "WINEHUA_PERF_PROFILE=" + selectedProfile);
     UpsertEnvLine(env, "DXVK_WINEHUA_PRECISE_SHADOW=1");
     if (selectedProfile == "shadow-precise-dirty-ring-inline-upload-descriptor-serialized") {
@@ -454,13 +451,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         // (musl 无 locale 数据, Wine 只读 LC_ALL 兜底解析 LCID)
         const std::string wbLangEnv = "|__env=LANG=" + p->wineLang + ".UTF-8" +
             "|__env=LC_ALL=" + p->wineLang + ".UTF-8";
-#ifdef __aarch64__
-        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag +
-            "wineboot|--init|__env=WINEPREFIX=" + p->prefixDir + wbLangEnv;
-#else
+        // Wine 与设备同架构: 统一带 wine 前缀 (arm64 原生 __wine_main 需要 argv[0]=wine)
         std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag +
             "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir + wbLangEnv;
-#endif
         // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
@@ -625,11 +618,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         AppendD3dBackendEnv(explorerEnv, p->d3dBackend, p->winehuaBin);
         AppendStableDesktopDxvkEnv(explorerEnv, *p);
 
-#ifdef __aarch64__
-        std::string exEntry = p->winehuaBin + "|__winehua_desktop__|explorer|" + std::string(desktopArg);
-#else
         std::string exEntry = p->winehuaBin + "|__winehua_desktop__|wine|explorer|" + std::string(desktopArg);
-#endif
         // broker 自动添加 homeDir 前缀、序列化 env、创建 audio bootstrap fd
         int32_t exPid = SpawnViaBroker(exEntry, explorerEnv);
         OH_LOG_WARN(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d (via broker)", exPid);

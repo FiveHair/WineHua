@@ -2,6 +2,7 @@ import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.Ab
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { WineWindowManager } from '../service/WineWindowManager';
 import testNapi from 'libentry.so';
 
@@ -204,6 +205,35 @@ export default class EntryAbility extends UIAbility {
     }
     this.publishLaunchRequest(want);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
+    this.dumpEl1BundleLibs();
+  }
+
+  // [EL1-DUMP] 调试用: 验证 el1 bundle libs 目录实际内容 (定位 dlopen libEGL ENOENT)。
+  // 结果写文件 (el2 files, hdc 可读) + hilog 双通道; 避免 hilog 抓取不可靠。
+  private dumpEl1BundleLibs(): void {
+    const dirs = ['/data/storage/el1/bundle/libs/arm64', '/data/storage/el1/bundle/libs'];
+    const lines: string[] = [];
+    for (const dir of dirs) {
+      try {
+        const names: string[] = fs.listFileSync(dir);
+        const msg = `readdir ${dir} -> ${names.length} entries: ${names.join(',')}`;
+        lines.push(msg);
+        hilog.info(DOMAIN, 'EL1-DUMP', '%{public}s', msg);
+      } catch (err) {
+        const msg = `readdir ${dir} FAILED: ${JSON.stringify(err)}`;
+        lines.push(msg);
+        hilog.info(DOMAIN, 'EL1-DUMP', '%{public}s', msg);
+      }
+    }
+    try {
+      const dumpPath = this.context.filesDir + '/el1_dump.txt';
+      const file = fs.openSync(dumpPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      fs.writeSync(file.fd, lines.join('\n'));
+      fs.closeSync(file);
+      hilog.info(DOMAIN, 'EL1-DUMP', 'written to %{public}s', dumpPath);
+    } catch (err) {
+      hilog.info(DOMAIN, 'EL1-DUMP', 'write file FAILED: %{public}s', JSON.stringify(err));
+    }
   }
 
   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {

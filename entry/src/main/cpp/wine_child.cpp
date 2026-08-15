@@ -255,21 +255,17 @@ static const char *select_winedebug_profile(int argc, char *argv[])
 static void setup_wine_env(const char* binDir, const char* homeDir, const char *winedebug)
 {
     std::string shareDir = std::string(binDir) + "/../share";
-    std::string libDir = std::string(binDir) + "/x86_64-unix";
-
+    std::string libDir = std::string(binDir) + "/" WINE_UNIX_SUBDIR;
 #ifdef __aarch64__
-    // ARM64: x86_64 .so 由 Box64 加载，不在系统 LD_LIBRARY_PATH
-    // LD_LIBRARY_PATH 只包含 ARM64 原生 .so
-    setenv("LD_LIBRARY_PATH",
-           "/data/app/bin:/usr/local/lib:/system/lib64/module:/system/lib64", 1);
-    // Box64 用它自己的搜索路径加载 x86_64 .so
-    setenv("BOX64_LD_LIBRARY_PATH", libDir.c_str(), 1);
+    static constexpr const char* native_lib_dir = "arm64";
 #else
-    // x86_64: 系统 linker 直接加载 x86_64 OHOS .so
-    // guest_gfx 库已打包进 bundle libs (el1, 系统 dlopen 允许), 依赖也从该目录解析
-    setenv("LD_LIBRARY_PATH",
-           (libDir + ":/data/storage/el1/bundle/libs/x86_64").c_str(), 1);
+    static constexpr const char* native_lib_dir = "x86_64";
 #endif
+
+    // Wine 与设备同架构 (arm64 原生 aarch64 / x86_64), 系统 linker 直接加载
+    // Wine .so 打包在 bundle libs (el1, 系统 dlopen 允许), 依赖也从该目录解析
+    setenv("LD_LIBRARY_PATH",
+           (libDir + ":/data/storage/el1/bundle/libs/" + native_lib_dir).c_str(), 1);
 
     if (homeDir && homeDir[0])
         setenv("HOME", homeDir, 1);
@@ -289,26 +285,22 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
     // WINEBINDIR/WINEUNIXDIR 覆盖 init_paths() 中基于 dladdr(ntdll.so) 推算的错误路径
     // ntdll.so 在 bundle libs 目录，而 PE DLL / Unix SO 数据都在 wine/bin/ 下
     setenv("WINEBINDIR", binDir, 1);   // wine/bin/
-    setenv("WINEUNIXDIR", binDir, 1);  // wine/bin/ (含 x86_64-unix/x86_64-windows)
+    setenv("WINEUNIXDIR", binDir, 1);  // wine/bin/ (含 aarch64-unix/aarch64-windows 或 x86_64-*)
     setenv("WINEDLLDIR", libDir.c_str(), 1);
-    setenv("WINEDLLDIR0", (std::string(binDir) + "/x86_64-windows").c_str(), 1);
+    setenv("WINEDLLDIR0", (std::string(binDir) + "/" WINE_PE_SUBDIR).c_str(), 1);
     setenv("WINEDLLDIR1", (std::string(binDir) + "/i386-windows").c_str(), 1);
     setenv("WINEDLLDIR2", binDir, 1);
     {
-        std::string dllPath = std::string(binDir) + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir;
-#ifndef __aarch64__
-        dllPath += ":/data/storage/el1/bundle/libs/x86_64";
-#endif
+        std::string dllPath = std::string(binDir) + "/" WINE_PE_SUBDIR ":" + binDir + "/i386-windows:" + binDir;
+        dllPath += ":/data/storage/el1/bundle/libs/" + std::string(native_lib_dir);
         setenv("WINEDLLPATH", dllPath.c_str(), 1);
     }
-    // Box64 日志: 0=关闭 (3=DEBUG 会产生海量 I/O)
-    SetBox64PerfEnv();
 #ifdef __aarch64__
-    // 标记 Box64 in-process 模式，供 x86_64 wine 代码 (process.c) 运行时判断
-    setenv("USE_LIBBOX64", "1", 1);
+    // arm64 原生 wine: 指定 FEX 模拟器 DLL (HODLL64), 由 ntdll loader 加载转译 x86_64 应用
+    setenv("HODLL64", "libarm64ecfex.dll", 1);
 #endif
     setenv("PATH", (std::string("/usr/local/bin:/data/app/bin:/usr/bin:/vendor/bin:")
-                    + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir).c_str(), 1);
+                    + binDir + "/" WINE_PE_SUBDIR ":" + binDir + "/i386-windows:" + binDir).c_str(), 1);
     setenv("TMPDIR", WINE_TMPDIR, 1);
     setenv("XDG_RUNTIME_DIR", WINE_PREFIX, 1);
     std::string midiSoundfontPath = std::string(binDir) + "/../audio/winehua-gm.sf2";
@@ -584,58 +576,56 @@ extern "C" void Main(NativeChildProcess_Args args)
     pthread_create(&tid, nullptr, stderr_reader_thread, ctx);
     pthread_detach(tid);
 
+    if (guestElfMode) {
+        // 鸿蒙沙箱不支持 exec: guest 程序 (guest_vulkan/bin/*) 编译为 .so 共享库,
+        // 统一导出入口 winehua_guest_program_main (build_ohos_guest_vulkan.sh 用
+        // -Dmain=winehua_guest_program_main 重命名)。NCP 创建本进程后 dlopen .so
+        // → dlsym 入口 → 调用, 与 hostElfMode 的 libwinehua_host_heaven_replay.so
+        // 同一模式。依赖的 libvulkan.so 经 .so 的 $ORIGIN/../lib rpath 解析。
+        const char* guestLibPath = argv[0];
+        // el2 data 区 dlopen 被拒 (ENOENT): guest .so 由 assemble 复制到 el1 bundle libs
+        // 平铺目录。用 basename 优先从 el1 解析, fallback 原路径 (兼容旧布局)。
+        const char* guestLibSlash = strrchr(guestLibPath, '/');
+        const char* guestLibBase = guestLibSlash ? guestLibSlash + 1 : guestLibPath;
+        const std::string el1GuestLib =
+            std::string("/data/storage/el1/bundle/libs/") +
 #ifdef __aarch64__
-    // ARM64 Pad: dlopen box64.so → Box64 模拟 x86_64 wine ELF
-    OH_LOG_INFO(LOG_APP, "[WineChild] dlopen box64.so (ARM64 Box64 path)...");
-    void* box64_lib = dlopen("box64.so", RTLD_NOW);
-    if (!box64_lib) {
-        OH_LOG_ERROR(LOG_APP, "[WineChild] dlopen(box64.so) failed: %{public}s", dlerror());
-        free(buf);
-        return;
-    }
-
-    auto* box64_main = (int (*)(int, const char**, char**))dlsym(box64_lib, "box64_hmos_main");
-    if (!box64_main) {
-        OH_LOG_ERROR(LOG_APP, "[WineChild] dlsym(box64_hmos_main) failed: %{public}s", dlerror());
-        dlclose(box64_lib);
-        free(buf);
-        return;
-    }
-
-    // Guest probes use the same isolated NCP/Box64 boundary as Wine but run a
-    // concrete x86_64 OHOS ELF.  Keeping this marker out of argv ensures the
-    // probe observes a normal argv[0] and cannot accidentally enter Wine.
-    std::string winePath = guestElfMode ? std::string(argv[0]) : std::string(binDir) + "/wine";
-    int box64_argc = guestElfMode ? argc + 1 : argc + 2;
-    const char** box64_argv = new const char*[box64_argc + 1];
-    box64_argv[0] = "box64";
-    box64_argv[1] = winePath.c_str();
-    if (guestElfMode) {
-        for (int i = 1; i < argc; i++) box64_argv[i + 1] = argv[i];
-    } else {
-        for (int i = 0; i < argc; i++) box64_argv[i + 2] = argv[i];
-    }
-    box64_argv[box64_argc] = nullptr;
-
-    OH_LOG_INFO(LOG_APP, "[WineChild] calling box64_hmos_main argc=%{public}d wine=%{public}s",
-                box64_argc, winePath.c_str());
-
-    int box64_rc = box64_main(box64_argc, box64_argv, environ);
-    OH_LOG_INFO(LOG_APP, "[WineChild] box64_hmos_main returned rc=%{public}d", box64_rc);
-
-    delete[] box64_argv;
-    // 不 dlclose(box64_lib): Box64 内部注册了 atexit handler / 包装函数指针,
-    // dlclose 卸载 Box64 代码后, 后续 atexit 回调引用这些地址 → SIGSEGV。
-    // 进程即将退出, OS 会回收一切, 无需手动卸载。
-    free(buf);
+            "arm64/" +
 #else
-    if (guestElfMode) {
-        execve(argv[0], argv, environ);
-        OH_LOG_ERROR(LOG_APP, "[GuestChild] execve failed: %{public}s", strerror(errno));
+            "x86_64/" +
+#endif
+            guestLibBase;
+        OH_LOG_INFO(LOG_APP, "[GuestChild] dlopen guest lib=%{public}s (el1=%{public}s)",
+                    guestLibPath, el1GuestLib.c_str());
+        void* module = dlopen(el1GuestLib.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!module) {
+            OH_LOG_ERROR(LOG_APP, "[GuestChild] dlopen(el1=%{public}s) failed: %{public}s",
+                         el1GuestLib.c_str(), dlerror());
+            module = dlopen(guestLibPath, RTLD_NOW | RTLD_LOCAL);
+        }
+        if (!module) {
+            OH_LOG_ERROR(LOG_APP, "[GuestChild] dlopen(%{public}s) failed: %{public}s",
+                         guestLibPath, dlerror());
+            free(buf);
+            return;
+        }
+        auto guestMain = reinterpret_cast<int (*)(int, char**)>(
+            dlsym(module, "winehua_guest_program_main"));
+        if (!guestMain) {
+            OH_LOG_ERROR(LOG_APP, "[GuestChild] dlsym(winehua_guest_program_main) failed: %{public}s",
+                         dlerror());
+            dlclose(module);
+            free(buf);
+            return;
+        }
+        int guestRc = guestMain(argc, argv);
+        OH_LOG_INFO(LOG_APP, "[GuestChild] guest program returned rc=%{public}d", guestRc);
+        // 不 dlclose(module): guest 程序可能注册 atexit 回调, 卸载后退出时 SIGSEGV;
+        // 进程即将退出, OS 会回收一切。
         free(buf);
         return;
     }
-    // x86_64 Pad: dlopen ntdll.so → __wine_main (原生系统 linker 加载)
+    // Wine 与设备同架构 (arm64 原生 aarch64 / x86_64): dlopen ntdll.so → __wine_main
     OH_LOG_INFO(LOG_APP, "[WineChild] dlopen ntdll.so...");
     void* ntdll = dlopen("ntdll.so", RTLD_NOW);
     if (!ntdll) {
@@ -663,7 +653,6 @@ extern "C" void Main(NativeChildProcess_Args args)
     // 这些可能注册了 atexit 回调 → dlclose 后退出时 SIGSEGV。
     OH_LOG_ERROR(LOG_APP, "[WineChild] __wine_main returned unexpectedly! Wine init FAILED");
     free(buf);
-#endif
 }
 
 // wineserver 子进程入口
@@ -738,47 +727,7 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
     prctl(PR_SET_NAME, "wineserver");
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step4: argv argc=%{public}d argv[0]=%{public}s", argc2, argv2[0]);
 
-#ifdef __aarch64__
-    // ARM64 Pad: dlopen box64.so → Box64 模拟 x86_64 wineserver ELF
-    OH_LOG_INFO(LOG_APP, "[WineChild] ws step5: dlopen box64.so (ARM64 Box64 path)...");
-    void* box64_lib = dlopen("box64.so", RTLD_NOW);
-    if (!box64_lib) {
-        OH_LOG_ERROR(LOG_APP, "[WineChild] dlopen(box64.so) failed: %{public}s", dlerror());
-        free(buf);
-        return;
-    }
-    auto* box64_main = (int (*)(int, const char**, char**))dlsym(box64_lib, "box64_hmos_main");
-    if (!box64_main) {
-        OH_LOG_ERROR(LOG_APP, "[WineChild] dlsym(box64_hmos_main) failed: %{public}s", dlerror());
-        dlclose(box64_lib);
-        free(buf);
-        return;
-    }
-
-    // Box64 env for wineserver (x86_64 wineserver ELF inside Box64).
-    std::string libDir = std::string(binDir) + "/x86_64-unix";
-    setenv("BOX64_LD_LIBRARY_PATH", libDir.c_str(), 1);
-    SetBox64PerfEnv();
-
-    // Build argv: ["box64", "/path/to/wineserver", "wineserver", "-f", "-p"]
-    std::string wsPath = std::string(binDir) + "/wineserver";
-    int box64_argc = argc2 + 2;
-    const char** box64_argv = new const char*[box64_argc + 1];
-    box64_argv[0] = "box64";
-    box64_argv[1] = wsPath.c_str();
-    for (int i = 0; i < argc2; i++)
-        box64_argv[i + 2] = argv2[i];
-    box64_argv[box64_argc] = nullptr;
-
-    OH_LOG_INFO(LOG_APP, "[WineChild] ws step6: calling box64_hmos_main argc=%{public}d ws=%{public}s",
-                box64_argc, wsPath.c_str());
-    int wsRc = box64_main(box64_argc, box64_argv, environ);
-    OH_LOG_INFO(LOG_APP, "[WineChild] ws step7: box64_hmos_main returned rc=%{public}d", wsRc);
-
-    delete[] box64_argv;
-    // 不 dlclose(box64_lib): 原因同上 (atexit handler 引用已卸载代码)
-#else
-    // x86_64 Pad: dlopen libwineserver.so (原生)
+    // Wine 与设备同架构 (arm64 原生 aarch64 / x86_64): dlopen libwineserver.so (原生)
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step5: dlopen libwineserver.so...");
     void* h = dlopen("libwineserver.so", RTLD_NOW);
     if (!h) {
@@ -802,7 +751,6 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
     // dlclose 后进程退出时引用已卸载代码 → SIGSEGV.
     OH_LOG_ERROR(LOG_APP, "[WineChild] ws_main returned rc=%{public}d — wineserver died unexpectedly",
                   wsRc);
-#endif
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step9: wineserver process exiting");
     free(buf);
 }

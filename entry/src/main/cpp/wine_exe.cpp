@@ -258,7 +258,11 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
     if (options.d3dBackend.rfind("dxvk_", 0) == 0)
         OH_LOG_INFO(LOG_APP, "[WineProgram] managed D3D backend=%{public}s",
                     options.d3dBackend.c_str());
+#ifdef __aarch64__
+    UpsertEnvLine(envStrs,"WINEHUA_WINE_UNIX_ARCH=aarch64");
+#else
     UpsertEnvLine(envStrs,"WINEHUA_WINE_UNIX_ARCH=x86_64");
+#endif
     UpsertEnvLine(envStrs,"WINEHUA_HOST_ARCH=" + std::string(
 #ifdef __aarch64__
         "aarch64"
@@ -269,11 +273,8 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
     if (!options.workingDirectory.empty())
         UpsertEnvLine(envStrs,"WINEHUA_WORKING_DIRECTORY=" + options.workingDirectory);
 
-#ifdef __aarch64__
-    std::string entryParams = binDir + "|" + exePath;
-#else
+    // Wine 与设备同架构: 统一带 wine 前缀 (arm64 原生 __wine_main 需要 argv[0]=wine)
     std::string entryParams = binDir + "|wine|" + exePath;
-#endif
     for (const std::string& arg : options.argv) entryParams += "|" + arg;
 
     const pid_t pid = SpawnViaBroker(entryParams, envStrs);
@@ -303,40 +304,37 @@ static pid_t SpawnGuestProgram(const GuestProgramOptions& options)
     for (const std::string& arg : options.argv) if (HasUnsafeProtocolChar(arg)) return -1;
 
     const std::string binDir = WINE_RUNTIME_BIN;
-    const std::string guestLib = guestRoot + "/lib";
     const std::string gfxLib = binDir + "/guest_gfx/lib";
-    const std::string unixLib = binDir + "/x86_64-unix";
-    const std::string libraryPath = guestLib + ":" + gfxLib + ":" + binDir + ":" + unixLib;
-    const std::string icd = guestRoot + "/share/vulkan/icd.d/venus_icd.x86_64.json";
+    const std::string unixLib = binDir + "/" WINE_UNIX_SUBDIR;
+    // 需要 dlopen 的 guest 原生库 (el1 bundle): venus loader/ICD/smoke 平铺目录,
+    // 加入 LD_LIBRARY_PATH 让 smoke .so 的 DT_NEEDED libvulkan.so.1 能解析.
+    // guest Vulkan Loader 就在 el1 顶层 (assemble.sh); host vkr 进程用绝对路径
+    // dlopen("/system/lib64/libvulkan.so") 加载系统 Vulkan, 不走名字搜索, 所以
+    // 顶层 guest loader 不会遮蔽 host vkr.
+    //
+    // 注意: LD_LIBRARY_PATH 绝不能含 el2 data 区的 guest_vulkan/lib — 那里的
+    // libvulkan.so.1 open() 能成功 (fd>=0) 但 mmap/加载被沙箱拦截 (EINVAL),
+    // musl path_open 对首个 open 成功的路径不再回退后续路径 → 整体失败.
+    // el2 guest_vulkan/lib 的 3 个库在 el1 均有副本, 故直接排除 el2 路径.
+    const std::string el1Lib = std::string("/data/storage/el1/bundle/libs/") +
+#ifdef __aarch64__
+        "arm64";
+#else
+        "x86_64";
+#endif
+    // LD_LIBRARY_PATH 只留 el1 顶层: 鸿蒙 musl namespace 对含 el2 data 区路径的
+    // LD_LIBRARY_PATH 可能整体拒绝搜索 (check ns accessible failed). smoke
+    // DT_NEEDED 仅 libvulkan.so.1 + libc.so, el2 的 guest_gfx/lib、wine/bin、
+    // aarch64-unix 全无用.
+    const std::string libraryPath = el1Lib;
+    const std::string icd = guestRoot +
+        "/share/vulkan/icd.d/venus_icd." WINE_WINE_ARCH ".json";
 
     std::vector<std::string> envStrs = BuildWineEnv(
         WINE_PREFIX, "wine-wayland", libraryPath, binDir, -1,
         WINE_AUTOMATION_HOME, WINE_PREFIX);
-#ifdef __aarch64__
-    // The NCP and box64.so are native AArch64.  Guest x86_64 directories must
-    // only enter Box64's emulated lookup path; putting them in LD_LIBRARY_PATH
-    // can make the native dynamic linker inspect wrong-architecture objects.
-    envStrs.erase(std::remove_if(envStrs.begin(), envStrs.end(), [](const std::string& line) {
-        return EnvKey(line) == "LD_LIBRARY_PATH";
-    }), envStrs.end());
-#else
+    // Wine 与设备同架构: LD_LIBRARY_PATH 统一 (arm64 原生 / x86_64)
     UpsertEnvLine(envStrs,"LD_LIBRARY_PATH=" + libraryPath);
-#endif
-#ifdef __aarch64__
-    UpsertEnvLine(envStrs,"BOX64_LD_LIBRARY_PATH=" + libraryPath);
-    UpsertEnvLine(envStrs,
-        "BOX64_EMULATED_LIBS=libvulkan.so:libvulkan.so.1:"
-        "libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:"
-        "libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:"
-        "libwayland-client.so:libwayland-client.so.0:libwayland-server.so:"
-        "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
-        "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8");
-    // Library loading has its own smoke assertions.  Function-call tracing is
-    // prohibitively noisy when a disconnected vtest socket is polled and can
-    // otherwise grow the shared stderr log by gigabytes before the watchdog.
-    UpsertEnvLine(envStrs,"BOX64_LOG=1");
-    UpsertEnvLine(envStrs,"BOX64_NOBANNER=1");
-#endif
     UpsertEnvLine(envStrs,"VK_DRIVER_FILES=" + icd);
     UpsertEnvLine(envStrs,"VK_ICD_FILENAMES=" + icd);
     UpsertEnvLine(envStrs,"VN_DEBUG=vtest,result");

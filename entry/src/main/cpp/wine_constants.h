@@ -26,4 +26,15 @@
 // Wine 子进程 stderr 日志目录
 #define WINE_LOG_DIR         "/data/storage/el2/base/temp"
 
+// -- Wine 产物架构子目录 (arm64 原生 wine → aarch64-*; x86_64 → x86_64-*) --
+#ifdef __aarch64__
+#define WINE_UNIX_SUBDIR     "aarch64-unix"
+#define WINE_PE_SUBDIR       "aarch64-windows"
+#define WINE_WINE_ARCH       "aarch64"
+#else
+#define WINE_UNIX_SUBDIR     "x86_64-unix"
+#define WINE_PE_SUBDIR       "x86_64-windows"
+#define WINE_WINE_ARCH       "x86_64"
+#endif
+
 #endif // WINE_CONSTANTS_H
