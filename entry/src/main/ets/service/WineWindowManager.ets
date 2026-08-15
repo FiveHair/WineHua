@@ -5,6 +5,7 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 import testNapi from 'libentry.so';
 import { PopupWindowManager } from './PopupWindowManager';
 import { ArgbWindowManager } from './ArgbWindowManager';
+import { DesktopModeService } from './DesktopModeService';
 
 const DOMAIN = 0x0000;
 const TAG = 'WineWM';
@@ -44,9 +45,25 @@ export class WineWindowManager {
   // 校准计数: 前几轮不做 EMA 平滑, 快速收敛
   private barCalibrationCount: number = 0;
 
-  // -- Desktop 模式 (Tablet) --
+  // -- Desktop 模式 (Tablet / PC 虚拟桌面) --
   isDesktopMode: boolean = false;  // 公开: WineEnvService 镜像
   private automationMode: boolean = false;
+  // PC 虚拟桌面: 桌面 root surface 承载在独立 VirtualDesktopAbility 窗口
+  // (master 的 tablet/phone 走 DesktopAbility 全屏窗口)。由 applyModePolicy 派生。
+  desktopSeparateWindow: boolean = false;
+  // PC 虚拟桌面窗口状态 (root 单例, 不用 entries Map; 参照 tablet
+  // DesktopAbility 的 registerDesktopAbility/desktopAbilityCtx 模式):
+  //   desktopWinStarting  — startAbility 飞行中 (防重复)
+  //   desktopWindowActive — 窗口存活 (Index「打开桌面」按钮据此显隐)
+  //   desktopWinCtx       — VDA onCreate 注册, root 销毁时 terminateSelf 关窗
+  private desktopWinStarting: boolean = false;
+  private desktopWindowActive: boolean = false;
+  private desktopWinCtx: common.UIAbilityContext | null = null;
+  // 启动器可见性镜像 (DesktopLayer 读): 启动器可见时桌面窗口退出全屏,
+  // XComponent 高度波动, 桌面 root 不应跟随 resize (否则热重启桌面高度
+  // 残留错误值)。PC 虚拟桌面窗口 (VirtualDesktop) 保持默认 true →
+  // DesktopLayer 跳过 root resize, 窗口只是显示口 (renderer letterbox)。
+  desktopLauncherVisible: boolean = true;
   private desktopRootId: number = 0;
   private desktopAbilityRunning: boolean = false;
   private desktopAbilityCtx: common.UIAbilityContext | null = null;
@@ -111,11 +128,29 @@ export class WineWindowManager {
 
   setAutomationMode(enabled: boolean): void {
     this.automationMode = enabled;
-    this.isDesktopMode = deviceInfo.deviceType === 'tablet' && !enabled;
+    this.applyModePolicy();
+  }
+
+  // 桌面模式判定统一入口 (init / 引擎启动前共用):
+  //   Pad/phone → 恒桌面合成器 (DesktopAbility 全屏窗口, 现状)
+  //   PC (2in1) + automation (smoke) → 融合 (managed, 无 explorer)
+  //   PC + 设置虚拟桌面 → 桌面合成器 + 独立 VirtualDesktopAbility 窗口
+  //   PC + 设置融合 (默认) → managed 多窗口
+  // 引擎每次启动前调用 (WineEnvService.doInit) — 设置页切换后"重启引擎"
+  // 即生效。若只在 init 判定, 重启引擎会沿用启动时旧模式 (改融合后桌面
+  // 窗口依旧出现)
+  applyModePolicy(): void {
+    const isPadOrPhone = deviceInfo.deviceType === 'tablet' || deviceInfo.deviceType === 'phone';
+    this.isDesktopMode = !this.automationMode &&
+      (isPadOrPhone || DesktopModeService.getInstance().mode === 'virtual');
+    this.desktopSeparateWindow = this.isDesktopMode && !isPadOrPhone;
+    // 同步 C++: explorer 是否启动由 IsDesktopMode 决定 (wine_launch.cpp)
     testNapi.setDesktopMode(this.isDesktopMode);
     hilog.info(DOMAIN, TAG,
-      '[MW] automation mode=%{public}s desktop mode=%{public}s',
-      enabled ? 'true' : 'false', this.isDesktopMode ? 'true' : 'false');
+      '[MW] mode policy: type=%{public}s automation=%{public}s → %{public}s (separateWindow=%{public}s)',
+      deviceInfo.deviceType, this.automationMode ? 'true' : 'false',
+      this.isDesktopMode ? 'DESKTOP MODE' : 'MANAGED MODE',
+      this.desktopSeparateWindow ? 'yes' : 'no');
   }
 
   async init(windowStage: window.WindowStage, abilityContext: common.UIAbilityContext): Promise<void> {
@@ -127,17 +162,10 @@ export class WineWindowManager {
     hilog.info(DOMAIN, TAG, '[MW] init: mainWindow=%{public}s ctx=%{public}s',
       this.mainWindow ? 'ok' : 'NULL', this.uiAbilityContext ? 'ok' : 'NULL');
 
-    // Pad/phone use the desktop compositor unless automation deliberately
-    // requests the managed, Explorer-free smoke session.
-    this.isDesktopMode = (deviceInfo.deviceType === 'tablet' || deviceInfo.deviceType === 'phone') &&
-      !this.automationMode;
-    if (this.isDesktopMode) {
-      testNapi.setDesktopMode(true);
-      hilog.info(DOMAIN, TAG, '[MW] Tablet/Phone → DESKTOP MODE (single XComponent)');
-    } else {
-      testNapi.setDesktopMode(false);
-      hilog.info(DOMAIN, TAG, '[MW] deviceType=%{public}s → MANAGED MODE', deviceInfo.deviceType);
-    }
+    // 桌面模式判定: Pad/phone 恒桌面合成器; PC 按设置 (融合默认, 虚拟桌面可切)。
+    // applyModePolicy 读 DesktopModeService (Preferences), 引擎每次启动前重判
+    DesktopModeService.getInstance().init(this.uiAbilityContext);
+    this.applyModePolicy();
 
     // 获取设备显示密度 + 主窗口可用区域
     try {
@@ -347,12 +375,19 @@ export class WineWindowManager {
         }
         break;
       case 'desktop_root':
-        // Tablet: C++ 识别到 explorer desktop → 打开 DesktopAbility
-        hilog.info(DOMAIN, TAG, '[MW] desktop_root toplevel #%{public}d → start DesktopAbility', id);
+        // C++ 识别到 explorer desktop → 桌面激活
         this.desktopRootId = id;
         this.desktopSurfaceReady = false;   // 新 root: renderer 尚未就绪
         this.desktopActive = true;          // 桌面激活信号 (WineEnvService 镜像)
-        this.startDesktopAbility(id);
+        // PC 虚拟桌面: root 承载在独立 VirtualDesktopAbility 窗口, 自动打开
+        // (用户决策: master 无悬浮窗中间态)。tablet/phone: DesktopAbility 全屏窗口。
+        if (this.desktopSeparateWindow) {
+          hilog.info(DOMAIN, TAG, '[MW] desktop_root #%{public}d → openDesktopWindow (separate)', id);
+          this.openDesktopWindow();
+        } else {
+          hilog.info(DOMAIN, TAG, '[MW] desktop_root toplevel #%{public}d → start DesktopAbility', id);
+          this.startDesktopAbility(id);
+        }
         this.notify();
         break;
       case 'destroyed':
@@ -725,19 +760,34 @@ export class WineWindowManager {
     hilog.info(DOMAIN, TAG, '[MW] onToplevelDestroyed #%{public}d', id);
     this.destroyed.add(id);
 
-    // Desktop 模式: root 销毁 → 关闭 DesktopAbility, 回到主页面
+    // Desktop 模式: root 销毁 → 关闭桌面窗口, 回到主页面
     if (this.isDesktopMode && id === this.desktopRootId) {
-      hilog.info(DOMAIN, TAG, '[MW] desktop root #%{public}d destroyed, closing DesktopAbility', id);
+      hilog.info(DOMAIN, TAG, '[MW] desktop root #%{public}d destroyed', id);
       this.desktopRootId = 0;
       this.desktopSurfaceReady = false;
       this.desktopActive = false;
-      if (this.desktopAbilityCtx) {
-        this.desktopAbilityCtx.terminateSelf().catch((err: Error) => {
-          hilog.warn(DOMAIN, TAG, '[MW] ERR terminateSelf DesktopAbility: %{public}s', JSON.stringify(err));
-        });
-        this.desktopAbilityCtx = null;
+      if (this.desktopSeparateWindow) {
+        // PC 虚拟桌面: 关闭独立 VirtualDesktopAbility 窗口 (root 销毁=会话结束)
+        if (this.desktopWinCtx) {
+          const ctx = this.desktopWinCtx;
+          this.desktopWinCtx = null;
+          hilog.info(DOMAIN, TAG, '[MW] → terminateSelf(VirtualDesktopAbility)');
+          ctx.terminateSelf().catch((err: Error) => {
+            hilog.warn(DOMAIN, TAG, '[MW] ERR terminateSelf desktop window: %{public}s', JSON.stringify(err));
+          });
+        }
+        this.desktopWindowActive = false;
+        this.desktopWinStarting = false;
+      } else {
+        // tablet/phone: 关闭 DesktopAbility (现状)
+        if (this.desktopAbilityCtx) {
+          this.desktopAbilityCtx.terminateSelf().catch((err: Error) => {
+            hilog.warn(DOMAIN, TAG, '[MW] ERR terminateSelf DesktopAbility: %{public}s', JSON.stringify(err));
+          });
+          this.desktopAbilityCtx = null;
+        }
+        this.desktopAbilityRunning = false;
       }
-      this.desktopAbilityRunning = false;
       this.notify();
       return;
     }
@@ -799,6 +849,89 @@ export class WineWindowManager {
   }
 
   getDesktopRootId(): number { return this.desktopRootId; }
+
+  // -- PC 虚拟桌面独立窗口 (VirtualDesktopAbility) --
+
+  isSeparateDesktopWindow(): boolean {
+    return this.desktopSeparateWindow;
+  }
+
+  isDesktopWindowActive(): boolean {
+    return this.desktopWindowActive;
+  }
+
+  // VDA onCreate 调: 注册 ctx + 窗口存活标记 (对齐 tablet registerDesktopAbility)
+  registerDesktopWindow(ctx: common.UIAbilityContext): void {
+    this.desktopWinCtx = ctx;
+    this.desktopWindowActive = true;
+    this.notify();
+  }
+
+  // VDA 关窗 (WINDOW_DESTROYED / onDestroy) 调: 引擎会话后台继续, 仅清窗口
+  // 标记 (对齐 tablet unregisterDesktopAbility 语义 + notify 让 Index
+  // 「打开桌面」按钮复现 — 与 tablet onDestroy 杀 root 语义不同: PC 虚拟
+  // 桌面要求"关窗后台运行")
+  markDesktopWindowClosed(): void {
+    this.desktopWinCtx = null;
+    this.desktopWindowActive = false;
+    this.notify();
+  }
+
+  // 主动打开虚拟桌面独立窗口 (Index「打开桌面」按钮; desktop_root 自动调用)
+  openDesktopWindow(): void {
+    this.startVirtualDesktopAbility();
+  }
+
+  // -- startAbility 拉起独立桌面窗口 (root 单例, 防重: starting/active 双守卫) --
+  private startVirtualDesktopAbility(): void {
+    if (this.desktopWinStarting || this.desktopWindowActive) {
+      hilog.info(DOMAIN, TAG, '[MW] desktop window already in flight/alive, skip');
+      return;
+    }
+    if (!this.uiAbilityContext) {
+      hilog.error(DOMAIN, TAG, '[MW] FATAL: no uiAbilityContext, cannot start desktop window');
+      return;
+    }
+    this.desktopWinStarting = true;
+    hilog.info(DOMAIN, TAG, '[MW] startAbility(VirtualDesktopAbility)');
+    const want: Want = {
+      bundleName: 'app.hackeris.winehua',
+      abilityName: 'VirtualDesktopAbility'
+    };
+    this.uiAbilityContext.startAbility(want).then(() => {
+      hilog.info(DOMAIN, TAG, '[MW] OK startAbility(VirtualDesktopAbility) resolved');
+      this.desktopWinStarting = false;
+    }).catch((err: Error) => {
+      hilog.error(DOMAIN, TAG, '[MW] ERR startAbility(VirtualDesktopAbility) REJECTED: %{public}s',
+        JSON.stringify(err));
+      this.desktopWinStarting = false;
+    });
+  }
+
+  // 沉浸全屏还原: 经 VDA ctx 取主窗口 recover() 回普通窗口 (唯一还原入口
+  // 是 VirtualDesktop 页面的悬浮「退出全屏」按钮 — DISABLE_HOVER 禁用了
+  // 系统 hover 还原)
+  async recoverDesktopWindow(): Promise<void> {
+    if (!this.desktopWinCtx) {
+      hilog.warn(DOMAIN, TAG, '[MW] recoverDesktopWindow: no desktop ctx');
+      return;
+    }
+    try {
+      const win = await window.getLastWindow(this.desktopWinCtx);
+      if (win) {
+        await win.recover();
+        hilog.info(DOMAIN, TAG, '[MW] recoverDesktopWindow OK');
+      }
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, '[MW] recoverDesktopWindow failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  // 启动器可见性写回 (Index 调用; PC 虚拟桌面模式 Index 不挂 DesktopLayer,
+  // 该值归独立窗口所有 — VirtualDesktop 页面保持默认 true 跳过 root resize)
+  setDesktopLauncherVisible(visible: boolean): void {
+    this.desktopLauncherVisible = visible;
+  }
 
   // DesktopAbility 注册/注销其 UIAbilityContext, 用于 root 销毁时 terminateSelf
   registerDesktopAbility(ctx: common.UIAbilityContext): void {

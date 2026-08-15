@@ -1,8 +1,12 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
 import { fileIo as fs } from '@kit.CoreFileKit';
+import { deviceInfo } from '@kit.BasicServicesKit';
+import { SegmentButton, SegmentButtonOptions } from '@kit.ArkUI';
 import { WineEnvService } from '../service/WineEnvService';
 import { ProcessService, ProcessInfo } from '../service/ProcessService';
+import { WineWindowManager } from '../service/WineWindowManager';
+import { DesktopModeService, MODE_VIRTUAL, MODE_FUSION } from '../service/DesktopModeService';
 
 const DOMAIN = 0x0000;
 
@@ -37,6 +41,14 @@ struct Index {
   @State dirStack: string[] = [];
   // -- 运行中进程 (ProcessService 镜像) --
   @State processList: ProcessInfo[] = [];
+  // -- 桌面模式 (仅 PC): 融合/虚拟桌面设置 (镜像 DesktopModeService) --
+  @State desktopModeSel: number[] = [0];
+  @State desktopMode: string = MODE_FUSION;
+  @State desktopModeRestartHint: boolean = false;
+  // -- PC 虚拟桌面窗口状态 (镜像 WineWindowManager) --
+  @State desktopActive: boolean = false;
+  @State desktopWindowActive: boolean = false;
+  private wm: WineWindowManager = WineWindowManager.getInstance();
   private d3dBackend: string = 'dxvk_legacy';
   // 升级提示日志只打一次 (master 版无弹卡 UI, 检测到不一致仅留痕 +
   // 快速操作按钮转为"应用更新"语义, 见 quickStart)
@@ -82,6 +94,13 @@ struct Index {
       this.processList = proc.processList;
     });
     proc.bindEnv(env);
+    // PC 虚拟桌面窗口状态镜像 (WineWindowManager notify 驱动): desktopActive
+    // / desktopWindowActive → 「打开桌面」按钮显隐 (关窗后台运行, 按钮复现)
+    const wm = this.wm;
+    wm.subscribe(() => {
+      this.desktopActive = wm.desktopActive;
+      this.desktopWindowActive = wm.isDesktopWindowActive();
+    });
     // 引擎初始化 (幂等): automation/game 模式自动 doInit; prefix 就绪自动
     // 拉起 (含升级检测拦截); 首启无 prefix 自动 doInit (与 master 一致)
     env.init(getContext(this));
@@ -216,6 +235,23 @@ struct Index {
     this.d3dPreferenceText = selected;
     this.statusText = selected === 'dxvk_legacy' ? 'DXVK Legacy' : 'WineD3D';
     hilog.info(DOMAIN, 'GameTest', 'D3D backend selected=%{public}s', selected);
+  }
+
+  // 桌面模式切换 (仅 PC): 写配置, 重启 Wine 引擎后生效 (explorer 是否启动/
+  // 合成器策略在引擎启动时按此值判定, 运行中切换不影响当前会话)
+  private selectDesktopMode(mode: string): void {
+    if (mode == this.desktopMode) {
+      return;
+    }
+    DesktopModeService.getInstance().setMode(mode);
+    this.desktopMode = mode;
+    this.desktopModeRestartHint = true;
+  }
+
+  // 设置项可见性: 功能仅对 PC 可用 (Pad/phone 恒虚拟桌面, 无融合模式可切)
+  private isPcDevice(): boolean {
+    const t = deviceInfo.deviceType;
+    return t !== 'tablet' && t !== 'phone';
   }
 
   // 引擎操作统一入口: 忙时 (初始化/停止编排中) 由 WineEnvService 自身拦截。
@@ -396,6 +432,34 @@ struct Index {
         }
         .width('100%').margin({ bottom: 8 })
 
+        // -- 桌面模式 (仅 PC): 融合模式 = 每个程序独立 OHOS 窗口 (多窗口, 默认);
+        // 虚拟桌面 = 独立窗口承载 Wine 桌面。切换后重启引擎生效
+        if (this.isPcDevice()) {
+          Divider().color('#2a2a2a').width('100%')
+          Text('桌面模式')
+            .fontWeight(FontWeight.Bold).fontColor('#999')
+            .width('100%').padding({ top: 12, bottom: 8 })
+          SegmentButton({
+            options: SegmentButtonOptions.capsule({
+              buttons: [{ text: '融合模式' }, { text: '虚拟桌面' }],
+              multiply: false
+            }),
+            selectedIndexes: $desktopModeSel,
+            onItemClicked: (index: number) => {
+              this.selectDesktopMode(index == 0 ? MODE_FUSION : MODE_VIRTUAL);
+            }
+          })
+          .width('100%')
+          Text('虚拟桌面: Wine 桌面在独立窗口运行; 融合模式: 每个程序独立窗口')
+            .fontSize(12).fontColor('#777')
+            .width('100%').padding({ top: 4 })
+          if (this.desktopModeRestartHint) {
+            Text('桌面模式已更改, 重启 Wine 引擎后生效')
+              .fontSize(12).fontColor('#f84')
+              .width('100%').padding({ top: 4 })
+          }
+        }
+
         // -- 快速操作 --
         Text('快速操作')
           .fontWeight(FontWeight.Bold).fontColor('#999')
@@ -426,6 +490,14 @@ struct Index {
             .enabled(!this.engineBusy())
             .onClick(this.quickRestart)
             .margin({ bottom: 8 })
+          // PC 虚拟桌面: 桌面窗口已关闭 (引擎后台继续) 时提供重开入口
+          if (this.desktopActive && this.wm.isSeparateDesktopWindow() && !this.desktopWindowActive) {
+            Button('打开桌面')
+              .width('100%').backgroundColor('#246')
+              .enabled(!this.engineBusy())
+              .onClick(() => this.wm.openDesktopWindow())
+              .margin({ bottom: 8 })
+          }
         }
 
         Button('开发测试（Core）')

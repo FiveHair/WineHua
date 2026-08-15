@@ -4,6 +4,7 @@
     "pages/HostVulkanSmoke",
     "pages/WineWindow",
     "pages/DesktopWindow",
-    "pages/WinePopup"
+    "pages/WinePopup",
+    "pages/VirtualDesktop"
   ]
 }
