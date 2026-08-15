@@ -63,16 +63,58 @@ Libs: -L\${libdir} -lz
 Cflags: -I\${includedir}
 EOF
 fi
-# musl 的 libintl 是 libc 内建 stub → 提供 .pc 防 glib 触发 proxy-libintl wrap 下载
-if [ ! -f "$SYSROOT_EXT_PC/libintl.pc" ]; then
+# musl (OHOS) 无 libintl: libc 已裁剪 gettext 符号, 也无 libintl.h/libintl.so。
+# glib 的 meson dependency('intl') 强制要求真库 (找不到就走 proxy-libintl wrap,
+# nodownload/nofallback 下都报 ERROR), 且其检测走 find_library 不走 pkg-config
+# → 构建 stub libintl (gettext 系返回 msgid, 即 musl 的 stub 语义)。
+if [ ! -f "$SYSROOT_EXT_LIB/libintl.so" ]; then
+    log "--- 构建 stub libintl (gettext 返回 msgid) ---"
+    mkdir -p "$SYSROOT_EXT_INC" "$SYSROOT_EXT_LIB"
+    cat > "$SYSROOT_EXT_INC/libintl.h" << 'INTL_H'
+#ifndef _LIBINTL_H
+#define _LIBINTL_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+#include <stddef.h>
+char *gettext(const char *msgid);
+char *dgettext(const char *domainname, const char *msgid);
+char *dcgettext(const char *domainname, const char *msgid, int category);
+char *ngettext(const char *msgid, const char *msgid_plural, unsigned long int n);
+char *dngettext(const char *domainname, const char *msgid, const char *msgid_plural, unsigned long int n);
+char *dcngettext(const char *domainname, const char *msgid, const char *msgid_plural, unsigned long int n, int category);
+char *textdomain(const char *domainname);
+char *bindtextdomain(const char *domainname, const char *dirname);
+char *bind_textdomain_codeset(const char *domainname, const char *codeset);
+#ifdef __cplusplus
+}
+#endif
+#endif /* _LIBINTL_H */
+INTL_H
+    cat > "$BUILD_DIR/libintl.c" << 'INTL_C'
+#include "libintl.h"
+char *gettext(const char *msgid) { return (char *)msgid; }
+char *dgettext(const char *domainname, const char *msgid) { (void)domainname; return (char *)msgid; }
+char *dcgettext(const char *domainname, const char *msgid, int category) { (void)domainname; (void)category; return (char *)msgid; }
+char *ngettext(const char *msgid, const char *msgid_plural, unsigned long int n) { return (char *)(n == 1 ? msgid : msgid_plural); }
+char *dngettext(const char *domainname, const char *msgid, const char *msgid_plural, unsigned long int n) { (void)domainname; return (char *)(n == 1 ? msgid : msgid_plural); }
+char *dcngettext(const char *domainname, const char *msgid, const char *msgid_plural, unsigned long int n, int category) { (void)domainname; (void)category; return (char *)(n == 1 ? msgid : msgid_plural); }
+char *textdomain(const char *domainname) { return (char *)domainname; }
+char *bindtextdomain(const char *domainname, const char *dirname) { (void)dirname; return (char *)domainname; }
+char *bind_textdomain_codeset(const char *domainname, const char *codeset) { (void)domainname; return (char *)codeset; }
+INTL_C
+    "$CLANG" --target="$TARGET" --sysroot="$SYSROOT" -shared -fPIC -O2 \
+        -o "$SYSROOT_EXT_LIB/libintl.so" "$BUILD_DIR/libintl.c" || err "stub libintl 编译失败"
+    rm -f "$BUILD_DIR/libintl.c"
+    # .pc 指向真实 stub (供走 pkg-config 的库链接 -lintl)
     cat > "$SYSROOT_EXT_PC/libintl.pc" << EOF
-prefix=$SYSROOT/usr
+prefix=$SYSROOT_EXT/usr
 includedir=\${prefix}/include
 libdir=\${prefix}/lib/x86_64-linux-ohos
 Name: libintl
 Description: GNU gettext (musl stub)
 Version: 0.22
-Libs: -L\${libdir} -lc
+Libs: -L\${libdir} -lintl
 Cflags: -I\${includedir}
 EOF
 fi
@@ -117,9 +159,14 @@ if [ ! -f "$SYSROOT_EXT_LIB/libglib-2.0.so.0" ]; then
     fi
     build="$BUILD_DIR/glib_build"
     rm -rf "$build"
-    # --wrap-mode=nodownload: 防 wrap 下载 (pcre2/zlib/libffi 已由 .pc 提供, 不触发)
+    # --wrap-mode=nofallback: 禁用 fallback subproject。musl 无独立
+    # libintl.so (OHOS 的 libc 已裁剪 gettext), meson 的 dependency('intl')
+    # 走内置检测 (find_library, 不走 pkg-config), 找不到时 fallback 指定的
+    # proxy-libintl wrap 在 nodownload 下 buildable NO → ERROR。
+    # nofallback 直接 not-found, 配合 -Dnls=disabled 走 glib 内建 stub。
+    # pcre2/zlib/libffi 已由 .pc 提供, 不触发 fallback。
     meson setup "$build" "$GLIB_SRC" --cross-file "$(gen_cross_file)" \
-        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nodownload \
+        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nofallback \
         -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
         -Dselinux=disabled -Dxattr=false -Dlibmount=disabled -Dman=false \
         -Ddtrace=false -Dsystemtap=false -Dgtk_doc=false -Dtests=false \
@@ -138,7 +185,7 @@ if [ ! -f "$SYSROOT_EXT_LIB/libgstreamer-1.0.so.0" ]; then
     build="$BUILD_DIR/gstreamer_build"
     rm -rf "$build"
     meson setup "$build" "$GST_SRC" --cross-file "$(gen_cross_file)" \
-        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nodownload \
+        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nofallback \
         -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
         -Dtests=disabled -Dexamples=disabled -Dtools=disabled \
         -Dintrospection=disabled -Ddoc=disabled -Dgtk_doc=disabled -Dorc=disabled \
@@ -159,7 +206,7 @@ if [ ! -f "$SYSROOT_EXT_PC/gstreamer-video-1.0.pc" ] || \
     build="$BUILD_DIR/gst_base_build"
     rm -rf "$build"
     meson setup "$build" "$BASE_SRC" --cross-file "$(gen_cross_file)" \
-        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nodownload \
+        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nofallback \
         -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
         -Dtests=disabled -Dexamples=disabled -Dintrospection=disabled -Ddoc=disabled \
         -Dorc=disabled -Dnls=disabled \
@@ -201,7 +248,7 @@ if [ ! -d "$GST_LIBDIR/gstreamer-1.0" ] || \
     rm -rf "$build"
     # zlib 来自 OHOS sysroot; vpx 插件已由 libvpx 提供。禁用外部音频/图像依赖。
     meson setup "$build" "$GOOD_SRC" --cross-file "$(gen_cross_file)" \
-        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nodownload \
+        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nofallback \
         -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
         -Dcairo=disabled -Ddv=disabled -Dflac=disabled -Djack=disabled \
         -Djpeg=disabled -Dlame=disabled -Dlibcaca=disabled -Dmpg123=disabled \
@@ -256,7 +303,7 @@ if [ ! -f "$SYSROOT_EXT_LIB/libavcodec.so" ] || \
         build="$BUILD_DIR/gst_libav_build"
         rm -rf "$build"
         meson setup "$build" "$LIBAV_SRC" --cross-file "$(gen_cross_file)" \
-            --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nodownload \
+            --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nofallback \
             -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
             -Dtests=disabled -Ddoc=disabled
         meson compile -C "$build" -j "$JOBS"
