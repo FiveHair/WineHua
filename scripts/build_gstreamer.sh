@@ -28,16 +28,7 @@ FFMPEG_SRC="$BUILD_DIR/ffmpeg_src"
 GST_PREFIX="$SYSROOT_EXT/usr"
 GST_LIBDIR="$GST_PREFIX/lib/x86_64-linux-ohos"
 
-# 幂等跳过: 4 个 .pc + 关键 .so 齐全
-idempotent_done() {
-    [ -f "$SYSROOT_EXT_PC/gstreamer-1.0.pc" ] \
-        && [ -f "$SYSROOT_EXT_PC/gstreamer-video-1.0.pc" ] \
-        && [ -f "$SYSROOT_EXT_PC/glib-2.0.pc" ] \
-        && [ -f "$SYSROOT_EXT_LIB/libgstreamer-1.0.so.0" ] \
-        && [ -f "$SYSROOT_EXT_LIB/libglib-2.0.so.0" ] \
-        && [ -f "$SYSROOT_EXT_INC/glib.h" ]
-}
-
+# 各库独立幂等 (各自 if 检查关键产物), 无整体跳过
 log "=== 构建 GStreamer 链 (core + plugins-base/good + libav, x86_64) → sysroot-ext ==="
 
 mkdir -p "$SYSROOT_EXT_INC" "$SYSROOT_EXT_LIB" "$SYSROOT_EXT_PC" "$BUILD_DIR"
@@ -241,8 +232,9 @@ for pc in gstreamer-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-tag-1.
 done
 
 # ── 5. gst-plugins-good (demuxer: qtdemux/matroskademux/typefind 等) ──
+# 幂等以 qtdemux 所在库 libgstisomp4.so 为准 (无独立 libgstqtdemux.so)
 if [ ! -d "$GST_LIBDIR/gstreamer-1.0" ] || \
-   [ ! -f "$GST_LIBDIR/gstreamer-1.0/libgstqtdemux.so" ]; then
+   [ ! -f "$GST_LIBDIR/gstreamer-1.0/libgstisomp4.so" ]; then
     log "--- 构建 gst-plugins-good ---"
     build="$BUILD_DIR/gst_good_build"
     rm -rf "$build"

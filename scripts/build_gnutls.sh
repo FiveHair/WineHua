@@ -25,7 +25,8 @@ fetch_tarball() {
     local name="$1" primary="$2" fallback="$3"
     local out="$TARBALL_DIR/$name"
     local archive="$TARBALL_DIR/$(basename "$primary")"
-    if [ -d "$out" ]; then return 0; fi
+    # 幂等: configure 就位才算就绪 (防上次解压中断留下不完整目录被误判)
+    if [ -f "$out/configure" ]; then return 0; fi
     mkdir -p "$TARBALL_DIR"
     if ! curl -fL --retry 3 -o "$archive" "$primary"; then
         [ -n "$fallback" ] || err "下载 $name 失败: $primary"
@@ -92,30 +93,10 @@ stage_pc() {
     cp "$STAGING"/lib/pkgconfig/"$1" "$SYSROOT_EXT_PC/" 2>/dev/null || true
 }
 
-# configure 生成 (git 树无 configure 时才跑; bootstrap 只跑一次)
-bootstrap_source() {
-    local src="$1" mode="$2"
-    [ -f "$src/configure" ] && return 0
-    log "--- 生成 $src configure ($mode) ---"
-    case "$mode" in
-        nettle)
-            (cd "$src" && ./.bootstrap)
-            ;;
-        autogen)
-            (cd "$src" && GNULIB_SRCDIR="$GNULIB_DIR" ./autogen.sh)
-            ;;
-        gnulib)
-            # --no-git: 不递归 clone/update submodule (devel/libtasn1 等无用子模块)
-            (cd "$src" && ./bootstrap --skip-po --no-git --gnulib-srcdir="$GNULIB_DIR")
-            ;;
-    esac
-}
-
 build_one() {
-    local name="$1" src="$2" bootstrap="$3"; shift 3
+    local name="$1" src="$2"; shift 2
     local build="$BUILD_DIR/${name}_build"
     log "--- 构建 $name ---"
-    bootstrap_source "$src" "$bootstrap"
     rm -rf "$build"
     mkdir -p "$build"
     cd "$build"
@@ -139,19 +120,13 @@ build_one() {
             ;;
         gnutls)
             # ASN.1 tab 生成需要 asn1Parser (交叉二进制, 宿主不可运行)。
-            # 复用同版本 (3.8.3) CrossOver release 树的预生成文件 → build 树,
-            # touch 保证比 .asn 新, 防止 make 重新生成。
+            # release tarball 自带同版本 (3.8.3) 预生成 tab 文件 (mtime
+            # 比 .asn 新) → 复制到 build 树, touch 保证比 .asn 新, 防止
+            # make 用交叉 asn1Parser 重新生成。
             mkdir -p "$build/lib"
             for t in gnutls_asn1_tab.c pkix_asn1_tab.c; do
-                # 优先 CrossOver release 预生成文件, 否则用 release tarball
-                # 自带的预生成 tab (configure 产物, mtime 比 .asn 新) → build
-                # 树, touch 防 make 用交叉 asn1Parser 重新生成 (宿主跑不了)
-                if [ ! -f "$build/lib/$t" ]; then
-                    if [ -f "$ROOT/.temp/crossover/gnutls/gnutls/lib/$t" ]; then
-                        cp "$ROOT/.temp/crossover/gnutls/gnutls/lib/$t" "$build/lib/$t"
-                    elif [ -f "$src/lib/$t" ]; then
-                        cp "$src/lib/$t" "$build/lib/$t"
-                    fi
+                if [ ! -f "$build/lib/$t" ] && [ -f "$src/lib/$t" ]; then
+                    cp "$src/lib/$t" "$build/lib/$t"
                 fi
                 [ -f "$build/lib/$t" ] && touch "$build/lib/$t"
             done
@@ -174,28 +149,28 @@ build_one() {
 }
 
 # ── 1. gmp (nettle 的 bignum 后端) ──
-build_one gmp "$TARBALL_DIR/gmp" none \
+build_one gmp "$TARBALL_DIR/gmp" \
     --disable-assembly --enable-cxx=no --disable-dependency-tracking
 stage_libs libgmp
 stage_headers gmp.h
 stage_pc gmp.pc
 
 # ── 2. libtasn1 (gnutls 的 ASN.1 解析) ──
-build_one libtasn1 "$TARBALL_DIR/libtasn1" none \
+build_one libtasn1 "$TARBALL_DIR/libtasn1" \
     --disable-doc --disable-dependency-tracking --disable-tests
 stage_libs libtasn1
 stage_headers libtasn1.h
 stage_pc libtasn1.pc
 
 # ── 3. libunistring (gnutls 的字符串/IDN 依赖) ──
-build_one libunistring "$TARBALL_DIR/libunistring" none \
+build_one libunistring "$TARBALL_DIR/libunistring" \
     --disable-dependency-tracking --without-libiconv-prefix
 stage_libs libunistring
 stage_headers unistring
 stage_pc libunistring.pc
 
 # ── 4. nettle (+hogweed, gnutls 的 crypto 后端) ──
-build_one nettle "$TARBALL_DIR/nettle" none \
+build_one nettle "$TARBALL_DIR/nettle" \
     --disable-documentation --disable-openssl --disable-assembler \
     --disable-dependency-tracking
 stage_libs libnettle
@@ -205,7 +180,7 @@ stage_pc nettle.pc
 stage_pc hogweed.pc
 
 # ── 5. gnutls (schannel 的 TLS 后端) ──
-build_one gnutls "$TARBALL_DIR/gnutls" none \
+build_one gnutls "$TARBALL_DIR/gnutls" \
     --disable-doc --disable-tools --disable-tests --disable-full-test-suite --disable-gtk-doc --disable-cxx \
     --disable-guile --disable-valgrind-tests --disable-code-coverage \
     --without-p11-kit --without-tpm --without-brotli --without-zstd \
