@@ -70,6 +70,10 @@ private:
                            void* userData,
                            void* audioData,
                            int32_t audioDataSize);
+    static void OnInterrupt(OH_AudioRenderer* renderer,
+                            void* userData,
+                            OH_AudioInterrupt_ForceType type,
+                            OH_AudioInterrupt_Hint hint);
 
     mutable std::mutex mutex_;
     bool running_ = false;
