@@ -191,6 +191,13 @@ assemble_pad() {
         else
             warn "libarm64ecfex.dll 未找到！请先执行: bash scripts/build_fex.sh"
         fi
+        # FEX libwow64fex.dll → PE 目录 (arm64 原生转译 32 位 x86 应用)
+        if [ -f "$BUILD_DIR/fex-pe/Bin/libwow64fex.dll" ]; then
+            cp "$BUILD_DIR/fex-pe/Bin/libwow64fex.dll" "$wine_data/bin/$wine_pe_dir/"
+            log "    libwow64fex.dll → rawfile $wine_pe_dir/"
+        else
+            warn "libwow64fex.dll 未找到！请先执行: bash scripts/build_fex.sh"
+        fi
     fi
 
     # -- 2. PE DLL + 数据文件 → rawfile (两种架构共用) --

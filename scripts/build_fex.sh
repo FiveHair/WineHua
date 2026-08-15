@@ -1,11 +1,14 @@
 #!/bin/bash
-# build_fex.sh — 构建 FEX 模拟器 DLL (arm64 原生 wine 转译 x86_64 应用)
+# build_fex.sh — 构建 FEX 模拟器 DLL (arm64 原生 wine 转译 x86_64 / x86 应用)
 #
-#   libarm64ecfex.dll : x86_64 模拟 (v1 必需) — arm64ec ABI, 由 Wine 的
-#                       load_arm64ec_module() 在 ARM64EC/WoW64 层内加载
-#   (libwow64fex.dll : i386 模拟, 后置; v1 仅 x64)
+#   libarm64ecfex.dll : x86_64 模拟 (必需) — arm64ec ABI, 由 Wine 的
+#                       load_arm64ec_module() 在 ARM64EC/WoW64 层内加载 (HODLL64)
+#   libwow64fex.dll   : i386 (32 位 x86) 模拟 — aarch64 ABI, 由 Wine 的
+#                       get_cpu_dll_name() 在 WoW64 层内加载 (HODLL)
 #
-# 产物: build/fex-ec/Bin/libarm64ecfex.dll (assemble.sh 负责归位到 aarch64-windows/)
+# 产物:
+#   build/fex-ec/Bin/libarm64ecfex.dll  (assemble.sh 归位到 aarch64-windows/)
+#   build/fex-pe/Bin/libwow64fex.dll    (assemble.sh 归位到 aarch64-windows/)
 # 前置: LLVM_MINGW (llvm-mingw, 需 LLVM ≥ 18 支持 arm64ec) + thirdparty/fex
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -20,6 +23,7 @@ OUT_DIR="$BUILD_DIR/fex-ec/Bin"
 test -d "$FEX_SRC" || err "FEX 源码缺失: $FEX_SRC (git submodule update --init)"
 test -f "$FEX_SRC/Data/CMake/toolchain_mingw.cmake" || err "FEX toolchain_mingw.cmake 缺失"
 test -x "$LLVM_MINGW/bin/arm64ec-w64-mingw32-clang" || err "llvm-mingw 缺失 arm64ec 支持: $LLVM_MINGW (需 LLVM ≥ 18)"
+test -x "$LLVM_MINGW/bin/aarch64-w64-mingw32-clang" || err "llvm-mingw 缺失 aarch64-w64-mingw32-clang: $LLVM_MINGW"
 
 export PATH="$LLVM_MINGW/bin:$PATH"
 
@@ -50,5 +54,34 @@ build_fex_ec() {
     log "产物: $dll (assemble.sh 归位到 aarch64-windows/)"
 }
 
+# ---- libwow64fex.dll (i386 / 32 位 x86 模拟, aarch64 ABI) ----
+# 与 arm64ecfex 使用不同 MINGW_TRIPLE (aarch64-w64-mingw32), 必须用独立 build
+# 目录 (fex-pe), 避免 CMake 缓存与 arm64ec 配置互相覆盖。
+build_fex_pe() {
+    local build="$BUILD_DIR/fex-pe"
+    mkdir -p "$build"
+    cd "$build"
+    if [ ! -f CMakeCache.txt ]; then
+        cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_TOOLCHAIN_FILE="$FEX_SRC/Data/CMake/toolchain_mingw.cmake" \
+            -DENABLE_LTO=False \
+            -DMINGW_TRIPLE=aarch64-w64-mingw32 \
+            -DBUILD_TESTS=False \
+            "$FEX_SRC"
+    fi
+    make -j"$JOBS" wow64fex
+
+    local dll="$build/Bin/libwow64fex.dll"
+    test -f "$dll" || err "wow64fex 构建失败: $dll 不存在"
+    local readobj="$LLVM_MINGW/bin/llvm-readobj"
+    if "$readobj" --file-headers "$dll" 2>/dev/null | grep -q "COFF-ARM64"; then
+        log "OK: libwow64fex.dll 为 aarch64 PE"
+    else
+        warn "架构异常: $("$readobj" --file-headers "$dll" 2>/dev/null | grep -m1 'Format:')"
+    fi
+    log "产物: $dll (assemble.sh 归位到 aarch64-windows/)"
+}
+
 build_fex_ec
-log "FEX 构建完成"
+build_fex_pe
+log "FEX 构建完成 (arm64ecfex + wow64fex)"

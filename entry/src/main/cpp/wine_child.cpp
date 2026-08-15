@@ -298,6 +298,8 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
 #ifdef __aarch64__
     // arm64 原生 wine: 指定 FEX 模拟器 DLL (HODLL64), 由 ntdll loader 加载转译 x86_64 应用
     setenv("HODLL64", "libarm64ecfex.dll", 1);
+    // 32 位 x86 应用: HODLL 由 wow64.dll get_cpu_dll_name() 读取, 转译 i386 PE
+    setenv("HODLL", "libwow64fex.dll", 1);
 #endif
     setenv("PATH", (std::string("/usr/local/bin:/data/app/bin:/usr/bin:/vendor/bin:")
                     + binDir + "/" WINE_PE_SUBDIR ":" + binDir + "/i386-windows:" + binDir).c_str(), 1);
