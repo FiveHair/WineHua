@@ -33,7 +33,7 @@ build_scanner() {
     log "wayland-scanner: $(which wayland-scanner)"
 }
 
-log "=== 构建 Wayland (x86_64) ==="
+log "=== 构建 Wayland ($WINE_ARCH) ==="
 
 if [ -f "$SYSROOT_EXT_LIB/libwayland-client.so.0" ] \
    && [ -f "$SYSROOT_EXT_LIB/libwayland-client.so" ] \
@@ -54,14 +54,14 @@ mkdir -p "$SYSROOT_EXT_INC" "$SYSROOT_EXT_LIB" "$SYSROOT_EXT_PC" "$SYSROOT_EXT_S
 mkdir -p "$WL_BUILD"
 
 # 1. 交叉编译 wayland (client + egl)
-meson_build "$WL_BUILD/x86_64" "$WL_SRC" \
+meson_build "$WL_BUILD/$WINE_ARCH" "$WL_SRC" \
     -Ddocumentation=false -Dtests=false -Dscanner=false
-ninja -C "$WL_BUILD/x86_64"
+ninja -C "$WL_BUILD/$WINE_ARCH"
 
 # 安装 .so (文件名 = SONAME)
-cp "$WL_BUILD/x86_64/src/libwayland-client.so.0.22.0" "$SYSROOT_EXT_LIB/libwayland-client.so.0"
-cp "$WL_BUILD/x86_64/src/libwayland-server.so.0.22.0" "$SYSROOT_EXT_LIB/libwayland-server.so.0"
-cp "$WL_BUILD/x86_64/egl/libwayland-egl.so.1.22.0" "$SYSROOT_EXT_LIB/libwayland-egl.so.1" 2>/dev/null || true
+cp "$WL_BUILD/$WINE_ARCH/src/libwayland-client.so.0.22.0" "$SYSROOT_EXT_LIB/libwayland-client.so.0"
+cp "$WL_BUILD/$WINE_ARCH/src/libwayland-server.so.0.22.0" "$SYSROOT_EXT_LIB/libwayland-server.so.0"
+cp "$WL_BUILD/$WINE_ARCH/egl/libwayland-egl.so.1.22.0" "$SYSROOT_EXT_LIB/libwayland-egl.so.1" 2>/dev/null || true
 ln -sf libwayland-client.so.0 "$SYSROOT_EXT_LIB/libwayland-client.so"
 ln -sf libwayland-server.so.0 "$SYSROOT_EXT_LIB/libwayland-server.so"
 ln -sf libwayland-egl.so.1 "$SYSROOT_EXT_LIB/libwayland-egl.so" 2>/dev/null || true
@@ -70,8 +70,8 @@ ln -sf libwayland-egl.so.1 "$SYSROOT_EXT_LIB/libwayland-egl.so" 2>/dev/null || t
 cp "$WL_SRC/src/wayland-client.h" \
    "$WL_SRC/src/wayland-client-core.h" \
    "$WL_SRC/src/wayland-util.h" \
-   "$WL_BUILD/x86_64/src/wayland-client-protocol.h" \
-   "$WL_BUILD/x86_64/src/wayland-version.h" \
+   "$WL_BUILD/$WINE_ARCH/src/wayland-client-protocol.h" \
+   "$WL_BUILD/$WINE_ARCH/src/wayland-version.h" \
    "$SYSROOT_EXT_INC/"
 cp "$WL_SRC/egl/wayland-egl.h" "$SYSROOT_EXT_INC/" 2>/dev/null || true
 cp "$WL_SRC/egl/wayland-egl-core.h" "$SYSROOT_EXT_INC/" 2>/dev/null || true
@@ -91,7 +91,7 @@ cp "$WL_SRC/protocol/wayland.xml" "$SYSROOT_EXT_SHARE/wayland/"
 cat > "$SYSROOT_EXT_PC/wayland-client.pc" << EOF
 prefix=$SYSROOT_EXT/usr
 includedir=\${prefix}/include
-libdir=\${prefix}/lib/x86_64-linux-ohos
+libdir=\${prefix}/lib/$TARGET
 
 Name: Wayland Client
 Description: Wayland client side library
@@ -104,7 +104,7 @@ EOF
 cat > "$SYSROOT_EXT_PC/wayland-egl.pc" << EOF
 prefix=$SYSROOT_EXT/usr
 includedir=\${prefix}/include
-libdir=\${prefix}/lib/x86_64-linux-ohos
+libdir=\${prefix}/lib/$TARGET
 
 Name: Wayland EGL
 Description: Wayland EGL platform library

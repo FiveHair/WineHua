@@ -49,13 +49,32 @@ fi
 CLANG="$OHOS_SDK/native/llvm/bin/clang"
 SYSROOT="$OHOS_SDK/native/sysroot"
 
+# llvm-mingw (arm64ec/aarch64 PE 编译 + FEX 构建, 需 LLVM ≥ 18)
+# 优先项目本地 .temp, 缺失时开发期回退到 winebox 的现成工具链
+LLVM_MINGW="${LLVM_MINGW:-$ROOT/.temp/llvm-mingw-20260616-ucrt-ubuntu-22.04-x86_64}"
+if [ ! -d "$LLVM_MINGW/bin/arm64ec-w64-mingw32-clang" ] && \
+   [ -d /data/share/winebox/.temp/llvm-mingw-20260616-ucrt-ubuntu-22.04-x86_64 ]; then
+    LLVM_MINGW=/data/share/winebox/.temp/llvm-mingw-20260616-ucrt-ubuntu-22.04-x86_64
+fi
+export LLVM_MINGW
+
 # ── Native 层架构 (鸿蒙设备 CPU, HAP .so 的目标) ──
 # arm64-v8a: 真机 (AArch64)
 # x86_64:    模拟器 / x86_64 设备
 NATIVE_ARCH="${NATIVE_ARCH:-arm64-v8a}"
 
-# ── Wine 模拟层目标 (始终 x86_64, Wine 本身是 x86_64 ELF) ──
-TARGET="x86_64-linux-ohos"
+# ── Wine 模拟层架构 ──
+# arm64 真机 → aarch64 原生 wine + FEX 转译应用 (libarm64ecfex.dll)
+# x86_64 模拟器 → x86_64 同目标 wine
+if [ -z "${WINE_ARCH:-}" ]; then
+    [ "$NATIVE_ARCH" = "arm64-v8a" ] && WINE_ARCH=aarch64 || WINE_ARCH=x86_64
+fi
+export WINE_ARCH
+TARGET="${WINE_ARCH}-linux-ohos"                            # aarch64-linux-ohos | x86_64-linux-ohos
+HOST_TRIPLE="${HOST_TRIPLE:-${WINE_ARCH}-unknown-linux-ohos}"  # wine configure --host
+GNU_HOST="${GNU_HOST:-${WINE_ARCH}-linux-gnu}"              # autoconf 系 deps --host
+OHOS_ARCH="${OHOS_ARCH:-$( [ "$WINE_ARCH" = aarch64 ] && echo arm64-v8a || echo x86_64 )}"
+export TARGET HOST_TRIPLE GNU_HOST OHOS_ARCH
 
 # 根据 NATIVE_ARCH 推导 Native 层 LLVM target / meson cpu
 case "$NATIVE_ARCH" in
@@ -87,7 +106,6 @@ WINE_DEVICE_ROOT="/data/storage/el2/base/files/wine"
 
 # 源码路径
 WINE_SRC="$ROOT/thirdparty/wine"
-BOX64_SRC="$ROOT/thirdparty/box64"
 DXVK_SRC="$ROOT/thirdparty/dxvk"
 
 # 产物路径
@@ -98,7 +116,7 @@ DXVK_BUILD_ROOT="$BUILD_DIR/dxvk/legacy"
 
 # sysroot-ext 目录结构
 SYSROOT_EXT_INC="$SYSROOT_EXT/usr/include"
-SYSROOT_EXT_LIB="$SYSROOT_EXT/usr/lib/x86_64-linux-ohos"
+SYSROOT_EXT_LIB="$SYSROOT_EXT/usr/lib/$TARGET"
 SYSROOT_EXT_PC="$SYSROOT_EXT/usr/lib/pkgconfig"
 SYSROOT_EXT_SHARE="$SYSROOT_EXT/usr/share"
 
@@ -132,14 +150,14 @@ export JOBS
 
 # 生成 meson cross file (路径依赖 ROOT, 不能硬编码)
 gen_cross_file() {
-    local cross="$BUILD_DIR/ohos-x86_64-cross.txt"
+    local cross="$BUILD_DIR/ohos-${WINE_ARCH}-cross.txt"
     # pkg-config wrapper: --with-path 替换默认搜索路径 (宿主系统 /usr/lib/pkgconfig
     # 会混入 x11.pc 等 → 交叉构建误用宿主库探测)
     local pcwrap="$BUILD_DIR/pkg-config-cross.sh"
     cat > "$pcwrap" << PWEOF
 #!/bin/sh
 # PKG_CONFIG_LIBDIR 替换默认搜索路径 (--with-path 只是追加, 宿主 /usr/lib 仍混入)
-export PKG_CONFIG_LIBDIR="$SYSROOT_EXT_PC:$SYSROOT_EXT/usr/lib/x86_64-linux-ohos/pkgconfig:$SYSROOT/usr/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="$SYSROOT_EXT_PC:$SYSROOT_EXT/usr/lib/$TARGET/pkgconfig:$SYSROOT/usr/lib/pkgconfig"
 exec "$PKG_CONFIG_BIN" "\$@"
 PWEOF
     chmod +x "$pcwrap"
@@ -159,7 +177,7 @@ gdbus-codegen = '$SYSROOT_EXT/usr/bin/gdbus-codegen'
 c_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC']
 c_link_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-fuse-ld=lld', '-L$SYSROOT_EXT_LIB']
 # pkgconfigdir = libdir/pkgconfig (x86_64-linux-ohos 子目录), 与 /usr/lib/pkgconfig 都要
-pkg_config_path = ['$SYSROOT_EXT/usr/lib/pkgconfig', '$SYSROOT_EXT/usr/lib/x86_64-linux-ohos/pkgconfig', '$SYSROOT/usr/lib/pkgconfig']
+pkg_config_path = ['$SYSROOT_EXT/usr/lib/pkgconfig', '$SYSROOT_EXT/usr/lib/$TARGET/pkgconfig', '$SYSROOT/usr/lib/pkgconfig']
 
 [properties]
 # 不设 sys_root: 编译器 --sysroot 已在 c_args/c_link_args 中，
@@ -171,8 +189,8 @@ needs_exe_wrapper = true
 
 [host_machine]
 system = 'linux'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
+cpu_family = '$WINE_ARCH'
+cpu = '$WINE_ARCH'
 endian = 'little'
 XEOF
     echo "$cross"

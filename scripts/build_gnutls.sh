@@ -7,7 +7,7 @@
 #   libunistring ──────────┘
 #
 # 交叉目标 x86_64-linux-ohos (Wine unix 层), 仿 build_libffi.sh 模式:
-#   CC="$CLANG --target=$TARGET --sysroot=$SYSROOT" + --host=x86_64-linux-gnu
+#   CC="$CLANG --target=$TARGET --sysroot=$SYSROOT" + --host=$GNU_HOST
 #   (configure 只看 host 判平台特性, 实际编译 target 由 --target= 控制)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -59,6 +59,8 @@ bootstrap_source() {
     local src="$1" mode="$2"
     [ -f "$src/configure" ] && return 0
     log "--- 生成 $src configure ($mode) ---"
+    # 规避 NFS clock skew (autotools 生成文件 mtime 可能比源码旧 → configure 报错)
+    find "$src" -type f -exec touch {} + 2>/dev/null || true
     case "$mode" in
         nettle)
             (cd "$src" && ./.bootstrap)
@@ -71,6 +73,7 @@ bootstrap_source() {
             (cd "$src" && ./bootstrap --skip-po --no-git --gnulib-srcdir="$GNULIB_DIR")
             ;;
     esac
+    find "$src" -type f -exec touch {} + 2>/dev/null || true
 }
 
 build_one() {
@@ -82,8 +85,12 @@ build_one() {
     mkdir -p "$build"
     cd "$build"
     CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
-    "$src/configure" --host=x86_64-linux-gnu --prefix="$STAGING" --disable-static \
+    "$src/configure" --host=$GNU_HOST --prefix="$STAGING" --disable-static \
         "$@"
+    # 阻止 automake 因 NFS clock skew (Makefile.in 比 Makefile.am 旧) 重新生成
+    # → 缺 build-aux/mdate-sh 等辅助文件 → 构建失败
+    find "$src" -name 'Makefile.in' -exec touch {} + 2>/dev/null || true
+    touch "$src/Makefile.in" 2>/dev/null || true
     # tests/fuzz 是无条件 SUBDIRS: libtasn1 的 all 目标会运行交叉 asn1Parser
     # 生成头文件 (宿主无法执行 x86_64-ohos 二进制), libunistring 的 tests 编译
     # glibc 扩展宏 (musl 无 PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP)

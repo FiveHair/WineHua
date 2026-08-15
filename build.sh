@@ -12,7 +12,7 @@
 #   deps       模拟层交叉编译依赖 (Wine用, x86_64-linux-ohos)
 #   native     Native compositor 依赖 (按架构)
 #   wine       构建 Wine
-#   box64      构建 Box64 (仅 arm64)
+#   fex        构建 FEX 模拟器 DLL (arm64 转译 x64 应用)
 #   assemble   组装布局 (按架构)
 #   hap        构建 HAP + 签名 (按架构)
 #   deploy     推送到设备并安装
@@ -80,8 +80,8 @@ run_wine() {
     bash "$SCRIPTS/build_wine.sh"
 }
 
-run_box64() {
-    bash "$SCRIPTS/build_box64.sh"
+run_fex() {
+    bash "$SCRIPTS/build_fex.sh"
 }
 
 
@@ -128,8 +128,8 @@ case "$cmd" in
     wine)
         run_wine
         ;;
-    box64)
-        run_box64
+    fex)
+        run_fex
         ;;
     assemble)
         # assemble 布局
@@ -144,7 +144,7 @@ case "$cmd" in
     quick|full)
         run_deps
         run_wine
-        run_box64
+        run_fex
         for_each_arch run_native
         for_each_arch_assemble
         if [ "$arch" = "all" ]; then
@@ -158,7 +158,7 @@ case "$cmd" in
         # Pad 构建 (fork-only, 无 execve)
         run_deps
         run_wine
-        [ "$NATIVE_ARCH" = "arm64-v8a" ] && run_box64 || true
+        [ "$NATIVE_ARCH" = "arm64-v8a" ] && run_fex || true
         for_each_arch run_native
         for_each_arch_assemble
         NATIVE_ARCH="$NATIVE_ARCH" bash "$SCRIPTS/package.sh" hap
@@ -175,7 +175,7 @@ case "$cmd" in
         bash "$SCRIPTS/package.sh" deploy "$device_ip"
         ;;
     *)
-        echo "用法: $0 {full|deps|native|wine|box64|assemble|hap|deploy|quick|pad|pad-deploy} [device_ip] [arch]"
+        echo "用法: $0 {full|deps|native|wine|fex|assemble|hap|deploy|quick|pad|pad-deploy} [device_ip] [arch]"
         echo ""
         echo "  arch: arm64 (默认) | x86_64 | all"
         echo ""
@@ -184,7 +184,7 @@ case "$cmd" in
         echo "    deps       模拟层交叉编译依赖"
         echo "    native     Native compositor 依赖"
         echo "    wine       构建 Wine"
-        echo "    box64      构建 Box64 (仅 arm64)"
+        echo "    fex        构建 FEX (arm64 原生转译 x86_64)"
         echo "    assemble   组装布局"
         echo "    hap        构建 HAP + 签名"
         echo "    deploy     推送到设备并安装"

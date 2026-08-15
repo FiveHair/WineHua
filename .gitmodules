@@ -71,3 +71,6 @@
 [submodule "thirdparty/gstreamer"]
 	path = thirdparty/gstreamer
 	url = https://gitlab.freedesktop.org/gstreamer/gstreamer.git
+[submodule "thirdparty/fex"]
+	path = thirdparty/fex
+	url = https://github.com/FEX-Emu/FEX

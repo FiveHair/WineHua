@@ -123,25 +123,57 @@ build_ohos_unix() {
             pkg_config="$PKG_CONFIG_BIN"
         fi
 
-        CC="$CLANG --target=$TARGET --sysroot=$SYSROOT" \
-        CFLAGS="${WINE_CFLAGS:-} -I$SYSROOT_EXT_INC -I$SYSROOT_EXT_INC/freetype2" \
-        LDFLAGS="-fuse-ld=lld --sysroot=$SYSROOT --target=$TARGET -L$SYSROOT_EXT_LIB" \
-        PKG_CONFIG="$pkg_config" \
-        PKG_CONFIG_PATH="$SYSROOT_EXT_PC" \
-        "$CONFIGURE_BIN" --srcdir="$WINE_SRC" \
-            --host=x86_64-linux-ohos \
-            --enable-archs=i386,x86_64 \
-            --prefix=/opt/winehua \
-            --libdir='${prefix}' \
-            --with-wine-tools="$BUILD_DIR/wine-native" \
-            --with-mingw=gcc \
-            --disable-tests \
-            --without-x --without-alsa \
-            --with-opengl --with-vulkan
+        if [ "$WINE_ARCH" = "aarch64" ]; then
+            # arm64 原生 wine: aarch64 Unix 层 + arm64ec/aarch64/i386 PE (FEX 转译 x64 应用)
+            export PATH="$LLVM_MINGW/bin:$PATH"
+            CC="$CLANG --target=$TARGET --sysroot=$SYSROOT" \
+            CXX="$OHOS_SDK/native/llvm/bin/clang++ --target=$TARGET --sysroot=$SYSROOT" \
+            CFLAGS="${WINE_CFLAGS:-} -I$SYSROOT_EXT_INC -I$SYSROOT_EXT_INC/freetype2" \
+            LDFLAGS="-fuse-ld=lld --sysroot=$SYSROOT --target=$TARGET -L$SYSROOT_EXT_LIB" \
+            PKG_CONFIG="$pkg_config" \
+            PKG_CONFIG_PATH="$SYSROOT_EXT_PC" \
+            "$CONFIGURE_BIN" --srcdir="$WINE_SRC" \
+                --host="$HOST_TRIPLE" \
+                --enable-archs=arm64ec,aarch64,i386 \
+                --prefix=/opt/winehua \
+                --libdir='${prefix}' \
+                --with-wine-tools="$BUILD_DIR/wine-native" \
+                --with-mingw="$LLVM_MINGW/bin/clang" \
+                --disable-tests \
+                --without-x --without-alsa \
+                --with-opengl --with-vulkan
+        else
+            CC="$CLANG --target=$TARGET --sysroot=$SYSROOT" \
+            CFLAGS="${WINE_CFLAGS:-} -I$SYSROOT_EXT_INC -I$SYSROOT_EXT_INC/freetype2" \
+            LDFLAGS="-fuse-ld=lld --sysroot=$SYSROOT --target=$TARGET -L$SYSROOT_EXT_LIB" \
+            PKG_CONFIG="$pkg_config" \
+            PKG_CONFIG_PATH="$SYSROOT_EXT_PC" \
+            "$CONFIGURE_BIN" --srcdir="$WINE_SRC" \
+                --host=x86_64-linux-ohos \
+                --enable-archs=i386,x86_64 \
+                --prefix=/opt/winehua \
+                --libdir='${prefix}' \
+                --with-wine-tools="$BUILD_DIR/wine-native" \
+                --with-mingw=gcc \
+                --disable-tests \
+                --without-x --without-alsa \
+                --with-opengl --with-vulkan
+        fi
+    fi
+
+    # arm64 用 llvm-mingw clang: aarch64-windows target 的默认 include 路径不含
+    # generic-w64-mingw32 的 GL/gl.h (x86_64 用 GNU mingw gcc 自带 GL 头)。
+    # winehua_graphics_smoke 需要 <GL/gl.h> → 从 llvm-mingw 复制到 build 树
+    # include/GL/ (PE 编译命令含 -Iinclude)。GL/gl.h 仅依赖 windows.h/stddef.h,
+    # 与 wine 的 -Iinclude/-Iinclude/msvcrt 兼容。
+    if [ "$WINE_ARCH" = "aarch64" ]; then
+        mkdir -p include/GL
+        cp -f "$LLVM_MINGW/generic-w64-mingw32/include/GL/gl.h" include/GL/gl.h
     fi
 
     make -j$JOBS \
         CC="$CLANG --target=$TARGET --sysroot=$SYSROOT" \
+        CXX="$OHOS_SDK/native/llvm/bin/clang++ --target=$TARGET --sysroot=$SYSROOT" \
         CFLAGS="$WINE_CFLAGS -I$SYSROOT_EXT_INC -I$SYSROOT_EXT_INC/freetype2" \
         LDFLAGS="-fuse-ld=lld --sysroot=$SYSROOT --target=$TARGET -L$SYSROOT_EXT_LIB"
 
@@ -161,12 +193,8 @@ build_wineserver() {
     local bindir="$WINE_DEVICE_ROOT/bin"
     local datadir="$WINE_DEVICE_ROOT/share"
     local wine_include="-I$WINE_SRC/include -I$WINE_SRC/include/wine -I$WINE_SRC/server -I$BUILD_DIR/wine-ohos/include"
-    # ARM64: Box64 加载 x86_64 wineserver ELF，用 x86_64 目标编译
-    # x86_64: 系统 linker 直接加载 libwineserver.so (原生 .so)
+    # 统一产 libwineserver.so (设备原生架构, 系统 linker 直接 dlopen 加载)
     local srv_target="$NATIVE_TARGET"
-    if [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
-        srv_target="$TARGET"
-    fi
     local srv_cflags="--target=$srv_target --sysroot=$SYSROOT -D__MUSL__ -D_GNU_SOURCE \
         -DWINE_UNIX_LIB -D_NTSYSTEM_ -D__WINESRC__ -DFAR= -D_ACRTIMP= -DWINBASEAPI= -DZ_SOLO \
         -D__ANDROID__ -D__OHOS__ -DBINDIR=\"$bindir\" -DDATADIR=\"$datadir\" \
@@ -174,11 +202,7 @@ build_wineserver() {
 
     mkdir -p "$out"
     local need_rebuild=0
-    # x86_64: libwineserver.so (dlopen), ARM64: wineserver (Box64 加载)
-    local target_binary="$out/wineserver"
-    if [ "$NATIVE_ARCH" != "arm64-v8a" ]; then
-        target_binary="$out/libwineserver.so"
-    fi
+    local target_binary="$out/libwineserver.so"
     if [ ! -f "$target_binary" ]; then
         need_rebuild=1
     else
@@ -201,22 +225,14 @@ build_wineserver() {
 
     # musl_compat.c 已在 WINE_SRC/server/ 中, 遍历编译时已打包
 
-    if [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
-        # ARM64: 编译为 x86_64 PIE 可执行文件，Box64 加载
-        log "  wineserver → x86_64 ELF (Box64 loads, arm64)"
-        $CLANG --target=$TARGET --sysroot=$SYSROOT -fuse-ld=lld -pie \
-            -o "$out/wineserver" "$out"/*.o -lm
-        log "wineserver: $out/wineserver"
-    else
-        # x86_64: 编译为共享库 (dlopen 加载)
-        log "  wineserver → libwineserver.so ($NATIVE_ARCH)"
-        $CLANG --target=$NATIVE_TARGET --sysroot=$SYSROOT -fuse-ld=lld \
-            -shared -Wl,-soname,libwineserver.so \
-            -o "$out/libwineserver.so" "$out"/*.o -lm
-        mkdir -p "$NATIVE_LIBS"
-        cp "$out/libwineserver.so" "$NATIVE_LIBS/"
-        log "  → $NATIVE_LIBS/libwineserver.so"
-    fi
+    # 编译为共享库 (dlopen 加载), 目标 = 设备原生架构
+    log "  wineserver → libwineserver.so ($NATIVE_ARCH)"
+    $CLANG --target=$NATIVE_TARGET --sysroot=$SYSROOT -fuse-ld=lld \
+        -shared -Wl,-soname,libwineserver.so \
+        -o "$out/libwineserver.so" "$out"/*.o -lm
+    mkdir -p "$NATIVE_LIBS"
+    cp "$out/libwineserver.so" "$NATIVE_LIBS/"
+    log "  → $NATIVE_LIBS/libwineserver.so"
 }
 
 # ---- main ----

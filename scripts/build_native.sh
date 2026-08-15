@@ -337,7 +337,6 @@ build_virglrenderer() {
 
     if [ -f "$NATIVE_LIBS/libvirglrenderer.so.1" ] && \
        [ -f "$NATIVE_LIBS/libwinehua_vtest_server.so" ] && \
-       [ -x "$NATIVE_LIBS/virgl_test_server" ] && \
        [ "$(cat "$config_stamp" 2>/dev/null || true)" = "$expected_config" ] && \
        ! find "$src" -newer "$NATIVE_LIBS/libwinehua_vtest_server.so" -type f \
            \( -name '*.c' -o -name '*.h' -o -name 'meson.build' \) 2>/dev/null | grep -q .; then
@@ -382,16 +381,11 @@ build_virglrenderer() {
         find "$build/install/lib" -maxdepth 1 -name 'libvirglrenderer.so.1*' ! -name '*.so.1.*' -exec cp {} "$NATIVE_LIBS/libvirglrenderer.so.1" \;
     ln -sf libvirglrenderer.so.1 "$NATIVE_LIBS/libvirglrenderer.so"
 
-    # virgl_test_server
-    [ -f "$build/install/bin/virgl_test_server" ] || \
-        find "$build" -name 'virgl_test_server' -type f -exec cp {} "$NATIVE_LIBS/virgl_test_server" \;
-    cp "$build/install/bin/virgl_test_server" "$NATIVE_LIBS/" 2>/dev/null || true
-    chmod +x "$NATIVE_LIBS/virgl_test_server" 2>/dev/null || true
+    # virgl host 启动走 NCP libvirgl_child.so / 进程内 dlopen libwinehua_vtest_server.so;
+    # 鸿蒙沙箱不支持 exec, virgl_test_server / virgl_render_server 可执行 ELF 从不被
+    # exec, 仅打包 .so 产物。
     cp "$build/install/lib/libwinehua_vtest_server.so" "$NATIVE_LIBS/" 2>/dev/null || \
         find "$build" -name 'libwinehua_vtest_server.so' -type f -exec cp {} "$NATIVE_LIBS/libwinehua_vtest_server.so" \;
-    if [ -x "$build/install/libexec/virgl_render_server" ]; then
-        cp "$build/install/libexec/virgl_render_server" "$NATIVE_LIBS/"
-    fi
     printf '%s\n' "$expected_config" > "$config_stamp"
     rm -f "$NATIVE_LIBS/libvirgl_test_server.so"
 

@@ -49,7 +49,9 @@ static inline int HiLogPrint(unsigned int d, unsigned int l, unsigned int t, con
 #endif
 #endif
 HILEOF
-    NATIVE_ARCH="${GUEST_ARCH:-x86_64}" bash "$SCRIPT_DIR/build_ohos_guest_gfx.sh"
+    # NATIVE_ARCH 是 Native 层架构 (arm64-v8a/x86_64), 决定 TARGET/WINE_ARCH;
+    # GUEST_ARCH (aarch64/x86_64) 只决定输出目录, 由 make export 或脚本推导.
+    NATIVE_ARCH="$NATIVE_ARCH" bash "$SCRIPT_DIR/build_ohos_guest_gfx.sh"
 else
     log "guest_gfx: SKIP (设置 BUILD_GUEST_GFX=1 启用 Mesa/VirGL 图形测试 bundle)"
 fi
@@ -60,8 +62,8 @@ fi
 if [ "${BUILD_GUEST_VULKAN:-0}" = "1" ]; then
     [ "${BUILD_GUEST_GFX:-0}" = "1" ] || \
         err "BUILD_GUEST_VULKAN=1 requires BUILD_GUEST_GFX=1 (Mesa Venus ICD)"
-    log "=== 构建 guest_vulkan (x86_64 Loader + Venus ICD + smoke) ==="
-    NATIVE_ARCH="${GUEST_ARCH:-x86_64}" bash "$SCRIPT_DIR/build_ohos_guest_vulkan.sh"
+    log "=== 构建 guest_vulkan (Loader + Venus ICD + smoke) ==="
+    NATIVE_ARCH="$NATIVE_ARCH" GUEST_ARCH="$GUEST_ARCH" bash "$SCRIPT_DIR/build_ohos_guest_vulkan.sh"
 else
     log "guest_vulkan: SKIP (设置 BUILD_GUEST_VULKAN=1 启用 Venus Vulkan runtime)"
 fi

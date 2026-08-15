@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
-log "=== 构建 xkbcommon 依赖 (x86_64) ==="
+log "=== 构建 xkbcommon 依赖 ($WINE_ARCH) ==="
 
 if [ "$HOST_OS" = "Darwin" ]; then
     export PKG_CONFIG_PATH_FOR_BUILD="$BUILD_DIR/host-tools/lib/pkgconfig${PKG_CONFIG_PATH_FOR_BUILD:+:$PKG_CONFIG_PATH_FOR_BUILD}"
@@ -43,11 +43,11 @@ build_libffi() {
         NM="$OHOS_SDK/native/llvm/bin/llvm-nm" LD="$OHOS_SDK/native/llvm/bin/ld.lld" \
         CFLAGS="--target=$TARGET --sysroot=$SYSROOT -O2 -fPIC -D__MUSL__" \
         LDFLAGS="-fuse-ld=lld --sysroot=$SYSROOT --target=$TARGET" \
-        "$src/configure" --host=x86_64-linux-gnu --prefix="$build/install" --disable-docs
+        "$src/configure" --host=$GNU_HOST --prefix="$build/install" --disable-docs
     else
         CC="$CLANG --target=$TARGET --sysroot=$SYSROOT" CFLAGS="-O2 -fPIC -D__MUSL__" \
         LDFLAGS="-fuse-ld=lld" \
-        "$src/configure" --host=x86_64-linux-gnu --prefix="$build/install" --disable-docs
+        "$src/configure" --host=$GNU_HOST --prefix="$build/install" --disable-docs
     fi
     make -j$JOBS && make install
     cp "$build/install/lib/libffi.so.8.1.4" "$SYSROOT_EXT_LIB/libffi.so.8"
@@ -56,7 +56,7 @@ build_libffi() {
     cat > "$SYSROOT_EXT_PC/libffi.pc" << EOF
 prefix=$SYSROOT_EXT/usr
 includedir=\${prefix}/include
-libdir=\${prefix}/lib/x86_64-linux-ohos
+libdir=\${prefix}/lib/$TARGET
 Name: libffi
 Description: Library supporting Foreign Function Interfaces
 Version: 3.4.6
@@ -74,7 +74,7 @@ build_libxml2() {
     log "--- libxml2 ---"
     cmake -S "$src" -B "$build" -GNinja \
         -DCMAKE_TOOLCHAIN_FILE="$OHOS_SDK/native/build/cmake/ohos.toolchain.cmake" \
-        -DOHOS_ARCH=x86_64 -DOHOS_PLATFORM=OHOS \
+        -DOHOS_ARCH=$OHOS_ARCH -DOHOS_PLATFORM=OHOS \
         -DCMAKE_BUILD_TYPE=Release \
         -DLIBXML2_WITH_PYTHON=OFF -DLIBXML2_WITH_TESTS=OFF \
         -DLIBXML2_WITH_PROGRAMS=OFF -DLIBXML2_WITH_HTTP=OFF \
@@ -89,7 +89,7 @@ build_libxml2() {
     cat > "$SYSROOT_EXT_PC/libxml-2.0.pc" << EOF
 prefix=$SYSROOT_EXT/usr
 includedir=\${prefix}/include
-libdir=\${prefix}/lib/x86_64-linux-ohos
+libdir=\${prefix}/lib/$TARGET
 Name: libXML
 Version: 2.12.0
 Description: libXML library version2.
@@ -123,7 +123,7 @@ build_xkbcommon() {
     cat > "$SYSROOT_EXT_PC/xkbcommon.pc" << EOF
 prefix=$SYSROOT_EXT/usr
 includedir=\${prefix}/include
-libdir=\${prefix}/lib/x86_64-linux-ohos
+libdir=\${prefix}/lib/$TARGET
 Name: xkbcommon
 Description: XKB API common to servers and clients
 Version: 1.7.0
@@ -133,7 +133,7 @@ EOF
     cat > "$SYSROOT_EXT_PC/xkbregistry.pc" << EOF
 prefix=$SYSROOT_EXT/usr
 includedir=\${prefix}/include
-libdir=\${prefix}/lib/x86_64-linux-ohos
+libdir=\${prefix}/lib/$TARGET
 Name: xkbregistry
 Description: XKB API to query available rules, models, layouts, etc.
 Version: 1.7.0
