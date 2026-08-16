@@ -8,6 +8,7 @@
 #include "graphics_broker.h"
 
 #include <unistd.h>
+#include <fstream>
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
@@ -746,6 +747,118 @@ void LaunchThreadFunc(LaunchParams* p) {
     p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin,
                                audioBootstrapFd, p->homeDir, p->prefixDir);
     AppendD3dBackendEnv(p->envStrs, p->d3dBackend, p->dxvkBackend, p->winehuaBin);
+    {
+        /* WineHua: (registry tuning disabled for stability) */
+    }
+    {
+        /* WineHua: ensure ROTTR runs at DX12 + lowest quality.  Safely patch
+         * user.reg (string whole-file, byte-for-byte elsewhere): find the
+         * ROTTR Graphics section, zero every quality key, and append the
+         * section when missing.  No 4096-byte rewrite, no truncation. */
+        const std::string ureg = p->prefixDir + "/user.reg";
+        {
+            std::ifstream in(ureg, std::ios::binary);
+            if (in)
+            {
+                std::string content((std::istreambuf_iterator<char>(in)),
+                                    std::istreambuf_iterator<char>());
+                in.close();
+                static const char *lowq_keys[] = {
+                    "AmbientOcclusionQuality", "Bloom", "DOFQuality",
+                    "DynamicFoliage", "FXAA", "LensFlares", "LevelOfDetail",
+                    "MotionBlur", "ScreenEffects", "ScreenSpaceReflections",
+                    "SMAA", "SoftShadowQuality", "SpecularReflectionQuality",
+                    "SSAAQuality", "Tessellation", "TextureFiltering",
+                    "TextureQuality", "TressFX", "VSync", "DLSS",
+                    "Fullscreen", "ExclusiveFullscreen", "SSAA", "ShadowQuality",
+                };
+                const std::string section = "[Software\\\\Crystal Dynamics\\\\Rise of the Tomb Raider\\\\Graphics]";
+                size_t sec_pos = content.find(section);
+                size_t sec_end = std::string::npos;
+                if (sec_pos != std::string::npos)
+                {
+                    /* Section exists: find its end (next '[' line). */
+                    sec_end = content.find("\n[", sec_pos + section.size());
+                    if (sec_end == std::string::npos)
+                        sec_end = content.size();
+                }
+                bool changed = false;
+                /* Patch existing keys inside the section. */
+                if (sec_pos != std::string::npos)
+                {
+                    std::string section_body = content.substr(sec_pos, sec_end - sec_pos);
+                    for (const char *k : lowq_keys)
+                    {
+                        std::string pat = std::string("\"") + k + "\"=dword:";
+                        size_t kpos = section_body.find(pat);
+                        if (kpos != std::string::npos)
+                        {
+                            size_t vstart = kpos + pat.size();
+                            size_t vend = section_body.find("\n", vstart);
+                            if (vend == std::string::npos)
+                                vend = section_body.size();
+                            std::string oldval = section_body.substr(vstart, vend - vstart);
+                            if (oldval != "00000000")
+                            {
+                                section_body.replace(vstart, vend - vstart, "00000000");
+                                changed = true;
+                            }
+                        }
+                    }
+                    content.replace(sec_pos, sec_end - sec_pos, section_body);
+                }
+                /* Append missing keys / whole section. */
+                if (sec_pos == std::string::npos)
+                {
+                    content += "\n" + section + " 1\n";
+                    for (const char *k : lowq_keys)
+                        content += std::string("\"") + k + "\"=dword:00000000\n";
+                    content += "\n";
+                    changed = true;
+                }
+                else
+                {
+                    /* Append any keys still missing inside the existing section. */
+                    for (const char *k : lowq_keys)
+                    {
+                        std::string pat = std::string("\"") + k + "\"=dword:";
+                        if (content.find(pat) == std::string::npos)
+                        {
+                            std::string add = std::string("\"") + k + "\"=dword:00000000\n";
+                            size_t ins = sec_pos + section.size();
+                            content.insert(ins, add);
+                            sec_pos += add.size();
+                            sec_end += add.size();
+                            changed = true;
+                        }
+                    }
+                }
+                if (changed)
+                {
+                    std::ofstream of(ureg, std::ios::binary | std::ios::trunc);
+                    if (of)
+                    {
+                        of.write(content.data(), (std::streamsize)content.size());
+                        of.close();
+                        OH_LOG_INFO(LOG_APP, "[WineHua-ROTTR] lowest-quality config applied to %{public}s",
+                                    ureg.c_str());
+                    }
+                    else
+                    {
+                        OH_LOG_WARN(LOG_APP, "[WineHua-ROTTR] cannot write %{public}s", ureg.c_str());
+                    }
+                }
+                else
+                {
+                    OH_LOG_INFO(LOG_APP, "[WineHua-ROTTR] ROTTR already lowest-quality");
+                }
+            }
+            else
+            {
+                OH_LOG_WARN(LOG_APP, "[WineHua-ROTTR] no user.reg at %{public}s", ureg.c_str());
+            }
+        }
+    }
     const std::string serializedEnv = SerializeEnvToEntryParams(p->envStrs);
 
     mkdir(p->prefixDir.c_str(), 0755);

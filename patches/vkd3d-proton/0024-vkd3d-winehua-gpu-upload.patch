@@ -1,0 +1,93 @@
+From 9f92c13e00000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: WineHua <winehua@localhost>
+Date: Sat Aug 15 00:00:00 2026
+Subject: [PATCH] vkd3d-winehua-gpu-upload
+
+diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
+index 8f75883b..b7adea13 100644
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -1129,6 +1129,7 @@ static HRESULT d3d12_command_list_begin_command_buffer(struct d3d12_command_list
+ 
+     list->is_recording = true;
+     list->is_valid = true;
++    device->current_recording_list = list;
+ 
+     return S_OK;
+ }
+@@ -4166,6 +4167,9 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_list_Close(d3d12_command_list_ifa
+ 
+     d3d12_command_list_end_current_render_pass(list, false);
+ 
++    if (list->device->current_recording_list == list)
++        list->device->current_recording_list = NULL;
++
+     if (list->predicate_enabled)
+         VK_CALL(vkCmdEndConditionalRenderingEXT(list->vk_command_buffer));
+ 
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 48ad556c..53cf41e4 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -1093,6 +1093,9 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
+     memset(info, 0, sizeof(*info));
+ 
+     info->features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
++    info->is_winehua_venus =
++        info->properties2.properties.driverID == VK_DRIVER_ID_MESA_VENUS;
++    info->current_recording_list = NULL;
+     info->properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+ 
+     info->subgroup_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
+index 72fbb39c..edf63498 100644
+--- a/libs/vkd3d/resource.c
++++ b/libs/vkd3d/resource.c
+@@ -1567,6 +1567,30 @@ static void d3d12_resource_flush_range(struct d3d12_resource *resource,
+     if (!d3d12_resource_get_mapped_memory_range(resource, subresource, written_range, &mapped_range))
+         return;
+ 
++    /* WineHua GPU-upload: send the mapped data through vkCmdUpdateBuffer
++     * (data travels in the command stream) so virgl writes it directly to
++     * the GPU buffer - no host shadow copy / memcmp. Falls back to the
++     * mapped-memory flush (shadow path) when not recording. */
++    struct d3d12_command_list *recording = resource->device->current_recording_list;
++    if (resource->device->is_winehua_venus && recording && recording->is_recording &&
++        recording->vk_command_buffer && resource->vk_buffer && resource->mem.cpu_address)
++    {
++        const uint8_t *data = (const uint8_t *)resource->mem.cpu_address
++            + (mapped_range.offset - resource->mem.offset);
++        VkDeviceSize remaining = mapped_range.size;
++        VkDeviceSize off = 0;
++        const VkDeviceSize chunk = 65536;
++        while (remaining)
++        {
++            const VkDeviceSize sz = remaining < chunk ? remaining : chunk;
++            VK_CALL(vkCmdUpdateBuffer(recording->vk_command_buffer,
++                    resource->vk_buffer, off, sz, data + off));
++            off += sz;
++            remaining -= sz;
++        }
++        return;
++    }
++
+     VK_CALL(vkFlushMappedMemoryRanges(resource->device->vk_device, 1, &mapped_range));
+ }
+ 
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+index 687bafc9..4262f73e 100644
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -2821,6 +2821,12 @@ struct vkd3d_physical_device_info
+ 
+     VkPhysicalDeviceProperties2KHR properties2;
+ 
++    /* WineHua GPU-upload: when recording a command list, Unmap data is sent
++     * via vkCmdUpdateBuffer (data in command stream) so virgl writes it
++     * directly to the GPU buffer - no host shadow copy. */
++    bool is_winehua_venus;
++    struct d3d12_command_list *current_recording_list;
++
+     /* features */
+     VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features;
+     VkPhysicalDeviceConditionalRenderingFeaturesEXT conditional_rendering_features;

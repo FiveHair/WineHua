@@ -153,6 +153,10 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     AppendEnv(params, "VTEST_SYNC_GL_FINISH", "1");
     AppendEnv(params, "WINEHUA_VIRGL_SYNC_MODE", config.syncMode);
     AppendEnv(params, "WINEHUA_VIRGL_LOG_PATH", config.logPath);
+    /* Step 1 diag: vkr_log is INFO level but release default is ERROR. Raise
+     * to info so dma_buf/shadow diagnostics reach the host log (forwarded by
+     * virgl_child's ForwardPerfSummary for WineHua-prefixed lines). */
+    AppendEnv(params, "VIRGL_LOG_LEVEL", "info");
     AppendEnv(params, "WINEHUA_VKD3D_GATE_C_TRACE", gateCTrace ? "1" : "0");
     AppendEnv(params, "WINEHUA_VKR_TRACE_SAMPLED", sampledTrace);
     AppendEnv(params, "WINEHUA_VKR_TRACE_CAPTURE", captureTrace ? "1" : "0");
@@ -172,6 +176,7 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
               (captureTrace || gateCTrace) ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_SHADOW_FROM_HOST", fromHostMode);
     AppendEnv(params, "VKR_WINEHUA_SHADOW_TO_HOST", toHostMode);
+    AppendEnv(params, "WINEHUA_VKD3D_SHADOW_BENCH", "1");
     AppendEnv(params, "VKR_WINEHUA_SHADOW_TRACE",
               (captureTrace || hostCopyTrace) ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_BGRA_ARRAY_RGBA", bgraArrayTrace ? "1" : "0");
@@ -197,7 +202,9 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     AppendEnv(params, "VKR_WINEHUA_SHADOW_DIRTY_LIST", legacyHostSync ? "0" : "1");
     AppendEnv(params, "VKR_WINEHUA_BOUND_BUFFER_LIST", boundBufferList ? "1" : "0");
     AppendEnv(params, "VKR_WINEHUA_BATCH_FLUSH",
-              (legacyHostSync || noGpuUploadFast) ? "0" : "1");
+              /* DIFF-COPY test: disable batch flush so per-memory diff-copy
+               * (only flush changed ranges) takes effect in sync_shadow. */
+              "0");
     AppendEnv(params, "VKR_WINEHUA_SHADOW_MERGE_RANGES", config.shadowMergeRanges);
     AppendEnv(params, "VKR_WINEHUA_SHADOW_COVER_UPLOAD", aliasCover ? "1" : "0");
     AppendEnv(params, "WINEHUA_VKR_PRESENT_STAGE_TRACE",
@@ -217,8 +224,10 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
      * private log. Forward only filtered vkd3d-gate-c records so a device
      * run can prove the exact flush/invalidate order through hilog without
      * exposing unrelated application data or requiring sandbox access. */
-    launch->forwardPerfSummary = perfSummary || frameTimeline || sampledPerf ||
-        gateCTrace;
+    /* Step 1 diag: always forward vkr logs (dma_buf/shadow diagnostics) so
+     * host-side zero-copy capability can be read from hilog without sandbox
+     * file access. Revert to conditional forwarding after diagnosis. */
+    launch->forwardPerfSummary = true;
     if (error) error->clear();
     return true;
 }

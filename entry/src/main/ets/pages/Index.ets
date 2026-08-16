@@ -960,6 +960,12 @@ struct Index {
       if (this.perfProfileText === 'shadow-precise-strong-ring-perf' ||
         this.perfProfileText === 'shadow-precise-dirty-ring-perf')
         environment['VN_WINEHUA_PERF_SUMMARY'] = '1';
+      // A/B-4: 诊断 perf profile 强制 GPU upload (zero-copy)，验证 VKD3D 能否
+      // 绕过 CPU shadow 拷贝（DXVK 通过此路径 shadow_copies=0）。
+      // 注意：GPU upload 不保证动态 mapped-memory 可见性，需验证画面正确性。
+      if (this.perfProfileText === 'shadow-precise-strong-ring-perf' ||
+        this.perfProfileText === 'shadow-precise-dirty-ring-perf')
+        environment['VKR_WINEHUA_GPU_UPLOAD'] = '0';
       if (this.perfProfileText === 'shadow-precise-direct-fence')
         environment['VN_WINEHUA_DIRECT_FENCE_WAIT'] = '1';
       if (this.perfProfileText === 'shadow-precise-dirty-ring-frame-assoc-trace')
@@ -1094,6 +1100,49 @@ struct Index {
 
   private isVkd3dProfile(): boolean {
     return this.d3dBackend === 'vkd3d_limited_500k';
+  }
+
+  // 诊断类 profile 白名单：这些 profile 必须透传给 napi_init.cpp 的
+  // ApplyHostShadowProfile（否则 vkd3d_limited_500k 后端下被强制 shadow-precise，
+  // perf summary / mailbox / async-present / fence-poll / trace 全部失效）。
+  // 产品默认（shadow-precise 等非诊断值）仍走原强制逻辑，不改变产品行为。
+  private isDiagnosticVkd3dProfile(): boolean {
+    const p = this.sessionPerfProfile;
+    return p === 'shadow-precise-direct-fence' ||
+      p === 'shadow-precise-strong-ring' ||
+      p === 'shadow-precise-strong-ring-trace' ||
+      p === 'shadow-precise-strong-ring-perf' ||
+      p === 'shadow-precise-strong-ring-async-present' ||
+      p === 'shadow-precise-strong-ring-fence-poll' ||
+      p === 'shadow-precise-strong-ring-mailbox' ||
+      p === 'shadow-precise-legacy-host-sync' ||
+      p === 'shadow-precise-single-ring' ||
+      p === 'shadow-precise-sync-submit' ||
+      p === 'shadow-precise-no-semaphore-feedback-single-ring' ||
+      p === 'shadow-precise-no-semaphore-feedback-single-ring-trace' ||
+      p === 'shadow-full-no-semaphore-feedback-single-ring-trace' ||
+      p === 'shadow-precise-retain-shmem' ||
+      p === 'shadow-precise-cpu-upload' ||
+      p === 'shadow-precise-dirty-ring' ||
+      p === 'shadow-precise-dirty-ring-no-upload' ||
+      p === 'shadow-precise-dirty-ring-no-upload-fast' ||
+      p === 'shadow-precise-dirty-ring-inline-upload' ||
+      p === 'shadow-precise-dirty-ring-upload-wait' ||
+      p === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
+      p === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
+      p === 'shadow-precise-dirty-ring-coverage-poll' ||
+      p === 'shadow-precise-dirty-ring-inline-upload-alias-cover' ||
+      p === 'shadow-precise-dirty-ring-inline-upload-serialized' ||
+      p === 'shadow-precise-dirty-ring-inline-upload-descriptor-serialized' ||
+      p === 'shadow-precise-dirty-ring-frame-assoc-trace' ||
+      p === 'shadow-precise-dirty-ring-bgra-array-trace' ||
+      p === 'shadow-precise-dirty-ring-present-image-trace' ||
+      p === 'shadow-precise-dirty-ring-perf' ||
+      p === 'shadow-precise-dirty-ring-gpu-frame-profile' ||
+      p === 'shadow-precise-dirty-ring-frame-timeline' ||
+      p === 'shadow-trace' ||
+      p === 'shadow-none' ||
+      p === 'shadow-to-host-explicit';
   }
 
   private d3dPresentBackend(): string {
@@ -1231,7 +1280,8 @@ struct Index {
       this.sessionPerfProfile === 'shadow-precise-direct-fence' ?
       'shadow-precise-direct-fence' :
       (this.sessionD3dBackend === 'vkd3d_limited_500k' ?
-        (this.sessionPerfProfile.indexOf('vkd3d-exact-') === 0 ?
+        ((this.sessionPerfProfile.indexOf('vkd3d-exact-') === 0 ||
+          this.isDiagnosticVkd3dProfile()) ?
           this.sessionPerfProfile : 'shadow-precise') :
         this.sessionPerfProfile);
     testNapi.setHostShadowProfile(hostShadowProfile);

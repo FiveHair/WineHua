@@ -100,7 +100,9 @@ void ForwardPerfSummary(const std::string& path, std::atomic<bool>& stop)
         {
             if (!strstr(line, "WineHuaPerf") &&
                 !strstr(line, "WineHuaFrameTimeline") &&
-                !strstr(line, "vkd3d-gate-c")) continue;
+                !strstr(line, "vkd3d-gate-c") &&
+                !strstr(line, "WineHua dma_buf") &&
+                !strstr(line, "WineHua shadow-diff")) continue;
             line[strcspn(line, "\r\n")] = '\0';
             OH_LOG_INFO(LOG_APP, "[VIRGL-PERF] %{public}s", line);
             forwarded = true;
