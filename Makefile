@@ -281,6 +281,29 @@ $(STAMPS)/fex-arm64-v8a: $(SCRIPTS)/build_fex.sh $(SCRIPTS)/env.sh FORCE | $(STA
 	fi
 
 # ============================================================
+# box64 — Box64 WoW64 模拟器 DLL (arm64 原生 wine 转译 32 位 x86 应用, wowbox64.dll)
+#         (fex 的 libwow64fex.dll 同级备选, 运行时 HODLL 选择)
+# ============================================================
+.PHONY: box64
+box64: $(STAMPS)/box64-arm64-v8a
+
+$(STAMPS)/box64-arm64-v8a: $(SCRIPTS)/build_box64_wow64.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
+	@if [ "$(WINE_ARCH)" = "x86_64" ]; then \
+	    echo "  [box64] skip (x86_64)"; \
+	    mkdir -p $(dir $@) && touch $@; \
+	elif [ -f $@ ] && \
+	    ! find $(ROOT)/thirdparty/box64 \
+	           -newer $@ -type f \
+	           \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.py' \
+	              -o -name 'CMakeLists.txt' -o -name '*.cmake' \) \
+	           2>/dev/null | grep -q .; then \
+	    echo "  [box64] up to date"; \
+	else \
+	    echo "=== box64 ==="; \
+	    bash $(SCRIPTS)/build_box64_wow64.sh && touch $@; \
+	fi
+
+# ============================================================
 # native — Native compositor 依赖 → entry/libs/ (架构相关)
 # ============================================================
 .PHONY: native
@@ -343,8 +366,9 @@ $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFA
 endef
 $(foreach a,arm64-v8a x86_64,$(eval $(call assemble_rule,$(a))))
 
-# arm64 assemble 额外依赖 fex (libarm64ecfex.dll; 32-bit PE DLL 已由 wine 主构建 --enable-archs=i386 提供)
-$(STAMPS)/arm64-v8a/assemble: $(STAMPS)/fex-arm64-v8a
+# arm64 assemble 额外依赖 fex (libarm64ecfex.dll 转译 x64) + box64 (wowbox64.dll 转译 i386)
+# 32-bit PE DLL (i386-windows) 已由 wine 主构建 --enable-archs=i386 提供
+$(STAMPS)/arm64-v8a/assemble: $(STAMPS)/fex-arm64-v8a $(STAMPS)/box64-arm64-v8a
 
 # ============================================================
 # hap — HAP 构建 + 签名 (统一 rawfile zip)
@@ -405,7 +429,8 @@ help:
 	@echo "单模块:"
 	@echo "  make deps      # 交叉编译依赖 → sysroot-ext"
 	@echo "  make wine      # Wine + wineserver"
-	@echo "  make fex       # FEX 模拟器 DLL (arm64 转译 x64 应用)"
+	@echo "  make fex       # FEX 模拟器 DLL (arm64 转译 x64/x86 应用)"
+	@echo "  make box64     # Box64 WoW64 DLL (arm64 转译 32 位 x86 应用, HODLL)"
 	@echo "  make native    # Native compositor 依赖"
 	@echo "  make host-vulkan # Host Vulkan exact replay"
 	@echo "  make assemble  # 组装布局"
