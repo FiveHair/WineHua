@@ -246,6 +246,12 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
     /* Product defaults first, then per-run settings. Smoke and game launches
      * must be able to select their own log directory and diagnostics. */
     AppendD3dBackendEnv(envStrs, options.d3dBackend, options.dxvkBackend, binDir);
+    /* WineHua: D3D12 programs must always be able to load the managed VKD3D
+     * d3d12.dll, even when the session backend is WineD3D (the explorer
+     * file-manager window default) and AppendD3dBackendEnv injected nothing.
+     * Without this a manually launched D3D12 sample falls back to Wine's
+     * builtin d3d12 and crashes for lack of the Venus/Vulkan environment. */
+    AppendVkd3dD3d12Env(envStrs, binDir);
     for (const std::string& line : options.environment) UpsertEnvLine(envStrs, line);
     UpsertEnvLine(envStrs, "WINEHUA_D3D_BACKEND=" + options.d3dBackend);
     UpsertEnvLine(envStrs, "WINEHUA_PRESENT_BACKEND=" + options.presentBackend);

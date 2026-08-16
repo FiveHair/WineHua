@@ -76,6 +76,15 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
                          const std::string& dxvkBackend,
                          const std::string& binDir);
 
+// Ensure every process (explorer-launched programs included) can load the
+// managed VKD3D d3d12.dll. When the session backend is WineD3D (default for
+// the explorer file-manager window), AppendD3dBackendEnv injects nothing, so
+// a D3D12 program would fall back to Wine's builtin d3d12 and crash for lack
+// of the Venus/Vulkan environment. This only adds d3d12/Vulkan support and
+// never changes the d3d11/dxgi backend selection.
+void AppendVkd3dD3d12Env(std::vector<std::string>& env,
+                         const std::string& binDir);
+
 // -- 环境变量辅助 --
 void UpsertEnvLine(std::vector<std::string>& env, const std::string& line);
 

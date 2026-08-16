@@ -686,6 +686,10 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         }
         AppendD3dBackendEnv(explorerEnv, p->d3dBackend, p->dxvkBackend, p->winehuaBin);
         AppendStableDesktopDxvkEnv(explorerEnv, *p);
+        /* WineHua: Explorer-launched D3D12 programs inherit this environment;
+         * make sure VKD3D d3d12 support is always present so manually started
+         * D3D12 samples do not fall back to Wine's builtin d3d12. */
+        AppendVkd3dD3d12Env(explorerEnv, p->winehuaBin);
 
 #ifdef __aarch64__
         std::string exEntry = p->winehuaBin + "|__winehua_desktop__|explorer|" + std::string(desktopArg);

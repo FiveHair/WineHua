@@ -130,6 +130,79 @@ void UpsertEnvLine(std::vector<std::string>& env, const std::string& line)
     env.push_back(line);
 }
 
+static void PrependEnvValue(std::vector<std::string>& env, const std::string& key,
+                            const std::string& value, const std::string& sep)
+{
+    for (auto& line : env) {
+        if (line.compare(0, key.size(), key) == 0 &&
+            line.size() > key.size() && line[key.size()] == '=') {
+            const std::string old_value = line.substr(key.size() + 1);
+            if (old_value.find(value) == std::string::npos)
+                line = key + "=" + value + sep + old_value;
+            return;
+        }
+    }
+    env.push_back(key + "=" + value);
+}
+
+void AppendVkd3dD3d12Env(std::vector<std::string>& env, const std::string& binDir)
+{
+    /* 与 AppendD3dBackendEnv 的 vkd3d_limited_500k 分支保持一致的完整环境：
+     * D3D12 程序需要 VKD3D d3d12 + DXVK dxgi（交换链）双 overlay，只注入
+     * d3d12 会退回 wine 内置 dxgi 导致进程直接退出。 */
+    const std::string overlayRoot = std::string(WINE_RUNTIME_ROOT) +
+        "/vkd3d/limited-500k";
+    const std::string overlay64 = overlayRoot + "/x64";
+    const std::string dxvkRoot = std::string(WINE_RUNTIME_ROOT) + "/dxvk/legacy";
+    const std::string dxvk64 = dxvkRoot + "/x64";
+    const std::string dxvk86 = dxvkRoot + "/x86";
+    const std::string guestVulkanRoot = binDir + "/guest_vulkan";
+    const std::string guestVulkanIcd = guestVulkanRoot +
+        "/share/vulkan/icd.d/venus_icd.x86_64.json";
+    const std::string guestVulkanLib = guestVulkanRoot + "/lib";
+    const std::string box64LibraryPath = guestVulkanLib + ":" +
+        binDir + "/guest_gfx/lib:" + binDir + ":" +
+        binDir + "/x86_64-unix:" + std::string(WINE_RUNTIME_ROOT) + "/lib/x86_64";
+    const std::string wineDllPath = overlay64 + ":" + dxvk64 + ":" +
+        dxvk86 + ":" + binDir + "/x86_64-windows:" +
+        binDir + "/i386-windows:" + binDir;
+
+    PrependEnvValue(env, "WINEDLLOVERRIDES", "d3d12=n;d3d11=n;dxgi=n", ";");
+    PrependEnvValue(env, "WINEDLLPATH", wineDllPath, ":");
+    PrependEnvValue(env, "BOX64_EMULATED_LIBS",
+        "libvulkan.so:libvulkan.so.1:libEGL.so:libEGL.so.1:"
+        "libGLESv2.so:libGLESv2.so.2:libGLESv1_CM.so:libGLESv1_CM.so.1:"
+        "libGL.so:libGL.so.1:libwayland-client.so:libwayland-client.so.0:"
+        "libwayland-server.so:libwayland-server.so.0:libwayland-egl.so:"
+        "libwayland-egl.so.1:libdrm.so:libdrm.so.2:libffi.so:libffi.so.8", ":");
+    /* 只前置 vkd3d 需要的 guestVulkanLib，绝不能覆盖 BuildWineEnv 设置的原值
+     * （含 guestReceiverLibDir 与 ../lib/x86_64 —— freetype/fontconfig 等
+     * 字体库所在），否则 explorer 加载不到字体库，开始菜单文字不显示。 */
+    PrependEnvValue(env, "BOX64_LD_LIBRARY_PATH", box64LibraryPath, ":");
+    UpsertEnvLine(env, "VK_DRIVER_FILES=" + guestVulkanIcd);
+    UpsertEnvLine(env, "VK_ICD_FILENAMES=" + guestVulkanIcd);
+    UpsertEnvLine(env, "VN_DEBUG=vtest");
+    UpsertEnvLine(env, "VN_PERF=no_fence_feedback,no_query_feedback,"
+        "no_semaphore_feedback,no_multi_ring");
+    UpsertEnvLine(env, "VN_WINEHUA_STRONG_RING_BARRIER=1");
+    UpsertEnvLine(env, "VN_WINEHUA_REMOTE_MEMORY_SYNC=1");
+    UpsertEnvLine(env, "VN_WINEHUA_PERSISTENT_MAP_SYNC=0");
+    UpsertEnvLine(env, "VN_WINEHUA_DIRECT_FENCE_WAIT=1");
+    UpsertEnvLine(env, "VKR_WINEHUA_SHADOW_FROM_HOST=precise");
+    UpsertEnvLine(env, "VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC=0");
+    UpsertEnvLine(env, "VKD3D_WINEHUA_GPU_UPLOAD=0");
+    /* 与 game 模式（SpawnWineProgramImpl）一致的 present 后端，否则
+     * explorer 手动启动的 D3D12 程序 venus 渲染后无法上屏（黑屏）。 */
+    UpsertEnvLine(env, "WINEHUA_PRESENT_BACKEND=virgl_compositor");
+    UpsertEnvLine(env, "BOX64_DYNAREC_WEAKBARRIER=0");
+    UpsertEnvLine(env, "WINEDLLDIR0=" + overlay64);
+    UpsertEnvLine(env, "WINEDLLDIR1=" + dxvk64);
+    UpsertEnvLine(env, "WINEDLLDIR2=" + dxvk86);
+    UpsertEnvLine(env, "WINEDLLDIR3=" + binDir + "/x86_64-windows");
+    UpsertEnvLine(env, "WINEDLLDIR4=" + binDir + "/i386-windows");
+    UpsertEnvLine(env, "WINEDLLDIR5=" + binDir);
+}
+
 void AppendD3dBackendEnv(std::vector<std::string>& env,
                          const std::string& d3dBackend,
                          const std::string& dxvkBackend,
