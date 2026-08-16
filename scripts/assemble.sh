@@ -85,7 +85,8 @@ assemble_pad() {
                   libgstnet-1.0.so.0 libgstvideo-1.0.so.0 libgstaudio-1.0.so.0 \
                   libgsttag-1.0.so.0 libgstpbutils-1.0.so.0 libgstallocators-1.0.so.0 \
                   libgstapp-1.0.so.0 libgstfft-1.0.so.0 libgstriff-1.0.so.0 \
-                  libgstrtp-1.0.so.0 libgstrtsp-1.0.so.0 libgstsdp-1.0.so.0; do
+                  libgstrtp-1.0.so.0 libgstrtsp-1.0.so.0 libgstsdp-1.0.so.0 \
+                  libgstcodecparsers-1.0.so.0 libgstmpegts-1.0.so.0; do
             _pick_lib_pad "$so" "$so"
         done
         log "    交叉编译依赖 → libs/x86_64/"
@@ -190,7 +191,8 @@ assemble_pad() {
                   libgstnet-1.0.so.0 libgstvideo-1.0.so.0 libgstaudio-1.0.so.0 \
                   libgsttag-1.0.so.0 libgstpbutils-1.0.so.0 libgstallocators-1.0.so.0 \
                   libgstapp-1.0.so.0 libgstfft-1.0.so.0 libgstriff-1.0.so.0 \
-                  libgstrtp-1.0.so.0 libgstrtsp-1.0.so.0 libgstsdp-1.0.so.0; do
+                  libgstrtp-1.0.so.0 libgstrtsp-1.0.so.0 libgstsdp-1.0.so.0 \
+                  libgstcodecparsers-1.0.so.0 libgstmpegts-1.0.so.0; do
             # box64 按 SONAME 解析依赖时可能查找无版本名 (libgstvideo-1.0.so),
             # 与 gnutls 链一致补上无版本软链, 否则 winegstreamer dlopen 报
             # "Error loading shared library libgstvideo-1.0.so: No such file"
