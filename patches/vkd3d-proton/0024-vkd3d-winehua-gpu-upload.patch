@@ -26,19 +26,25 @@ index 8f75883b..b7adea13 100644
          VK_CALL(vkCmdEndConditionalRenderingEXT(list->vk_command_buffer));
  
 diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
-index 48ad556c..53cf41e4 100644
+index 48ad556..6071280 100644
 --- a/libs/vkd3d/device.c
 +++ b/libs/vkd3d/device.c
-@@ -1093,6 +1093,9 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
+@@ -1093,7 +1093,15 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
      memset(info, 0, sizeof(*info));
  
      info->features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-+    info->is_winehua_venus =
-+        info->properties2.properties.driverID == VK_DRIVER_ID_MESA_VENUS;
-+    info->current_recording_list = NULL;
++    info->driver_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
++    vk_prepend_struct(&info->properties2, &info->driver_properties);
      info->properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++#ifndef VK_DRIVER_ID_MESA_VENUS
++#define VK_DRIVER_ID_MESA_VENUS 22
++#endif
++    device->is_winehua_venus =
++        info->driver_properties.driverID == VK_DRIVER_ID_MESA_VENUS;
++    device->current_recording_list = NULL;
  
      info->subgroup_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+     vk_prepend_struct(&info->properties2, &info->subgroup_properties);
 diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
 index 72fbb39c..edf63498 100644
 --- a/libs/vkd3d/resource.c
@@ -53,7 +59,7 @@ index 72fbb39c..edf63498 100644
 +     * mapped-memory flush (shadow path) when not recording. */
 +    struct d3d12_command_list *recording = resource->device->current_recording_list;
 +    if (resource->device->is_winehua_venus && recording && recording->is_recording &&
-+        recording->vk_command_buffer && resource->vk_buffer && resource->mem.cpu_address)
++        recording->vk_command_buffer && resource->res.vk_buffer && resource->mem.cpu_address)
 +    {
 +        const uint8_t *data = (const uint8_t *)resource->mem.cpu_address
 +            + (mapped_range.offset - resource->mem.offset);
@@ -64,7 +70,7 @@ index 72fbb39c..edf63498 100644
 +        {
 +            const VkDeviceSize sz = remaining < chunk ? remaining : chunk;
 +            VK_CALL(vkCmdUpdateBuffer(recording->vk_command_buffer,
-+                    resource->vk_buffer, off, sz, data + off));
++                    resource->res.vk_buffer, off, sz, data + off));
 +            off += sz;
 +            remaining -= sz;
 +        }
@@ -75,19 +81,22 @@ index 72fbb39c..edf63498 100644
  }
  
 diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
-index 687bafc9..4262f73e 100644
+index 687bafc..8807dea 100644
 --- a/libs/vkd3d/vkd3d_private.h
 +++ b/libs/vkd3d/vkd3d_private.h
-@@ -2821,6 +2821,12 @@ struct vkd3d_physical_device_info
+@@ -2818,6 +2818,7 @@ struct vkd3d_physical_device_info
+     VkPhysicalDeviceFragmentShadingRatePropertiesKHR fragment_shading_rate_properties;
+     VkPhysicalDeviceConservativeRasterizationPropertiesEXT conservative_rasterization_properties;
+     VkPhysicalDeviceShaderIntegerDotProductPropertiesKHR shader_integer_dot_product_properties;
++    VkPhysicalDeviceDriverProperties driver_properties;
  
      VkPhysicalDeviceProperties2KHR properties2;
  
-+    /* WineHua GPU-upload: when recording a command list, Unmap data is sent
-+     * via vkCmdUpdateBuffer (data in command stream) so virgl writes it
-+     * directly to the GPU buffer - no host shadow copy. */
+@@ -2986,6 +2987,7 @@ struct d3d12_device
+ #endif
+     VkPipelineCache global_pipeline_cache;
+     uint64_t shader_interface_key;
 +    bool is_winehua_venus;
-+    struct d3d12_command_list *current_recording_list;
-+
-     /* features */
-     VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_device_address_features;
-     VkPhysicalDeviceConditionalRenderingFeaturesEXT conditional_rendering_features;
+ };
+ 
+ HRESULT d3d12_device_create(struct vkd3d_instance *instance,
