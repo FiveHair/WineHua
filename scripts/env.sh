@@ -102,8 +102,8 @@ SYSROOT_EXT_LIB="$SYSROOT_EXT/usr/lib/x86_64-linux-ohos"
 SYSROOT_EXT_PC="$SYSROOT_EXT/usr/lib/pkgconfig"
 SYSROOT_EXT_SHARE="$SYSROOT_EXT/usr/share"
 
-# Linux/WSL 保留原路径；macOS 使用项目内扫描器和当前工具链的 pkg-config。
-if [ "$HOST_OS" = "Darwin" ]; then
+# Linux/WSL 保留原路径；macOS/HarmonyOS 使用项目内扫描器和当前工具链的 pkg-config。
+if [ "$HOST_OS" = "Darwin" ] || [ "$HOST_OS" = "HarmonyOS" ]; then
     export PKG_CONFIG_BIN="${PKG_CONFIG_BIN:-$(command -v pkg-config || true)}"
     export WAYLAND_SCANNER="${WAYLAND_SCANNER:-$BUILD_DIR/host-tools/bin/wayland-scanner}"
     [ -n "${PKG_CONFIG_BIN:-}" ] || err "pkg-config not found in PATH; run: brew install pkg-config"
@@ -190,9 +190,9 @@ meson_build() {
 }
 
 # 日志
-log()  { echo -e "\033[32m[BUILD]\033[0m $*"; }
-warn() { echo -e "\033[33m[WARN]\033[0m $*"; }
-err()  { echo -e "\033[31m[ERROR]\033[0m $*"; exit 1; }
+log()  { echo -e "\033[32m[BUILD]\033[0m $*" >&2; }
+warn() { echo -e "\033[33m[WARN]\033[0m $*" >&2; }
+err()  { echo -e "\033[31m[ERROR]\033[0m $*" >&2; exit 1; }
 
 # ── 共享工具函数 ──
 find_first_existing_dir() {
