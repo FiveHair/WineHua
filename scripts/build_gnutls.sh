@@ -55,6 +55,23 @@ fetch_tarball libtasn1 "https://mirrors.ustc.edu.cn/gnu/libtasn1/libtasn1-4.20.0
 fetch_tarball libunistring "https://mirrors.ustc.edu.cn/gnu/libunistring/libunistring-1.3.tar.xz" "https://ftp.gnu.org/gnu/libunistring/libunistring-1.3.tar.xz"
 fetch_tarball gnutls "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.3.tar.xz" ""
 
+# libtasn1 的本地 gnulib 补丁 (src/gl/lib/{malloc,malloca,realloc}.c.diff) 针对
+# 其 GNULIB_REVISION=c89cd2f 编写, 与 gnutls 的 gnulib (41d5dae3) 的 malloc.c 结构
+# 不兼容 (patch hunk 应用失败, gnulib-tool Stop) → libtasn1 必须用匹配版本的 gnulib。
+GNULIB_REVISION_LIBTASN1="c89cd2fbd3b9f3d7c5a146247256599714c91ec7"
+GNULIB_DIR_LIBTASN1="$BUILD_DIR/gnulib-libtasn1"
+
+# libtasn1: 准备匹配 GNULIB_REVISION 的 gnulib (其本地 .diff 补丁依赖该版本)
+prepare_gnulib_libtasn1() {
+    if [ ! -f "$GNULIB_DIR_LIBTASN1/gnulib-tool" ]; then
+        log "--- 准备 libtasn1 gnulib $GNULIB_REVISION_LIBTASN1 ---"
+        rm -rf "$GNULIB_DIR_LIBTASN1"
+        git clone --depth=1 https://github.com/coreutils/gnulib.git "$GNULIB_DIR_LIBTASN1"
+        git -C "$GNULIB_DIR_LIBTASN1" fetch --depth=1 origin "$GNULIB_REVISION_LIBTASN1"
+        git -C "$GNULIB_DIR_LIBTASN1" checkout -q FETCH_HEAD
+    fi
+}
+
 # 幂等跳过: 5 个库的关键产物全部就位
 idempotent_done() {
     [ -f "$SYSROOT_EXT_LIB/libgnutls.so.30" ] \
