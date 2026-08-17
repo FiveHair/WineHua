@@ -5,7 +5,8 @@ on:
   push:
     branches: [master]
     tags:
-      - 'v*'                    # v0.1.0, v1.2.3-rc1 等, 推 tag 会额外触发 release job
+      - 'dev-*'                 # 开发版 (直接发布, 不占 Latest 徽章)
+      - 'rc-*'                  # RC 版 (占 Latest 徽章)
     paths-ignore:
       - 'docs/**'
       - '**.md'
@@ -16,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (留空则只构建不发布)'
+        description: 'Release tag (dev-xx / rc-xx, 留空则只构建不发布)'
         required: false
         type: string
 
@@ -340,7 +341,7 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-26.04
-    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
+    if: startsWith(github.ref, 'refs/tags/dev-') || startsWith(github.ref, 'refs/tags/rc-') || github.event.inputs.release_tag != ''
 
     steps:
       - name: Checkout (for changelog)
@@ -348,7 +349,7 @@ jobs:
         with:
           fetch-depth: 0        # 需要历史 commit 生成 changelog
 
-      - name: Determine release tag
+      - name: Determine release tag & Latest ownership
         id: tag
         run: |
           if [ -n "${{ github.event.inputs.release_tag }}" ]; then
@@ -356,8 +357,16 @@ jobs:
           else
             tag="${GITHUB_REF#refs/tags/}"
           fi
+          # Latest 徽章归属: rc-* 占, dev-* 不占
+          # (GitHub 规则: prerelease 不能是 latest, 故两种 tag 均不标 pre,
+          #  由 make_latest 参数控制 Latest 徽章)
+          case "$tag" in
+            dev-*) make_latest=false ;;
+            *)     make_latest=true ;;
+          esac
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Resolved release tag: $tag"
+          echo "make_latest=$make_latest" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $tag (make_latest=$make_latest)"
 
       - name: Download HAP artifact
         uses: actions/download-artifact@v4
@@ -407,6 +416,8 @@ jobs:
           body_path: changelog.md
           files: release-assets/*.hap
           draft: false
-          # -rc / -beta / -alpha 后缀自动标记为 pre-release
-          prerelease: ${{ contains(steps.tag.outputs.tag, '-rc') || contains(steps.tag.outputs.tag, '-beta') || contains(steps.tag.outputs.tag, '-alpha') }}
+          # dev-*/rc-* 均不标 pre-release (GitHub 规则: prerelease 不能是 latest)
+          prerelease: false
+          # Latest 徽章: rc-* 占, dev-* 不占
+          make_latest: ${{ steps.tag.outputs.make_latest }}
           fail_on_unmatched_files: true
