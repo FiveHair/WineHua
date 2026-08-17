@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y \
         libfreetype-dev \
         gcc-mingw-w64-i686 g++-mingw-w64-i686 \
         gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+        mingw-w64-tools \
         default-jdk \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 

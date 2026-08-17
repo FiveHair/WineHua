@@ -145,6 +145,10 @@ jobs:
           if ! command -v glslangValidator >/dev/null 2>&1; then
             packages+=(glslang-tools)
           fi
+          # vkd3d-proton 的 meson 配置需要 widl (IDL 编译器), 由 mingw-w64-tools 提供
+          if ! command -v x86_64-w64-mingw32-widl >/dev/null 2>&1; then
+            packages+=(mingw-w64-tools)
+          fi
           if [ "${#packages[@]}" -gt 0 ]; then
             echo "Installing missing CI packages: ${packages[*]}"
             apt-get update
