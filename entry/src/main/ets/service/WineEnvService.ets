@@ -887,6 +887,10 @@ export class WineEnvService {
     }
     hilog.warn(DOMAIN, 'wine', 'auto-init: starting Wine...');
     this.setInitStatus('启动服务...', !this.bgStart);
+    // 桌面模式按最新设置重新判定 + 同步 C++ (explorer 是否启动由 IsDesktopMode
+    // 决定): 设置页切融合/虚拟桌面后"重启引擎"立即生效 — 若只在 app 启动时
+    // 判定, 重启引擎会沿用旧模式 (改融合后桌面窗口依旧出现)
+    WineWindowManager.getInstance().applyModePolicy();
     testNapi.setHostShadowProfile(this.perfProfile);
     const ok: boolean = testNapi.startServer(this.sockPath);
     if (!ok) {

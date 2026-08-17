@@ -56,11 +56,13 @@ add_library(entry SHARED
     input_manager.cpp
     pointer_extras.cpp
     xdg_shell.cpp
+    text_input.cpp
     xdg-shell-protocol.c
     viewporter-server-protocol.c
     pointer-warp-v1-protocol.c
     pointer-constraints-unstable-v1-protocol.c
     relative-pointer-unstable-v1-protocol.c
+    text-input-unstable-v3-protocol.c
 )
 
 target_link_libraries(entry PUBLIC

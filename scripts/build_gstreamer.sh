@@ -17,29 +17,19 @@ source "$SCRIPT_DIR/env.sh"
 GLIB_SRC="$ROOT/thirdparty/glib"
 GST_SRC="$ROOT/thirdparty/gstreamer"
 PCRE2_SRC="$ROOT/thirdparty/pcre2"
-# gst-plugins-base: fd.o 独立仓库停在 1.12, 1.24 只在 monorepo subproject
-# (wrap 下载描述, 违反 submodule 要求) → 复用 CrossOver vendored 目录 (同版本同源 release 提取)
-BASE_SRC="$ROOT/.temp/crossover/gstreamer/subprojects/gst-plugins-base"
+# gst-plugins-base: fd.o 独立仓库停在 1.12, 1.24 只在 monorepo subproject。
+# gstreamer 子模块已直接跟踪 subprojects/gst-plugins-base (1.24.4, 与 core 同源),
+# 直接用它, 无需外部 .temp/crossover staging。
+BASE_SRC="$ROOT/thirdparty/gstreamer/subprojects/gst-plugins-base"
+GOOD_SRC="$ROOT/thirdparty/gstreamer/subprojects/gst-plugins-good"
+LIBAV_SRC="$ROOT/thirdparty/gstreamer/subprojects/gst-libav"
+FFMPEG_SRC="$BUILD_DIR/ffmpeg_src"
 
 GST_PREFIX="$SYSROOT_EXT/usr"
 GST_LIBDIR="$GST_PREFIX/lib/x86_64-linux-ohos"
 
-# 幂等跳过: 4 个 .pc + 关键 .so 齐全
-idempotent_done() {
-    [ -f "$SYSROOT_EXT_PC/gstreamer-1.0.pc" ] \
-        && [ -f "$SYSROOT_EXT_PC/gstreamer-video-1.0.pc" ] \
-        && [ -f "$SYSROOT_EXT_PC/glib-2.0.pc" ] \
-        && [ -f "$SYSROOT_EXT_LIB/libgstreamer-1.0.so.0" ] \
-        && [ -f "$SYSROOT_EXT_LIB/libglib-2.0.so.0" ] \
-        && [ -f "$SYSROOT_EXT_INC/glib.h" ]
-}
-
-if idempotent_done; then
-    log "GStreamer 链已就绪，跳过"
-    exit 0
-fi
-
-log "=== 构建 GStreamer 链 (pcre2/glib/gstreamer/plugins-base, x86_64) → sysroot-ext ==="
+# 各库独立幂等 (各自 if 检查关键产物), 无整体跳过
+log "=== 构建 GStreamer 链 (core + plugins-base/good + libav, x86_64) → sysroot-ext ==="
 
 mkdir -p "$SYSROOT_EXT_INC" "$SYSROOT_EXT_LIB" "$SYSROOT_EXT_PC" "$BUILD_DIR"
 
@@ -64,16 +54,58 @@ Libs: -L\${libdir} -lz
 Cflags: -I\${includedir}
 EOF
 fi
-# musl 的 libintl 是 libc 内建 stub → 提供 .pc 防 glib 触发 proxy-libintl wrap 下载
-if [ ! -f "$SYSROOT_EXT_PC/libintl.pc" ]; then
+# musl (OHOS) 无 libintl: libc 已裁剪 gettext 符号, 也无 libintl.h/libintl.so。
+# glib 的 meson dependency('intl') 强制要求真库 (找不到就走 proxy-libintl wrap,
+# nodownload/nofallback 下都报 ERROR), 且其检测走 find_library 不走 pkg-config
+# → 构建 stub libintl (gettext 系返回 msgid, 即 musl 的 stub 语义)。
+if [ ! -f "$SYSROOT_EXT_LIB/libintl.so" ]; then
+    log "--- 构建 stub libintl (gettext 返回 msgid) ---"
+    mkdir -p "$SYSROOT_EXT_INC" "$SYSROOT_EXT_LIB"
+    cat > "$SYSROOT_EXT_INC/libintl.h" << 'INTL_H'
+#ifndef _LIBINTL_H
+#define _LIBINTL_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+#include <stddef.h>
+char *gettext(const char *msgid);
+char *dgettext(const char *domainname, const char *msgid);
+char *dcgettext(const char *domainname, const char *msgid, int category);
+char *ngettext(const char *msgid, const char *msgid_plural, unsigned long int n);
+char *dngettext(const char *domainname, const char *msgid, const char *msgid_plural, unsigned long int n);
+char *dcngettext(const char *domainname, const char *msgid, const char *msgid_plural, unsigned long int n, int category);
+char *textdomain(const char *domainname);
+char *bindtextdomain(const char *domainname, const char *dirname);
+char *bind_textdomain_codeset(const char *domainname, const char *codeset);
+#ifdef __cplusplus
+}
+#endif
+#endif /* _LIBINTL_H */
+INTL_H
+    cat > "$BUILD_DIR/libintl.c" << 'INTL_C'
+#include "libintl.h"
+char *gettext(const char *msgid) { return (char *)msgid; }
+char *dgettext(const char *domainname, const char *msgid) { (void)domainname; return (char *)msgid; }
+char *dcgettext(const char *domainname, const char *msgid, int category) { (void)domainname; (void)category; return (char *)msgid; }
+char *ngettext(const char *msgid, const char *msgid_plural, unsigned long int n) { return (char *)(n == 1 ? msgid : msgid_plural); }
+char *dngettext(const char *domainname, const char *msgid, const char *msgid_plural, unsigned long int n) { (void)domainname; return (char *)(n == 1 ? msgid : msgid_plural); }
+char *dcngettext(const char *domainname, const char *msgid, const char *msgid_plural, unsigned long int n, int category) { (void)domainname; (void)category; return (char *)(n == 1 ? msgid : msgid_plural); }
+char *textdomain(const char *domainname) { return (char *)domainname; }
+char *bindtextdomain(const char *domainname, const char *dirname) { (void)dirname; return (char *)domainname; }
+char *bind_textdomain_codeset(const char *domainname, const char *codeset) { (void)domainname; return (char *)codeset; }
+INTL_C
+    "$CLANG" --target="$TARGET" --sysroot="$SYSROOT" -shared -fPIC -O2 \
+        -o "$SYSROOT_EXT_LIB/libintl.so" "$BUILD_DIR/libintl.c" || err "stub libintl 编译失败"
+    rm -f "$BUILD_DIR/libintl.c"
+    # .pc 指向真实 stub (供走 pkg-config 的库链接 -lintl)
     cat > "$SYSROOT_EXT_PC/libintl.pc" << EOF
-prefix=$SYSROOT/usr
+prefix=$SYSROOT_EXT/usr
 includedir=\${prefix}/include
 libdir=\${prefix}/lib/x86_64-linux-ohos
 Name: libintl
 Description: GNU gettext (musl stub)
 Version: 0.22
-Libs: -L\${libdir} -lc
+Libs: -L\${libdir} -lintl
 Cflags: -I\${includedir}
 EOF
 fi
@@ -118,13 +150,19 @@ if [ ! -f "$SYSROOT_EXT_LIB/libglib-2.0.so.0" ]; then
     fi
     build="$BUILD_DIR/glib_build"
     rm -rf "$build"
-    # --wrap-mode=nodownload: 防 wrap 下载 (pcre2/zlib/libffi 已由 .pc 提供, 不触发)
+    # --wrap-mode=nofallback: 禁用 fallback subproject。musl 无独立
+    # libintl.so (OHOS 的 libc 已裁剪 gettext), meson 的 dependency('intl')
+    # 走内置检测 (find_library, 不走 pkg-config), 找不到时 fallback 指定的
+    # proxy-libintl wrap 在 nodownload 下 buildable NO → ERROR。
+    # nofallback 直接 not-found, 配合 -Dnls=disabled 走 glib 内建 stub。
+    # pcre2/zlib/libffi 已由 .pc 提供, 不触发 fallback。
     meson setup "$build" "$GLIB_SRC" --cross-file "$(gen_cross_file)" \
-        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nodownload \
+        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nofallback \
         -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
         -Dselinux=disabled -Dxattr=false -Dlibmount=disabled -Dman=false \
         -Ddtrace=false -Dsystemtap=false -Dgtk_doc=false -Dtests=false \
-        -Dinstalled_tests=false -Dlibelf=disabled
+        -Dinstalled_tests=false -Dlibelf=disabled \
+        -Dnls=disabled
     meson compile -C "$build" -j "$JOBS"
     DESTDIR=/ meson install -C "$build"
     stage_pcs
@@ -138,7 +176,7 @@ if [ ! -f "$SYSROOT_EXT_LIB/libgstreamer-1.0.so.0" ]; then
     build="$BUILD_DIR/gstreamer_build"
     rm -rf "$build"
     meson setup "$build" "$GST_SRC" --cross-file "$(gen_cross_file)" \
-        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nodownload \
+        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nofallback \
         -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
         -Dtests=disabled -Dexamples=disabled -Dtools=disabled \
         -Dintrospection=disabled -Ddoc=disabled -Dgtk_doc=disabled -Dorc=disabled \
@@ -150,25 +188,24 @@ else
     log "gstreamer core 已就绪，跳过"
 fi
 
-# ── 4. gst-plugins-base 1.24.4 (meson, crossover vendored; 只编 gst-libs 出 .pc) ──
-if [ ! -f "$SYSROOT_EXT_PC/gstreamer-video-1.0.pc" ]; then
+# ── 4. gst-plugins-base 1.24.4 (meson, monorepo subproject) ──
+# 既出 gst-libs 的 .pc (wine configure 探测用), 也编基础插件
+# (typefind/playback/app/audioconvert 等, winegstreamer 运行时必需)。
+if [ ! -f "$SYSROOT_EXT_PC/gstreamer-video-1.0.pc" ] || \
+   [ ! -d "$GST_LIBDIR/gstreamer-1.0" ]; then
     log "--- 构建 gst-plugins-base ---"
     build="$BUILD_DIR/gst_base_build"
     rm -rf "$build"
     meson setup "$build" "$BASE_SRC" --cross-file "$(gen_cross_file)" \
-        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nodownload \
+        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nofallback \
         -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
         -Dtests=disabled -Dexamples=disabled -Dintrospection=disabled -Ddoc=disabled \
         -Dorc=disabled -Dnls=disabled \
-        -Dadder=disabled -Dapp=disabled -Daudioconvert=disabled -Daudiomixer=disabled \
-        -Daudiorate=disabled -Daudioresample=disabled -Daudiotestsrc=disabled \
-        -Dcompositor=disabled -Ddebugutils=disabled -Dencoding=disabled -Dgio=disabled \
-        -Doverlaycomposition=disabled -Dpbtypes=disabled -Dplayback=disabled \
-        -Drawparse=disabled -Dsubparse=disabled -Dtcp=disabled -Dtypefind=disabled \
-        -Dvideoconvertscale=disabled -Dvideorate=disabled -Dvideotestsrc=disabled \
-        -Dvolume=disabled -Ddrm=disabled -Dgl=disabled -Dalsa=disabled -Dcdparanoia=disabled \
-        -Dlibvisual=disabled -Dogg=disabled -Dopus=disabled -Dpango=disabled \
-        -Dtheora=disabled -Dtremor=disabled -Dvorbis=disabled -Dxshm=disabled -Dxi=disabled
+        -Dcompositor=disabled -Ddebugutils=disabled -Dencoding=disabled \
+        -Doverlaycomposition=disabled -Ddrm=disabled -Dgl=disabled -Dalsa=disabled \
+        -Dcdparanoia=disabled -Dlibvisual=disabled -Dogg=disabled -Dopus=disabled \
+        -Dpango=disabled -Dtheora=disabled -Dtremor=disabled -Dvorbis=disabled \
+        -Dxshm=disabled -Dxi=disabled
     meson compile -C "$build" -j "$JOBS"
     DESTDIR=/ meson install -C "$build"
     stage_pcs
@@ -193,5 +230,80 @@ for pc in gstreamer-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-tag-1.
     grep -q "lgstbase-1.0" "$f" || \
         sed -i "/^Libs:/ s/\$/ -lgstbase-1.0 -lgstpbutils-1.0 -lglib-2.0 -lgobject-2.0 -lgmodule-2.0 -lgio-2.0/" "$f"
 done
+
+# ── 5. gst-plugins-good (demuxer: qtdemux/matroskademux/typefind 等) ──
+# 幂等以 qtdemux 所在库 libgstisomp4.so 为准 (无独立 libgstqtdemux.so)
+if [ ! -d "$GST_LIBDIR/gstreamer-1.0" ] || \
+   [ ! -f "$GST_LIBDIR/gstreamer-1.0/libgstisomp4.so" ]; then
+    log "--- 构建 gst-plugins-good ---"
+    build="$BUILD_DIR/gst_good_build"
+    rm -rf "$build"
+    # zlib 来自 OHOS sysroot; vpx 插件已由 libvpx 提供。禁用外部音频/图像依赖。
+    meson setup "$build" "$GOOD_SRC" --cross-file "$(gen_cross_file)" \
+        --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nofallback \
+        -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
+        -Dcairo=disabled -Ddv=disabled -Dflac=disabled -Djack=disabled \
+        -Djpeg=disabled -Dlame=disabled -Dlibcaca=disabled -Dmpg123=disabled \
+        -Dpulse=disabled -Dshout2=disabled -Dspeex=disabled -Dtaglib=disabled \
+        -Dtwolame=disabled -Dvpx=disabled -Dwavpack=disabled -Daalib=disabled \
+        -Damrnb=disabled -Damrwbdec=disabled -Ddv1394=disabled -Dgtk3=disabled \
+        -Doss=disabled -Doss4=disabled -Dosxaudio=disabled -Dosxvideo=disabled \
+        -Dqt5=disabled -Dqt6=disabled -Drpicamsrc=disabled -Dsoup=disabled \
+        -Dv4l2=disabled -Dximagesrc=disabled -Ddirectsound=disabled
+    meson compile -C "$build" -j "$JOBS"
+    DESTDIR=/ meson install -C "$build"
+    stage_pcs
+else
+    log "gst-plugins-good 已就绪，跳过"
+fi
+
+# ── 6. FFmpeg + gst-libav (通用解码: H.264/VP9/AAC 等) ──
+if [ ! -f "$SYSROOT_EXT_LIB/libavcodec.so" ] || \
+   [ ! -f "$GST_LIBDIR/gstreamer-1.0/libgstlibav.so" ]; then
+    log "--- 构建 FFmpeg (meson-ports) ---"
+    if [ ! -d "$FFMPEG_SRC/.git" ]; then
+        if [ ! -f "$FFMPEG_SRC/meson.build" ]; then
+            rm -rf "$FFMPEG_SRC"
+            if [ -f "$ROOT/build/ffmpeg-meson.tar.gz" ]; then
+                mkdir -p "$FFMPEG_SRC"
+                tar -xzf "$ROOT/build/ffmpeg-meson.tar.gz" -C "$FFMPEG_SRC" --strip-components=1
+            else
+                git clone --depth 1 --branch meson-6.1 \
+                    https://gitlab.freedesktop.org/gstreamer/meson-ports/ffmpeg.git "$FFMPEG_SRC" \
+                    || { echo "FFmpeg clone 失败, 跳过 libav"; FFMPEG_SRC=""; }
+            fi
+        fi
+    fi
+    if [ -n "${FFMPEG_SRC:-}" ] && [ -f "$FFMPEG_SRC/meson.build" ]; then
+        build="$BUILD_DIR/ffmpeg_build"
+        rm -rf "$build"
+        meson setup "$build" "$FFMPEG_SRC" --cross-file "$(gen_cross_file)" \
+            --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos \
+            -Ddefault_library=shared \
+            -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
+            -Dc_link_args="--target=$TARGET --sysroot=$SYSROOT -L$SYSROOT_EXT_LIB -lz" \
+            -Dprograms=disabled -Dtests=disabled \
+            -Dzlib=enabled -Diconv=disabled \
+            -Dlibx264=disabled -Dlibvpx=disabled -Dlibopus=disabled
+        meson compile -C "$build" -j "$JOBS"
+        DESTDIR=/ meson install -C "$build"
+        stage_pcs
+    fi
+    if [ -n "${FFMPEG_SRC:-}" ] && [ -f "$FFMPEG_SRC/meson.build" ] && \
+       [ -f "$SYSROOT_EXT_LIB/libavcodec.so" ]; then
+        log "--- 构建 gst-libav ---"
+        build="$BUILD_DIR/gst_libav_build"
+        rm -rf "$build"
+        meson setup "$build" "$LIBAV_SRC" --cross-file "$(gen_cross_file)" \
+            --prefix="$GST_PREFIX" -Dlibdir=lib/x86_64-linux-ohos --wrap-mode=nofallback \
+            -Dc_args="--target=$TARGET --sysroot=$SYSROOT -I$SYSROOT_EXT_INC -D__MUSL__" \
+            -Dtests=disabled -Ddoc=disabled
+        meson compile -C "$build" -j "$JOBS"
+        DESTDIR=/ meson install -C "$build"
+        stage_pcs
+    fi
+else
+    log "gst-libav 已就绪，跳过"
+fi
 
 log "GStreamer 链就绪: $SYSROOT_EXT"

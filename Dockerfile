@@ -9,6 +9,10 @@ RUN apt-get update && apt-get install -y \
     build-essential cmake ninja-build meson \
     bison flex autoconf automake libtool libltdl-dev \
     pkgconf zip git file python3 python3-pip glslang-tools \
+    spirv-tools \
+    # spirv-tools: build_ohos_guest_vulkan.sh 无条件调用 spirv-as/spirv-dis/spirv-val/spirv-opt
+    # (BUILD_GUEST_VULKAN=1 默认开启). 目前作为 glslang-tools 的传递依赖被拉入,
+    # 但依赖传递链不可靠, 显式声明保证未来 apt/发行版变动也不丢. (与 ci 镜像一致)
     # gettext (msgfmt): Wine po 翻译资源硬依赖 (build_wine.sh 缺失即 exit 1);
     # curl/wget: 构建期下载 (mono msi 等);
     # texinfo (makeinfo): gmp make all 重新生成 doc/gmp.info 的硬依赖

@@ -1,5 +1,6 @@
 #include "wayland_server.h"
 #include "seat.h"
+#include "text_input.h"
 #include "input_manager.h"
 #include "xdg_shell.h"
 #include "fps_counter.h"
@@ -96,6 +97,7 @@ void WaylandServer::Stop() {
     DestroyAllToplevels();
     InputManager::GetInstance()->Shutdown();
     Seat::GetInstance()->Unregister();
+    TextInput::GetInstance()->Unregister();
     if (display_) wl_display_terminate(display_);
     if (thread_.joinable()) thread_.join();
     if (display_) {
@@ -424,6 +426,17 @@ void WaylandServer::ForceToplevelRedraw(uint32_t id) {
 }
 
 void WaylandServer::NotifyToplevelResize(uint32_t toplevelId, int32_t w, int32_t h) {
+    // 最小化门禁: 窗口最小化期间不向 Wine 发任何 configure。
+    // winewayland 的「最小化→还原」握手 (window.c restoring_from_minimize)
+    // 依赖窗口 rect 停在 -32000 哨兵位; 此时收到 configure, wine 走普通
+    // configure 路径处理会 SetWindowPos 把窗口挪回屏幕内, 哨兵位被污染 →
+    // 用户还原时检测永不成立, WS_MINIMIZE 清不掉 (war3 还原后黑屏 +
+    // 点击再最小化的根因之一)。还原通道 SetToplevelRestored 不走本函数。
+    if (IsToplevelMinimized(toplevelId)) {
+        OH_LOG_INFO(LOG_APP, "[MW] NotifyToplevelResize id=%{public}u %{public}dx%{public}d SKIPPED (minimized)",
+                    toplevelId, w, h);
+        return;
+    }
     wl_resource* tl = toplevelMgr_.FindToplevelResource(toplevelId);
     if (!tl) return;
 

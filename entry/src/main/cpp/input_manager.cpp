@@ -2,11 +2,13 @@
 #include "seat.h"
 #include "plugin_manager.h"
 #include "pointer_extras.h"
+#include "text_input.h"
 #include "wayland_server.h"
 #include <chrono>
 #include <thread>
 #include <atomic>
 #include <cmath>
+#include <algorithm>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -23,6 +25,21 @@ enum {
     BTN_RIGHT  = 0x111,
     BTN_MIDDLE = 0x112,
 };
+
+// 内容区钳制: 把越界坐标 (全屏 letterbox 黑边、拖出窗口边缘) 钳到
+// [0, content-1]。关键不在绝对坐标通道 (wine 侧本来也有 motion clamp,
+// 绝对游戏回到画面内会按绝对映射自动对齐), 而在相对增量通道:
+// SendPointerEvent 用注入坐标差分出 REL_MOTION, 若不钳制, 系统光标在
+// 黑边里移动时未钳制坐标仍在变化, 会差分出游戏光标从未走过的幽灵增量
+// (wine 光标被钳在边缘没动), 相对模式 (dinput) 游戏累积后游戏光标与
+// 系统光标持续错位。钳制后两通道同源: 黑边里垂直移动仍沿边缘跟随
+// (保留 RTS 边缘滚动语义), 水平移动增量为 0。content<=0 表示调用方
+// 无内容尺寸信息 (非全屏目标), 不钳制。
+static inline double ClampToContent(double v, int content) {
+    if (content <= 0) return v;
+    const double hi = content > 1 ? static_cast<double>(content - 1) : 0.0;
+    return std::min(std::max(v, 0.0), hi);
+}
 
 // -- 丢帧统计 (全局计数器 + 周期性汇总, 60s 间隔) --
 static std::atomic<int> gDropEnter{0}, gDropButton{0}, gDropKey{0}, gDropMotion{0};
@@ -119,7 +136,8 @@ void InputManager::Shutdown() {
 // ========================================================================
 
 wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
-                                         wl_fixed_t* outX, wl_fixed_t* outY) {
+                                         wl_fixed_t* outX, wl_fixed_t* outY,
+                                         FitRect* outLb) {
     auto* r = PluginManager::GetInstance()->GetRendererForToplevel(tl);
     // Desktop 模式 fallback: root 切换后可能用旧 ID 查 renderer
     if (!r && WaylandServer::GetInstance()->Policy().RootCompositing()) {
@@ -139,6 +157,7 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
     int surfW = r->GetWidth();
     int surfH = r->GetHeight();
     const FitRect& lb = r->GetLetterbox();
+    if (outLb) *outLb = lb;
 
     if (surfW <= 0 || surfH <= 0 || lb.dstW <= 0 || lb.dstH <= 0) {
         *outX = 0; *outY = 0;
@@ -383,7 +402,8 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
         if (ws->FindInputTargetAt(static_cast<int>(lround(logicalX)),
                                   static_cast<int>(lround(logicalY)), target)) {
             // 全屏黑边: 只吞 PRESS (防幻影点击/焦点切换)。MOVE/RELEASE 照常透传 —
-            // 越界坐标由 winewayland 的 motion clamp 夹回窗口边缘;
+            // 越界坐标钳到内容区边缘 (host 侧, 见 ClampToContent; 不再依赖
+            // winewayland clamp, 否则相对增量差分会累积黑边里的幽灵位移);
             // 吞掉 RELEASE 会让 pressedButtons_ 永不清位 (按键卡死)
             if (target.swallow && action == ACT_PRESS) return;
             tl = target.toplevelId;
@@ -391,8 +411,10 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             // 桌面坐标 → surface 局部坐标 (即 geometry.h 的 FitUnmapX/Y;
             // target.origin/scale 由 InputResolver 的 ComputeFitRect 给出)。
             // target.scale > 1 表示全屏窗口保比例放大显示, 局部坐标需按同一缩放除回来
-            const double localX = (logicalX - target.originX) / target.scale;
-            const double localY = (logicalY - target.originY) / target.scale;
+            double localX = (logicalX - target.originX) / target.scale;
+            double localY = (logicalY - target.originY) / target.scale;
+            localX = ClampToContent(localX, target.contentW);
+            localY = ClampToContent(localY, target.contentH);
             wx = wl_fixed_from_double(localX);
             wy = wl_fixed_from_double(localY);
             // 系统性链路日志 (断点 2): 目标解析结果 — 手指桌面坐标命中哪个窗口/
@@ -419,7 +441,14 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
                         logicalX - ws->GetToplevelX(tl), logicalY - ws->GetToplevelY(tl));
         }
     } else {
-        CoordTransform(px, py, tl, &wx, &wy);
+        FitRect lb{};
+        CoordTransform(px, py, tl, &wx, &wy, &lb);
+        // 钳到内容区 (全屏 letterbox 黑边 / 拖出窗口边缘的越界坐标):
+        // 与可见光标位置对齐, 防相对增量差分累积幽灵位移 (见 ClampToContent)
+        if (lb.srcW > 0 && lb.srcH > 0) {
+            wx = wl_fixed_from_double(ClampToContent(wl_fixed_to_double(wx), lb.srcW));
+            wy = wl_fixed_from_double(ClampToContent(wl_fixed_to_double(wy), lb.srcH));
+        }
         // PC 空间全局指针位置 = 窗口局部坐标 + 窗口位置 (grab 偏移基准)
         lastGlobalPtrX_.store(wl_fixed_from_double(wl_fixed_to_double(wx) + ws->GetToplevelX(tl)));
         lastGlobalPtrY_.store(wl_fixed_from_double(wl_fixed_to_double(wy) + ws->GetToplevelY(tl)));
@@ -1013,6 +1042,9 @@ void InputManager::InjectKeyboardEnter(uint32_t tl, wl_resource* surface) {
         nSent++;
     }
     OH_LOG_INFO(LOG_APP, "[Input] InjectKbdEnter OK sent=%{public}d", nSent);
+    // IME: keyboard enter → text-input enter (Wine 收到后 enable, 等待文本框
+    // SetIMECompositionRect → 非零光标矩形 → TextInput 判定激活)
+    TextInput::GetInstance()->OnKeyboardEnter(surface);
 }
 
 void InputManager::InjectKeyboardKey(uint32_t key, uint32_t state) {
@@ -1066,6 +1098,8 @@ void InputManager::InjectKeyboardLeave() {
     keyboardFocusedToplevel_ = 0;
     keyboardFocusedSurface_ = nullptr;
     OH_LOG_INFO(LOG_APP, "[Input] InjectKbdLeave OK");
+    // IME: keyboard leave → text-input leave (Wine disable, 失活)
+    TextInput::GetInstance()->OnKeyboardLeave(surf);
 }
 
 void InputManager::InjectKeyboardModifiers(uint32_t depressed, uint32_t latched,

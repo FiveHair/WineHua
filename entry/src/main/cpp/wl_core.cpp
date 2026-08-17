@@ -11,6 +11,7 @@
 #include "input_manager.h"
 #include "plugin_manager.h"
 #include "pointer_extras.h"
+#include "text_input.h"
 #include "compositor/compositor_utils.h"
 #include "compositor/compositor_constants.h"
 #include "include/viewporter-server-protocol.h"
@@ -762,12 +763,33 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
 
     // 检测尺寸变化 -> 通知 ArkTS 调整子窗口
     if (st.CheckAndUpdateLastReportedSize(fi.contentW, fi.contentH)) {
-        char json[64];
-        snprintf(json, sizeof(json), "{\"w\":%d,\"h\":%d}", fi.contentW, fi.contentH);
-        OH_LOG_INFO(LOG_APP, "[MW] toplevel #%{public}u size changed: %{public}dx%{public}d max=%{public}s -> ArkTS",
-                    sd->toplevelId, fi.contentW, fi.contentH,
-                    sd->maximized ? "yes" : "no");
-        FireToplevelEvent(sd->toplevelId, "resize", json);
+        // fullscreen 纠偏: D3D 游戏的显示模式切换会把窗口 MoveWindow 到
+        // 模式尺寸 (war3: 1560x1040 → 800x600), 内容几何随之缩小。此时
+        // resize 转发无意义 (系统本就拒绝 fullscreen 窗口 resize), 真正
+        // 需要的是把 wine 窗口拉回 configure 尺寸 — 否则 GL client
+        // surface 按 800x600 客户区出帧, 经 popup 路径原样上屏, 画面
+        // 缩到左上。重发 fullscreen configure 后 wine 客户区恢复全屏,
+        // client surface 跟随, wined3d 内部把模式尺寸 backbuffer 拉伸
+        // 出帧 (与 RA2 的 GDI 主 surface viewport 拉伸殊途同归)。
+        // 非 fullscreen / 尺寸不小于输出 / 桌面 root: 维持原转发语义。
+        if (st.IsFullscreen() && sd->toplevelId != desktopRootToplevelId_ &&
+            (fi.contentW < outputW_ || fi.contentH < outputH_)) {
+            OH_LOG_INFO(LOG_APP, "[MW] toplevel #%{public}u fullscreen size drift %{public}dx%{public}d < output %{public}dx%{public}d -> re-assert configure",
+                        sd->toplevelId, fi.contentW, fi.contentH, outputW_, outputH_);
+            // 必须先解锁: NotifyToplevelResize 内部 IsToplevelFullscreen 会
+            // 再取 toplevelMutex_ (非递归 std::mutex), 持锁调用 = 同线程
+            // 自死锁 — wayland 事件循环卡死, 输入/帧派发全停 (APP_INPUT_BLOCK,
+            // 2026-08-15 war3 全屏黑屏整机卡死的根因)。解锁后不再触碰 st。
+            lk.unlock();
+            NotifyToplevelResize(sd->toplevelId, outputW_, outputH_);
+        } else {
+            char json[64];
+            snprintf(json, sizeof(json), "{\"w\":%d,\"h\":%d}", fi.contentW, fi.contentH);
+            OH_LOG_INFO(LOG_APP, "[MW] toplevel #%{public}u size changed: %{public}dx%{public}d max=%{public}s -> ArkTS",
+                        sd->toplevelId, fi.contentW, fi.contentH,
+                        sd->maximized ? "yes" : "no");
+            FireToplevelEvent(sd->toplevelId, "resize", json);
+        }
     }
 }
 
@@ -954,8 +976,28 @@ void WaylandServer::UpdatePopupOnCommit(SurfaceData* sd, wl_resource* surfRes,
     bool isNew = false;
     bool sizeChanged = false;
     bool posChanged = false;
+    /*
+     * 全屏主窗口的 GL client surface (war3 D3D 模式切换): wine 把客户区
+     * MoveWindow 到模式尺寸 (800x600), client surface 随之缩小, 按 1:1
+     * 上报会把画面缩在屏幕左上角。这里把"窗口上报尺寸"与"内容像素尺寸"
+     * 解耦: 窗口按全屏输出尺寸上报, FrameData 仍按内容尺寸存 — 渲染侧
+     * EglRenderer letterbox 保比例放大上屏, 输入侧 CoordTransform 按同
+     * 一 letterbox 逆映射 (与 RA2 主 surface 全屏路径同构)。
+     * 判定 = 父全屏 + 偏移 (0,0) + 内容尺寸等于父内容尺寸 (client
+     * surface 恰好覆盖整个客户区; 菜单等小 popup 不满足, 不受影响)。
+     * 本函数仅 PC 模式到达 (桌面模式走 layer 合成), 不影响 Pad 桌面。
+     */
+    int winW = dispW, winH = dispH;
     {
         auto lk = toplevelMgr_.Lock();
+        auto* pst = toplevelMgr_.FindToplevelLocked(parentId);
+        if (pst && pst->IsFullscreen() && offX == 0 && offY == 0 &&
+            dispW == pst->Width() && dispH == pst->Height() &&
+            outputW_ > 0 && outputH_ > 0 &&
+            (dispW < outputW_ || dispH < outputH_)) {
+            winW = outputW_;
+            winH = outputH_;
+        }
         popupId = toplevelMgr_.FindPopupBySurfaceKey(sd->surfaceKey);
         if (popupId == 0) {
             popupId = NextToplevelId();
@@ -967,8 +1009,8 @@ void WaylandServer::UpdatePopupOnCommit(SurfaceData* sd, wl_resource* surfRes,
             rec.surfaceKey = sd->surfaceKey;
             rec.offX = offX;
             rec.offY = offY;
-            rec.w = dispW;
-            rec.h = dispH;
+            rec.w = winW;
+            rec.h = winH;
             toplevelMgr_.RegisterPopup(popupId, rec);
         } else {
             auto* rec = toplevelMgr_.FindPopup(popupId);
@@ -976,12 +1018,12 @@ void WaylandServer::UpdatePopupOnCommit(SurfaceData* sd, wl_resource* surfRes,
                 // 两表不同步 (不应发生): 清孤儿 key, 跳过本帧, 下帧重建
                 popupId = 0;
             } else {
-                sizeChanged = (rec->w != dispW || rec->h != dispH);
+                sizeChanged = (rec->w != winW || rec->h != winH);
                 posChanged = (rec->offX != offX || rec->offY != offY);
                 rec->offX = offX;
                 rec->offY = offY;
-                rec->w = dispW;
-                rec->h = dispH;
+                rec->w = winW;
+                rec->h = winH;
             }
         }
         if (popupId > 0) {
@@ -1015,9 +1057,9 @@ void WaylandServer::UpdatePopupOnCommit(SurfaceData* sd, wl_resource* surfRes,
         char json[256];
         snprintf(json, sizeof(json),
                  "{\"popupId\":%u,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"argb\":%d}",
-                 popupId, offX, offY, dispW, dispH, fi.shmFormat == 0 ? 1 : 0);
-        OH_LOG_INFO(LOG_APP, "[MW-POPUP] show popup=#%{public}u parent=#%{public}u off=(%{public}d,%{public}d) %{public}dx%{public}d (buffer %{public}dx%{public}d src=%{public}d,%{public}d %{public}dx%{public}d dst=%{public}dx%{public}d)",
-                    popupId, parentId, offX, offY, dispW, dispH, sd->w, sd->h,
+                 popupId, offX, offY, winW, winH, fi.shmFormat == 0 ? 1 : 0);
+        OH_LOG_INFO(LOG_APP, "[MW-POPUP] show popup=#%{public}u parent=#%{public}u off=(%{public}d,%{public}d) %{public}dx%{public}d win=%{public}dx%{public}d (buffer %{public}dx%{public}d src=%{public}d,%{public}d %{public}dx%{public}d dst=%{public}dx%{public}d)",
+                    popupId, parentId, offX, offY, dispW, dispH, winW, winH, sd->w, sd->h,
                     sd->vpSrcX, sd->vpSrcY, sd->vpSrcW, sd->vpSrcH, sd->vpDstW, sd->vpDstH);
         FireToplevelEvent(parentId, "popup_show", json);
         return;
@@ -1025,7 +1067,7 @@ void WaylandServer::UpdatePopupOnCommit(SurfaceData* sd, wl_resource* surfRes,
     if (sizeChanged) {
         char json[128];
         snprintf(json, sizeof(json), "{\"popupId\":%u,\"w\":%d,\"h\":%d}",
-                 popupId, dispW, dispH);
+                 popupId, winW, winH);
         FireToplevelEvent(parentId, "popup_resize", json);
     }
     if (posChanged) {
@@ -1111,4 +1153,6 @@ extern "C" void RegisterWlCoreGlobals(wl_display* display) {
     // dinput 老游戏的指针扩展 (warp 回中/指针约束; relative 故意不注册,
     // 见 pointer_extras.h 头注释)
     PointerExtras::GetInstance()->Register(display);
+    // IME 文本输入 (Wine wayland_text_input.c 绑定, 软键盘文字经此注入)
+    TextInput::GetInstance()->Register(display);
 }
