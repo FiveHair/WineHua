@@ -1140,7 +1140,7 @@ fi
 
 loader_sha="$(sha256sum "$OUTPUT_ROOT/lib/libvulkan.so.1" | awk '{print $1}')"
 icd_sha="$(sha256sum "$OUTPUT_ROOT/lib/libvulkan_virtio.so" | awk '{print $1}')"
-expected_mesa_commit="0a239288f90ba0afe074aa90832d8fd71bd0ffe8"
+expected_mesa_commit="8386e66e76d2896d52d59f9e0b00aca4e5d4f14c"
 mesa_patch_sha256=""
 if git -c safe.directory="$ROOT/thirdparty/mesa" -C "$ROOT/thirdparty/mesa" \
         rev-parse HEAD >/dev/null 2>&1; then
