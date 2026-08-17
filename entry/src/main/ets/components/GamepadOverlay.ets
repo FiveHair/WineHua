@@ -128,7 +128,7 @@ export struct PadButtonView {
       if (this.keyLabel != '') {
         Text(this.keyLabel)
           .width(56)
-          .fontSize(9)
+          .fontSize(10)
           .fontColor($r('app.color.text_tertiary'))
           .textAlign(TextAlign.Center)
           .position({ x: 0, y: 58 })

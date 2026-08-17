@@ -534,7 +534,7 @@ export struct AppLibraryView {
             .wordBreak(WordBreak.BREAK_ALL)
           if ($$.entry.builtin) {
             Text('内建')
-              .fontSize(9)
+              .fontSize(10)
               .fontColor($r('app.color.text_secondary'))
               .padding({ left: 5, right: 5, top: 1, bottom: 1 })
               .backgroundColor($r('app.color.control_bg'))
@@ -542,7 +542,7 @@ export struct AppLibraryView {
           }
           if ($$.entry.favorite) {
             Text('收藏')
-              .fontSize(9)
+              .fontSize(10)
               .fontColor($r('app.color.accent'))
               .padding({ left: 5, right: 5, top: 1, bottom: 1 })
               .backgroundColor($r('app.color.accent_bg'))
