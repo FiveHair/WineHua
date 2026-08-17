@@ -436,12 +436,17 @@ export struct AppLibraryView {
         const r: ScanMarks = await this.lib.scanShortcuts();
         promptAction.showToast({
           message: r.added > 0 ? `新增 ${r.added} 个应用`
+            : r.removed > 0 ? `移除 ${r.removed} 个失效快捷方式`
             : r.classified > 0 ? `${r.classified} 个应用归入开始菜单`
             : '没有发现新快捷方式'
         });
       } else {
-        const added = await this.lib.scanZExes();
-        promptAction.showToast({ message: added > 0 ? `新增 ${added} 个应用` : '没有发现新程序' });
+        const r: ScanMarks = await this.lib.scanZExes();
+        promptAction.showToast({
+          message: r.added > 0 ? `新增 ${r.added} 个应用`
+            : r.removed > 0 ? `移除 ${r.removed} 个失效程序`
+            : '没有发现新程序'
+        });
       }
     } finally {
       hilog.info(DOMAIN, TAG, 'runScan end kind=%{public}s elapsed=%{public}dms', kind, Date.now() - t0);

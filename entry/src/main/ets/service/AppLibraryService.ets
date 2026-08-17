@@ -121,10 +121,14 @@ interface AppEntryPatch {
 
 // 扫描结果: added=新入库条目数, classified=已在库但本次被归到"开始菜单"的数量
 // (老数据/手动导入的条目被 lnk 扫描命中时 source 升级为 'lnk' — 该 exe 确实
-// 有开始菜单快捷方式, 属事实性归类, 不算新增)
+// 有开始菜单快捷方式, 属事实性归类, 不算新增), removed=本次对账移除的失效
+// 条目数 (被扫描来源不再命中: exe 文件 / 快捷方式已删除)。
+// 对账只动本次扫描所属来源的条目 (外部导入↔import, 开始菜单↔lnk, 各管各的,
+// 不做跨来源迁移 — exe 仍在 Z: 的失效 lnk 条目由下次 scanZExes 以 import 重新入库)
 export interface ScanMarks {
   added: number;
   classified: number;
+  removed: number;
 }
 
 // 内建工具条目描述 (ArkTS 要求显式类型, 不用匿名对象字面量)
@@ -239,30 +243,18 @@ export class AppLibraryService {
     this.fillIcon(path);
   }
 
-  // 扫描类入口的批量落库: 一次 concat/sort/persist/notify。
-  // 逐条 addNamed 会让 persist (整组 JSON flush) 与 notify (整页重渲染)
-  // 各跑 N 遍 — 200 条目是 4 万次级写放大, UI 明显抖动
-  private addBulk(fresh: AppEntry[]): void {
-    if (fresh.length == 0) {
-      return;
-    }
-    this.entries = this.entries.concat(fresh);
-    this.sortEntries();
-    this.persist();
-    this.notify();
-    for (const e of fresh) {
-      this.fillIcon(e.path);
-    }
-  }
-
   // 扫描 Start Menu / Desktop 的 .lnk 入库 (M3, 手动触发; 异步 IO 不卡 UI)。
   // 已在库的非内建条目被命中时 source 升级为 'lnk' (该 exe 确有开始菜单
-  // 快捷方式, 属事实性归类; 用户手动 import 的同路径条目也照此处理)
+  // 快捷方式, 属事实性归类; 用户手动 import 的同路径条目也照此处理)。
+  // 对账: source 为 'lnk' 但本次不再被任何快捷方式命中的条目直接移除 —
+  // .lnk 被删 (程序卸载/快捷方式删除), 或指向的 exe 已删 (LnkScanner 解析
+  // 不出目标, 不进 found) 都会落到这里。与外部导入各管各的: 若 exe 文件
+  // 仍在 Z:, 下次 scanZExes 会以 import 重新入库, 这里不做跨来源迁移。
   async scanShortcuts(): Promise<ScanMarks> {
     this.beginScan('正在扫描开始菜单…');
     try {
       const found: LnkTarget[] = await LnkScanner.getInstance().scan(WINE_PREFIX, WineEnvService.getInstance().zHome);
-      const marks: ScanMarks = { added: 0, classified: 0 };
+      const marks: ScanMarks = { added: 0, classified: 0, removed: 0 };
       const fresh: AppEntry[] = [];
       const upgraded: string[] = [];
       for (const t of found) {
@@ -280,16 +272,34 @@ export class AppLibraryService {
           marks.classified++;
         }
       }
-      if (upgraded.length > 0) {
-        this.entries = this.entries.map((e: AppEntry): AppEntry =>
-          upgraded.indexOf(e.path) >= 0 ? this.withField(e, { source: 'lnk' }) : e);
-        // fresh 为空时 addBulk 不会跑, 归类变更要自行落库/通知
-        if (fresh.length == 0) {
-          this.persist();
-          this.notify();
+      // 对账移除: 只在本次命中集合之外且来源为 lnk 的条目上操作。
+      // upgraded 条目的 source 此刻还是原值 (import), 不会误入移除
+      const foundTargets = new Set(found.map((t: LnkTarget) => t.target));
+      this.entries = this.entries.filter((e: AppEntry) => {
+        if (this.sourceOf(e) == 'lnk' && !foundTargets.has(e.path)) {
+          marks.removed++;
+          return false;
         }
+        return true;
+      });
+      // 新增 + 归类升级 + 对账移除 → 统一一次 sort/persist/notify
+      // (逐条操作会让整组 JSON flush 与整页重渲染各跑 N 遍, 200 条目
+      // 是 4 万次级写放大, UI 明显抖动)
+      if (fresh.length > 0 || upgraded.length > 0 || marks.removed > 0) {
+        if (upgraded.length > 0) {
+          this.entries = this.entries.map((e: AppEntry): AppEntry =>
+            upgraded.indexOf(e.path) >= 0 ? this.withField(e, { source: 'lnk' }) : e);
+        }
+        if (fresh.length > 0) {
+          this.entries = this.entries.concat(fresh);
+        }
+        this.sortEntries();
+        this.persist();
+        this.notify();
       }
-      this.addBulk(fresh);
+      for (const e of fresh) {
+        this.fillIcon(e.path);
+      }
       return marks;
     } finally {
       this.endScan();
@@ -298,25 +308,51 @@ export class AppLibraryService {
 
   // 扫描 Z: (zHome 下载目录) 下的 .exe 入库为"外部导入" (手动触发; 异步 IO)。
   // 递归遍历, 跳过 . 开头目录; 深度/总量设上限 (SCAN_MAX_DEPTH/SCAN_MAX_EXE)
-  // 防病态目录树拖住扫描。已在库 (含隐藏) 的跳过, 返回新增数量
-  async scanZExes(): Promise<number> {
+  // 防病态目录树拖住扫描。已在库 (含隐藏) 的跳过。
+  // 对账: source 为 'import' 且文件已不存在的条目移除。found 集合受扫描上限
+  // 截断影响 (超深/超量漏扫), 未命中但文件仍在的不删 — 叠加 fileExists 双保险;
+  // 收藏/隐藏的失效条目也一律移除 (文件没了启动必败)。只动 import 来源,
+  // lnk 条目由 scanShortcuts 对账, 各管各的 (exe 仍在 Z: 的失效 lnk 条目
+  // 会在下次 scanShortcuts 移除后由本扫描以 import 重新入库)
+  async scanZExes(): Promise<ScanMarks> {
     const zHome = WineEnvService.getInstance().zHome;
     if (!zHome) {
-      return 0;
+      return { added: 0, classified: 0, removed: 0 };
     }
     this.beginScan('正在扫描 Z: 目录…');
     try {
       const root = zHome.endsWith('/') ? zHome.substring(0, zHome.length - 1) : zHome;
       const found: string[] = [];
       await this.collectExe(root, 0, found);
+      // 对账移除 (先于新增判断, 保证下方 has() 反映移除后的库)
+      const foundSet = new Set(found);
+      let removed = 0;
+      this.entries = this.entries.filter((e: AppEntry) => {
+        if (this.sourceOf(e) == 'import' && !foundSet.has(e.path) && !this.fileExists(e.path)) {
+          removed++;
+          return false;
+        }
+        return true;
+      });
       const fresh: AppEntry[] = [];
       for (const p of found) {
         if (!this.has(p)) {
           fresh.push({ path: p, name: this.exeNameOf(p), source: 'import' });
         }
       }
-      this.addBulk(fresh);
-      return fresh.length;
+      // 新增 + 对账移除 → 统一一次 sort/persist/notify
+      if (fresh.length > 0 || removed > 0) {
+        if (fresh.length > 0) {
+          this.entries = this.entries.concat(fresh);
+        }
+        this.sortEntries();
+        this.persist();
+        this.notify();
+      }
+      for (const e of fresh) {
+        this.fillIcon(e.path);
+      }
+      return { added: fresh.length, classified: 0, removed: removed };
     } finally {
       this.endScan();
     }
