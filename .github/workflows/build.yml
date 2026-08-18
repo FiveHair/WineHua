@@ -253,8 +253,13 @@ jobs:
           import zipfile
 
           hap_path = os.environ["HAP_PATH"]
+          # manifest schemaVersion 2 同时登记 legacy 与 modern-2.6 两个 profile,
+          # 各自的 DLL 需与对应 submodule 的 HEAD 一致.
           expected_commit = subprocess.check_output(
               ["git", "-C", "thirdparty/dxvk", "rev-parse", "HEAD"], text=True
+          ).strip()
+          expected_modern_commit = subprocess.check_output(
+              ["git", "-C", "thirdparty/dxvk-modern", "rev-parse", "HEAD"], text=True
           ).strip()
 
           with zipfile.ZipFile(hap_path) as hap:
@@ -268,19 +273,48 @@ jobs:
               runtime_manifest["payloadSha256"], payload_sha
           )
 
-          required = {
-              "dxvk/legacy/x64/d3d11.dll": 0x8664,
-              "dxvk/legacy/x64/dxgi.dll": 0x8664,
-              "dxvk/legacy/x86/d3d11.dll": 0x014C,
-              "dxvk/legacy/x86/dxgi.dll": 0x014C,
-          }
+          # schemaVersion 1: 单 legacy profile (master/main-ui 现状)
+          # schemaVersion 2: defaultProfile + runtimes.{legacy,modern-2.6} 双 profile
+          # 两套格式的 DLL 都打包在 dxvk/legacy 与 dxvk/modern-2.6 下, 统一校验.
           with zipfile.ZipFile(io.BytesIO(payload)) as wine_data:
               dxvk_manifest = json.loads(wine_data.read("dxvk/manifest.json"))
-              assert dxvk_manifest["profile"] == "legacy"
-              assert dxvk_manifest["version"] == "1.10.3"
-              assert dxvk_manifest["commit"] == expected_commit, (
-                  dxvk_manifest["commit"], expected_commit
-              )
+              schema_version = dxvk_manifest.get("schemaVersion", 1)
+              if schema_version == 1:
+                  assert dxvk_manifest["profile"] == "legacy"
+                  assert dxvk_manifest["version"] == "1.10.3"
+                  assert dxvk_manifest["commit"] == expected_commit, (
+                      dxvk_manifest["commit"], expected_commit
+                  )
+              else:
+                  assert schema_version == 2, (
+                      "unexpected dxvk manifest schemaVersion", schema_version
+                  )
+                  assert dxvk_manifest["defaultProfile"] == "legacy"
+                  legacy = dxvk_manifest["runtimes"]["legacy"]
+                  modern = dxvk_manifest["runtimes"]["modern-2.6"]
+                  assert legacy["version"] == "1.10.3"
+                  assert legacy["commit"] == expected_commit, (
+                      legacy["commit"], expected_commit
+                  )
+                  assert modern["version"] == "2.6.2"
+                  assert modern["commit"] == expected_modern_commit, (
+                      modern["commit"], expected_modern_commit
+                  )
+
+              required = {
+                  "dxvk/legacy/x64/d3d11.dll": 0x8664,
+                  "dxvk/legacy/x64/dxgi.dll": 0x8664,
+                  "dxvk/legacy/x86/d3d11.dll": 0x014C,
+                  "dxvk/legacy/x86/dxgi.dll": 0x014C,
+              }
+              # schemaVersion 2 额外打包 modern-2.6 profile, DLL 一并校验
+              if schema_version == 2:
+                  required.update({
+                      "dxvk/modern-2.6/x64/d3d11.dll": 0x8664,
+                      "dxvk/modern-2.6/x64/dxgi.dll": 0x8664,
+                      "dxvk/modern-2.6/x86/d3d11.dll": 0x014C,
+                      "dxvk/modern-2.6/x86/dxgi.dll": 0x014C,
+                  })
               for name, expected_machine in required.items():
                   image = wine_data.read(name)
                   assert len(image) > 4096, (name, len(image))
@@ -308,7 +342,8 @@ jobs:
                   assert image, name
                   print(f"[vulkan] {name}: size={len(image)}")
 
-          print(f"[dxvk] commit={expected_commit}")
+          print(f"[dxvk] legacy commit={expected_commit}")
+          print(f"[dxvk] modern commit={expected_modern_commit}")
           print(f"[dxvk] wine-data.zip sha256={payload_sha}")
           PY
 
