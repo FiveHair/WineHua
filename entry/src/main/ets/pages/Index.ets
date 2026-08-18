@@ -23,6 +23,16 @@ interface Vkd3dSmokeJson {
   fps?: number;
 }
 
+interface WineProcessHandle {
+  found: boolean;
+  pid: number;
+  status: string;
+  startTimestamp: number;
+  endTimestamp: number;
+  exitCode: number | null;
+  exitCodeSource: string;
+}
+
 @Entry
 @Component
 struct Index {
@@ -473,7 +483,7 @@ struct Index {
       dxvkBackend: this.dxvkBackend,
       presentBackend: 'venus_broker_present',
       automationMode: false
-    });
+    }) as WineProcessHandle;
     this.manualVkd3dSmokePid = result.pid;
     if (result.pid <= 0) {
       this.vkd3dSmokePhase = 'fail';
