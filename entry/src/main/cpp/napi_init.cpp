@@ -13,6 +13,7 @@
 #include "wine_launch.h"
 #include "wine_exe.h"
 #include "host_vulkan_probe.h"
+#include "host_native_window_probe.h"
 #include "experiment_payload.h"
 #include "phone_adapter/phone_adapter.h"
 #include "text_input.h"
@@ -568,6 +569,35 @@ static napi_value RunHostVulkanProbe(napi_env env, napi_callback_info info) {
 
 static napi_value StopHostVulkanProbeNapi(napi_env env, napi_callback_info) {
     StopHostVulkanProbe();
+    napi_value result;
+    napi_get_boolean(env, true, &result);
+    return result;
+}
+
+static napi_value RunHostNativeWindowProbe(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    uint64_t surfaceId = 0;
+    bool lossless = false;
+    char runId[128] = {};
+    if (argc < 2 ||
+        napi_get_value_bigint_uint64(env, args[0], &surfaceId, &lossless) != napi_ok || !lossless ||
+        napi_get_value_string_utf8(env, args[1], runId, sizeof(runId), nullptr) != napi_ok) {
+        napi_value result;
+        napi_get_boolean(env, false, &result);
+        return result;
+    }
+    bool started = StartHostNativeWindowProbe(surfaceId, runId);
+    OH_LOG_INFO(LOG_APP, "[HostNativeWindow] start surface=%{public}llu run=%{public}s result=%{public}s",
+                static_cast<unsigned long long>(surfaceId), runId, started ? "true" : "false");
+    napi_value result;
+    napi_get_boolean(env, started, &result);
+    return result;
+}
+
+static napi_value StopHostNativeWindowProbeNapi(napi_env env, napi_callback_info) {
+    StopHostNativeWindowProbe();
     napi_value result;
     napi_get_boolean(env, true, &result);
     return result;
@@ -1157,6 +1187,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"stageExperimentPayload", nullptr, StageExperimentPayloadNapi, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"runHostVulkanProbe", nullptr, RunHostVulkanProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopHostVulkanProbe", nullptr, StopHostVulkanProbeNapi, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"runHostNativeWindowProbe", nullptr, RunHostNativeWindowProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopHostNativeWindowProbe", nullptr, StopHostNativeWindowProbeNapi, nullptr, nullptr, nullptr, napi_default, nullptr},
         // surfaceId 驱动的渲染器管理 (XComponentController 回调)
         {"createRenderer",  nullptr, CreateRenderer,  nullptr, nullptr, nullptr, napi_default, nullptr},
         {"resizeRenderer",  nullptr, ResizeRenderer,  nullptr, nullptr, nullptr, napi_default, nullptr},

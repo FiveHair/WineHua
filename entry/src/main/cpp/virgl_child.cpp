@@ -44,6 +44,7 @@ using WinehuaVtestPresentCallback = int (*)(
     uint64_t* nextPresentDeadlineNs, void* userData);
 using WinehuaVtestSetPresentCallback = void (*)(
     WinehuaVtestPresentCallback callback, void* userData);
+using WinehuaVtestSetColorRemap = void (*)(uint32_t srcTex, uint32_t dstTex);
 using WinehuaVtestReleaseQueueCallback = void (*)(void* queueSyncData);
 using WinehuaVtestVulkanPresentCallback = int (*)(
     uint32_t contextId, uintptr_t instance, uintptr_t physicalDevice,
@@ -309,6 +310,7 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "VKR_WINEHUA_SHADOW_COVER_UPLOAD" ||
            key == "WINEHUA_VENUS_PRESENT_MODE" ||
            key == "WINEHUA_VKR_FREEZE_BOOL_SPEC" ||
+           key == "WINEHUA_DIRECT_NATIVEWINDOW" ||
            key == "EGL_PLATFORM";
 }
 
@@ -710,6 +712,10 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     else
         OH_LOG_WARN(LOG_APP, "[virgl-child] present callback registration missing: %{public}s",
                     dlerror());
+
+    auto setColorRemap = reinterpret_cast<WinehuaVtestSetColorRemap>(
+        dlsym(handle, "winehua_vtest_set_color_remap"));
+    winehua::SetVirglColorRemapFn(setColorRemap);
 
     setVulkanPresentCallback = reinterpret_cast<WinehuaVtestSetVulkanPresentCallback>(
         dlsym(handle, "winehua_vtest_set_vulkan_present_callback"));

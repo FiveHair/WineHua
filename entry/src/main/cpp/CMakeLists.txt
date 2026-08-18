@@ -32,6 +32,8 @@ add_library(entry SHARED
     wine_launch.cpp
     wine_exe.cpp
     host_vulkan_probe.cpp
+    host_native_window_probe.cpp
+    native_window_direct.cpp
     broker.cpp
     ncp_dispatch.cpp
     perf_utils.cpp
@@ -70,6 +72,7 @@ target_link_libraries(entry PUBLIC
     libace_napi.z.so
     libace_ndk.z.so
     libnative_window.so
+    libnative_buffer.so
     libnative_image.so
     libnative_vsync.so
     libEGL.so
@@ -92,6 +95,7 @@ add_library(virgl_child SHARED
     virgl_host_config.cpp
     virgl_surface_presenter.cpp
     venus_surface_presenter.cpp
+    native_window_direct.cpp
     phone_adapter/phone_virgl_dispatch.cpp
 )
 target_link_libraries(virgl_child PUBLIC
@@ -99,6 +103,7 @@ target_link_libraries(virgl_child PUBLIC
     libGLESv3.so
     libvulkan.so
     libnative_window.so
+    libnative_buffer.so
     libhilog_ndk.z.so
     libchild_process.so
     libipc_capi.so

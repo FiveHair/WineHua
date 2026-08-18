@@ -2,6 +2,7 @@
 
 #include "venus_surface_presenter.h"
 #include "native_window_lease.h"
+#include "native_window_direct.h"
 
 #include <hilog/log.h>
 #include <native_buffer/native_buffer.h>
@@ -357,6 +358,136 @@ struct VenusSurfaceQueueTarget::Impl {
         if (result == VK_TIMEOUT) return 1;
         if (result != VK_SUCCESS) return FailLocked("wait fence", result, serial);
         TracePresentStage("source-fence-ready", serial, image);
+
+        if (DirectNativeWindowEnabled()) {
+            if (!vkDirect_.BeginFrame()) {
+                ++throttled_;
+                return 1;
+            }
+            if (!vkDirect_.AcquireGpu(frame.acquired, VK_NULL_HANDLE)) {
+                ++throttled_;
+                return 1;
+            }
+            const VkImage targetImage = vkDirect_.ColorImage();
+            const VkFormat targetFormat = vkDirect_.ColorFormat();
+            const bool blit = sourceFormat != targetFormat ||
+                width != vkDirect_.Width() || height != vkDirect_.Height();
+            vkResetFences(device_, 1, &frame.complete);
+            vkResetCommandBuffer(frame.command, 0);
+            VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            result = vkBeginCommandBuffer(frame.command, &begin);
+            if (result != VK_SUCCESS) {
+                vkDirect_.AbortFrame();
+                return FailLocked("begin command", result, serial);
+            }
+
+            VkImageMemoryBarrier sourceToTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            sourceToTransfer.srcAccessMask = SourceAccess(sourceLayout);
+            sourceToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            sourceToTransfer.oldLayout = sourceLayout;
+            sourceToTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            sourceToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            sourceToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            sourceToTransfer.image = sourceImage;
+            sourceToTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            sourceToTransfer.subresourceRange.levelCount = 1;
+            sourceToTransfer.subresourceRange.layerCount = 1;
+            VkImageMemoryBarrier targetToTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            targetToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            targetToTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            targetToTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            targetToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            targetToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            targetToTransfer.image = targetImage;
+            targetToTransfer.subresourceRange = sourceToTransfer.subresourceRange;
+            const std::array<VkImageMemoryBarrier, 2> before = {
+                sourceToTransfer, targetToTransfer};
+            vkCmdPipelineBarrier(frame.command, SourceStage(sourceLayout) |
+                                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+                                 2, before.data());
+            if (blit) {
+                VkImageBlit blitRegion{};
+                blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                blitRegion.srcSubresource.layerCount = 1;
+                blitRegion.srcOffsets[1] = {
+                    static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
+                blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                blitRegion.dstSubresource.layerCount = 1;
+                blitRegion.dstOffsets[1] = {
+                    static_cast<int32_t>(vkDirect_.Width()),
+                    static_cast<int32_t>(vkDirect_.Height()), 1};
+                vkCmdBlitImage(frame.command, sourceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               targetImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               1, &blitRegion, VK_FILTER_NEAREST);
+            } else {
+                VkImageCopy copy{};
+                copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                copy.srcSubresource.layerCount = 1;
+                copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                copy.dstSubresource.layerCount = 1;
+                copy.extent = {width, height, 1};
+                vkCmdCopyImage(frame.command, sourceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               targetImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            }
+            vkDirect_.Timeline().AddGpuCopy();
+            VkImageMemoryBarrier sourceRestore{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            sourceRestore.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            sourceRestore.dstAccessMask = SourceAccess(sourceLayout);
+            sourceRestore.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            sourceRestore.newLayout = sourceLayout;
+            sourceRestore.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            sourceRestore.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            sourceRestore.image = sourceImage;
+            sourceRestore.subresourceRange = sourceToTransfer.subresourceRange;
+            VkImageMemoryBarrier targetToScanout{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            targetToScanout.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            targetToScanout.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+            targetToScanout.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            targetToScanout.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            targetToScanout.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            targetToScanout.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            targetToScanout.image = targetImage;
+            targetToScanout.subresourceRange = targetToTransfer.subresourceRange;
+            const std::array<VkImageMemoryBarrier, 2> after = {
+                sourceRestore, targetToScanout};
+            vkCmdPipelineBarrier(frame.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                                 nullptr, 2, after.data());
+            result = vkEndCommandBuffer(frame.command);
+            if (result != VK_SUCCESS) {
+                vkDirect_.AbortFrame();
+                return FailLocked("end command", result, serial);
+            }
+            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submit.waitSemaphoreCount = 1;
+            submit.pWaitSemaphores = &frame.acquired;
+            submit.pWaitDstStageMask = &waitStage;
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &frame.command;
+            submit.signalSemaphoreCount = 1;
+            submit.pSignalSemaphores = &renderFinished_[0];
+            result = vkQueueSubmit(queue_, 1, &submit, frame.complete);
+            if (result != VK_SUCCESS) {
+                vkDirect_.AbortFrame();
+                return FailLocked("queue submit", result, serial);
+            }
+            if (releaseQueue) releaseQueue(queueSyncData);
+            const int fenceFd = vkDirect_.SignalRelease(queue_, 1, &renderFinished_[0]);
+            if (!vkDirect_.EndFrame(fenceFd)) {
+                return FailLocked("flush buffer", VK_ERROR_UNKNOWN, serial);
+            }
+            lastPresentNs_ = NowNs();
+            ++framesPresented_;
+            if (framesPresented_ == 1 || framesPresented_ % 120 == 0)
+                OH_LOG_INFO(LOG_APP, "%{public}s",
+                            vkDirect_.Timeline().Format("VENUS-DIRECT", serial).c_str());
+            if (nextPresentDeadlineNs)
+                *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
+            return 0;
+        }
 
         uint32_t imageIndex = 0;
         stageStartNs = NowNs();
@@ -788,7 +919,11 @@ private:
             device_ == device && queue_ == queue && queueFamily_ == queueFamily &&
             sourceWidth_ == width && sourceHeight_ == height &&
             sourceFormat_ == sourceFormat;
-        if (swapchain_ && sameSource && !swapchainDirty_) return true;
+        if (DirectNativeWindowEnabled()) {
+            if (commandPool_ && sameSource) return true;
+        } else if (swapchain_ && sameSource && !swapchainDirty_) {
+            return true;
+        }
 
         /* A WSI error can leave the platform present queue waiting forever.
          * The dirty path has already waited for the per-frame fence and has
@@ -819,6 +954,63 @@ private:
             static_cast<uint64_t>(NATIVEBUFFER_USAGE_HW_RENDER |
                                   NATIVEBUFFER_USAGE_HW_TEXTURE));
         OH_NativeWindow_NativeWindowHandleOpt(windowLease_.Get(), SET_TIMEOUT, 0);
+
+        if (DirectNativeWindowEnabled()) {
+            VkResult result = VK_SUCCESS;
+            extent_ = {width, height};
+            targetFormat_ = sourceFormat_;
+            useBlit_ = false;
+            canBlit_ = true;
+            if (!vkDirect_.Configure(windowLease_.Get(), width, height,
+                                     physicalDevice_, device_)) {
+                error = -ENOTSUP;
+                return false;
+            }
+            VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+            poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+            poolInfo.queueFamilyIndex = queueFamily_;
+            result = vkCreateCommandPool(device_, &poolInfo, nullptr, &commandPool_);
+            if (result != VK_SUCCESS) {
+                error = -EIO;
+                return false;
+            }
+            frames_.resize(3);
+            std::vector<VkCommandBuffer> commands(frames_.size());
+            VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            allocate.commandPool = commandPool_;
+            allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocate.commandBufferCount = static_cast<uint32_t>(commands.size());
+            result = vkAllocateCommandBuffers(device_, &allocate, commands.data());
+            if (result != VK_SUCCESS) {
+                error = -ENOMEM;
+                return false;
+            }
+            VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+            VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+            for (size_t i = 0; i < frames_.size(); ++i) {
+                frames_[i].command = commands[i];
+                if (vkCreateSemaphore(device_, &semaphoreInfo, nullptr,
+                                      &frames_[i].acquired) != VK_SUCCESS ||
+                    vkCreateFence(device_, &fenceInfo, nullptr,
+                                  &frames_[i].complete) != VK_SUCCESS) {
+                    error = -ENOMEM;
+                    return false;
+                }
+            }
+            renderFinished_.resize(frames_.size(), VK_NULL_HANDLE);
+            for (VkSemaphore& semaphore : renderFinished_) {
+                if (vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &semaphore) !=
+                    VK_SUCCESS) {
+                    error = -ENOMEM;
+                    return false;
+                }
+            }
+            OH_LOG_INFO(LOG_APP,
+                        "[VENUS-DIRECT][NCP] NativeBuffer present target %ux%u",
+                        width, height);
+            return true;
+        }
 
         VkSurfaceCreateInfoOHOS surfaceInfo{VK_STRUCTURE_TYPE_SURFACE_CREATE_INFO_OHOS};
         surfaceInfo.window = windowLease_.Get();
@@ -1095,6 +1287,7 @@ private:
                 if (semaphore) vkDestroySemaphore(device_, semaphore, nullptr);
             }
             if (commandPool_) vkDestroyCommandPool(device_, commandPool_, nullptr);
+            vkDirect_.Reset();
             if (swapchain_) {
                 OH_LOG_INFO(LOG_APP, "[VENUS-PRESENT][NCP] destroy swapchain begin key=%{public}llu",
                             static_cast<unsigned long long>(surfaceKey_));
@@ -1166,6 +1359,7 @@ private:
 
     std::mutex mutex_;
     NativeWindowLease windowLease_;
+    NativeWindowVkTarget vkDirect_;
     uint64_t surfaceKey_ = 0;
     uint32_t contextId_ = 0;
     bool surfaceAttached_ = false;

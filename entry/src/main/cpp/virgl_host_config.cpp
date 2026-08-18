@@ -1,6 +1,8 @@
 #include "virgl_host_config.h"
+#include "native_window_direct.h"
 
 #include <array>
+#include <cstdlib>
 
 namespace winehua {
 namespace {
@@ -146,7 +148,10 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     AppendEnv(params, "LD_LIBRARY_PATH", config.libraryPath);
     AppendEnv(params, "VTEST_USE_GLES", "1");
     AppendEnv(params, "VTEST_USE_EGL_SURFACELESS", "1");
-    AppendEnv(params, "VTEST_SYNC_GL_FINISH", "1");
+    AppendEnv(params, "WINEHUA_DIRECT_NATIVEWINDOW",
+              DirectNativeWindowEnabled() ? "1" : "0");
+    AppendEnv(params, "VTEST_SYNC_GL_FINISH",
+              DirectNativeWindowEnabled() ? "0" : "1");
     AppendEnv(params, "WINEHUA_VIRGL_SYNC_MODE", config.syncMode);
     AppendEnv(params, "WINEHUA_VIRGL_LOG_PATH", config.logPath);
     AppendEnv(params, "WINEHUA_VKD3D_GATE_C_TRACE", gateCTrace ? "1" : "0");

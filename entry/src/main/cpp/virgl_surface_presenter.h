@@ -38,5 +38,6 @@ int FinishVenusDeviceRelease(uint32_t contextId, uintptr_t device,
                              int32_t waitResult);
 virgl_ipc::SurfaceQueryReply QueryVirglSurfaces();
 void ResetVirglSurfaces();
+void SetVirglColorRemapFn(void (*fn)(uint32_t, uint32_t));
 
 } // namespace winehua

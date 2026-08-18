@@ -1,6 +1,7 @@
 #include "virgl_surface_presenter.h"
 #include "venus_surface_presenter.h"
 #include "native_window_lease.h"
+#include "native_window_direct.h"
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -61,6 +62,8 @@ bool PresentPerfSummaryEnabled()
     const char* summary = std::getenv("WINEHUA_VTEST_PRESENT_PERF_SUMMARY");
     return summary && summary[0] == '1' && !summary[1];
 }
+
+void (*gColorRemapFn)(uint32_t, uint32_t) = nullptr;
 
 GLuint CompilePresentShader(GLenum type, const char* source)
 {
@@ -163,6 +166,11 @@ public:
             return 1;
         }
         lastPresentNs_ = nowNs;
+        if (winehua::DirectNativeWindowEnabled())
+            return PresentDirectLocked(texture, width, height, serial,
+                                       sourceDisplay, sourceContext,
+                                       sourceDraw, sourceRead,
+                                       nextPresentDeadlineNs);
         sourceReady = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         if (!sourceReady) return -7;
         glFlush();
@@ -381,8 +389,148 @@ void main() { outColor = texture(uTexture, vTexCoord); }
         return true;
     }
 
+    int PresentDirectLocked(GLuint texture, uint32_t width, uint32_t height,
+                            uint32_t serial, EGLDisplay sourceDisplay,
+                            EGLContext sourceContext, EGLSurface sourceDraw,
+                            EGLSurface sourceRead, uint64_t* nextPresentDeadlineNs)
+    {
+        if (!direct_.Configure(windowLease_.Get(), width, height)) {
+            ++failures_;
+            return -4;
+        }
+        const bool skipBlit = holdingScanout_ && scanoutSrcTex_ == texture;
+        GLsync sourceReady = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (!sourceReady) return -7;
+        glFlush();
+        if (skipBlit) {
+            glDeleteSync(sourceReady);
+            const int fenceFd = direct_.CreateNativeFenceFd();
+            if (!direct_.EndFrame(fenceFd)) {
+                ++failures_;
+                holdingScanout_ = false;
+                if (gColorRemapFn) gColorRemapFn(0, 0);
+                return -6;
+            }
+            direct_.Timeline().AddSkippedCopy();
+            holdingScanout_ = false;
+        } else {
+            if (!direct_.BeginFrame()) {
+                glDeleteSync(sourceReady);
+                ++failures_;
+                return -4;
+            }
+            glWaitSync(sourceReady, 0, GL_TIMEOUT_IGNORED);
+            glDeleteSync(sourceReady);
+            if (!EnsureBlitProgramLocked(width, height)) {
+                direct_.AbortFrame();
+                ++failures_;
+                return -4;
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, direct_.Framebuffer());
+            glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+            glDisable(GL_BLEND);
+            glDisable(GL_DEPTH_TEST);
+            glUseProgram(program_);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glBindSampler(0, sampler_);
+            glUniform1i(textureLocation_, 0);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            direct_.Timeline().AddGpuCopy();
+            const int fenceFd = direct_.CreateNativeFenceFd();
+            if (!direct_.EndFrame(fenceFd)) {
+                ++failures_;
+                return -6;
+            }
+        }
+
+        if (direct_.BeginFrame()) {
+            scanoutSrcTex_ = texture;
+            holdingScanout_ = true;
+            if (gColorRemapFn)
+                gColorRemapFn(texture, direct_.ColorTexture());
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        } else {
+            holdingScanout_ = false;
+            scanoutSrcTex_ = 0;
+            if (gColorRemapFn) gColorRemapFn(0, 0);
+        }
+
+        eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+        ++frames_;
+        width_ = width;
+        height_ = height;
+        if (nextPresentDeadlineNs)
+            *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
+        if (frames_ == 1 || frames_ % 120 == 0)
+            OH_LOG_INFO(LOG_APP, "%{public}s",
+                        direct_.Timeline().Format("VIRGL-DIRECT", serial).c_str());
+        return 0;
+    }
+
+    bool EnsureBlitProgramLocked(uint32_t width, uint32_t height)
+    {
+        if (program_ && sampler_ && width_ == width && height_ == height) return true;
+        static constexpr const char* vertexSource = R"(#version 300 es
+out vec2 vTexCoord;
+void main() {
+    vec2 positions[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+    vec2 texcoords[3] = vec2[3](vec2(0.0, 0.0), vec2(2.0, 0.0), vec2(0.0, 2.0));
+    gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+    vTexCoord = texcoords[gl_VertexID];
+})";
+        static constexpr const char* fragmentSource = R"(#version 300 es
+precision mediump float;
+uniform sampler2D uTexture;
+in vec2 vTexCoord;
+out vec4 outColor;
+void main() { outColor = texture(uTexture, vTexCoord); }
+)";
+        const GLuint vertex = CompilePresentShader(GL_VERTEX_SHADER, vertexSource);
+        const GLuint fragment = CompilePresentShader(GL_FRAGMENT_SHADER, fragmentSource);
+        GLuint program = 0;
+        if (vertex && fragment) {
+            program = glCreateProgram();
+            glAttachShader(program, vertex);
+            glAttachShader(program, fragment);
+            glLinkProgram(program);
+            GLint linked = GL_FALSE;
+            glGetProgramiv(program, GL_LINK_STATUS, &linked);
+            if (linked != GL_TRUE) {
+                glDeleteProgram(program);
+                program = 0;
+            }
+        }
+        if (vertex) glDeleteShader(vertex);
+        if (fragment) glDeleteShader(fragment);
+        if (!program) return false;
+        if (program_) glDeleteProgram(program_);
+        if (sampler_) glDeleteSamplers(1, &sampler_);
+        program_ = program;
+        glGenSamplers(1, &sampler_);
+        glSamplerParameteri(sampler_, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glSamplerParameteri(sampler_, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glSamplerParameteri(sampler_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glSamplerParameteri(sampler_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        textureLocation_ = glGetUniformLocation(program_, "uTexture");
+        width_ = width;
+        height_ = height;
+        return true;
+    }
+
     void ResetGlLocked()
     {
+        if (gColorRemapFn) gColorRemapFn(0, 0);
+        holdingScanout_ = false;
+        scanoutSrcTex_ = 0;
+        if (program_ || sampler_) {
+            if (sampler_) glDeleteSamplers(1, &sampler_);
+            if (program_) glDeleteProgram(program_);
+            program_ = 0;
+            sampler_ = 0;
+            textureLocation_ = -1;
+        }
+        direct_.Reset();
         if (display_ != EGL_NO_DISPLAY)
         {
             const EGLDisplay previousDisplay = eglGetCurrentDisplay();
@@ -428,6 +576,9 @@ void main() { outColor = texture(uTexture, vTexCoord); }
 
     std::mutex mutex_;
     winehua::NativeWindowLease windowLease_;
+    winehua::NativeWindowGlesTarget direct_;
+    bool holdingScanout_ = false;
+    GLuint scanoutSrcTex_ = 0;
     uint64_t surfaceKey_ = 0;
     EGLDisplay display_ = EGL_NO_DISPLAY;
     EGLContext context_ = EGL_NO_CONTEXT;
@@ -828,6 +979,11 @@ virgl_ipc::SurfaceQueryReply QueryVirglSurfaces()
 void ResetVirglSurfaces()
 {
     g_presenters.Reset();
+}
+
+void SetVirglColorRemapFn(void (*fn)(uint32_t, uint32_t))
+{
+    gColorRemapFn = fn;
 }
 
 } // namespace winehua

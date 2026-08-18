@@ -63,6 +63,8 @@ export const stageExperimentPayload: (experimentId: string, names: string[], has
   prefixMode: string, sourceUrl?: string) => boolean;
 export const runHostVulkanProbe: (surfaceId: bigint, runId: string) => boolean;
 export const stopHostVulkanProbe: () => boolean;
+export const runHostNativeWindowProbe: (surfaceId: bigint, runId: string) => boolean;
+export const stopHostNativeWindowProbe: () => boolean;
 export const setOutputSize: (w: number, h: number) => void;
 export const setDisplayScale: (scale: number) => void;
 export const setDesktopMode: (enabled: boolean) => void;

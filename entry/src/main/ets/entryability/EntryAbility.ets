@@ -222,7 +222,9 @@ export default class EntryAbility extends UIAbility {
       'shadow-precise-cpu-upload']
       .indexOf(requestedPerfProfile) >= 0 ? requestedPerfProfile : 'baseline';
     this.contentPage = mode === 'smoke' && suite === 'host-vulkan' ?
-      'pages/HostVulkanSmoke' : 'pages/Index';
+      'pages/HostVulkanSmoke' :
+      (mode === 'smoke' && suite === 'host-native-window' ?
+        'pages/HostNativeWindowSmoke' : 'pages/Index');
     const request = JSON.stringify({
       mode: mode,
       runId: value('winehua.run_id', `${Date.now()}`),

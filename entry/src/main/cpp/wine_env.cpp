@@ -7,6 +7,7 @@
 
 #include <unistd.h>
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -135,6 +136,13 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
     return env;
 }
 
+static bool DirectNativeWindowEnvEnabled()
+{
+    const char* value = std::getenv("WINEHUA_DIRECT_NATIVEWINDOW");
+    if (!value || !value[0]) return true;
+    return value[0] != '0';
+}
+
 void UpsertEnvLine(std::vector<std::string>& env, const std::string& line)
 {
     const size_t sep = line.find('=');
@@ -252,6 +260,11 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
             "WINEDLLDIR5=" + binDir,
         };
         for (const std::string& line : managed) UpsertEnvLine(env, line);
+        /* DX12 present reuses the Venus NativeBuffer+fence target.
+         * Upload stays Guest Push Dirty / shadow-precise. Skip wait_all only
+         * when host Present no longer CPU-drains the WSI release fence. */
+        if (DirectNativeWindowEnvEnabled())
+            UpsertEnvLine(env, "VN_WINEHUA_PRESENT_ROUNDTRIP_ONLY=1");
         if (!modern26)
         {
             const std::vector<std::string> legacyCompatibility = {
@@ -358,6 +371,8 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "WINEDLLDIR4=" + binDir,
     };
     for (const std::string& line : managed) UpsertEnvLine(env, line);
+    if (DirectNativeWindowEnvEnabled())
+        UpsertEnvLine(env, "VN_WINEHUA_PRESENT_ROUNDTRIP_ONLY=1");
     if (!legacy) return;
 
     const std::vector<std::string> legacyCompatibility = {
