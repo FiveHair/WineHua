@@ -70,6 +70,25 @@ assemble_pad() {
         _pick_lib_pad "libxkbregistry.so.0.0.0"      "libxkbregistry.so.0"
         _pick_lib_pad "libxml2.so.2.12.0"            "libxml2.so.2"
         _pick_lib_pad "libffi.so.8.1.4"              "libffi.so.8"
+        # GnuTLS 链 (schannel TLS 后端)
+        _pick_lib_pad "libgnutls.so.30.37.1"         "libgnutls.so.30"   "libgnutls.so"
+        _pick_lib_pad "libnettle.so.8.11"            "libnettle.so.8"
+        _pick_lib_pad "libhogweed.so.6.11"           "libhogweed.so.6"
+        _pick_lib_pad "libgmp.so.10.4.1"             "libgmp.so.10"
+        _pick_lib_pad "libtasn1.so.6.6.4"            "libtasn1.so.6"
+        _pick_lib_pad "libunistring.so.5.2.0"        "libunistring.so.5"
+        _pick_lib_pad "libm.so"                      "libm.so"
+        # GStreamer 链 (winegstreamer 后端)
+        for so in libglib-2.0.so.0 libgobject-2.0.so.0 libgmodule-2.0.so.0 libgio-2.0.so.0 \
+                  libgthread-2.0.so.0 libpcre2-8.so.0 libintl.so.8 libintl.so libm.so \
+                  libgstreamer-1.0.so.0 libgstbase-1.0.so.0 libgstcontroller-1.0.so.0 \
+                  libgstnet-1.0.so.0 libgstvideo-1.0.so.0 libgstaudio-1.0.so.0 \
+                  libgsttag-1.0.so.0 libgstpbutils-1.0.so.0 libgstallocators-1.0.so.0 \
+                  libgstapp-1.0.so.0 libgstfft-1.0.so.0 libgstriff-1.0.so.0 \
+                  libgstrtp-1.0.so.0 libgstrtsp-1.0.so.0 libgstsdp-1.0.so.0 \
+                  libgstcodecparsers-1.0.so.0 libgstmpegts-1.0.so.0; do
+            _pick_lib_pad "$so" "$so"
+        done
         log "    交叉编译依赖 → libs/x86_64/"
 
         # libc.so → libs/x86_64/
@@ -155,8 +174,54 @@ assemble_pad() {
         _pick_lib_pad_rf "libxkbregistry.so.0.0.0"      "libxkbregistry.so.0"
         _pick_lib_pad_rf "libxml2.so.2.12.0"            "libxml2.so.2"
         _pick_lib_pad_rf "libffi.so.8.1.4"              "libffi.so.8"
+        # GnuTLS 链 (schannel TLS 后端, x86_64 guest) → rawfile
+        _pick_lib_pad_rf "libgnutls.so.30.37.1"         "libgnutls.so.30"   "libgnutls.so"
+        _pick_lib_pad_rf "libnettle.so.8.11"            "libnettle.so.8"
+        _pick_lib_pad_rf "libhogweed.so.6.11"           "libhogweed.so.6"
+        _pick_lib_pad_rf "libgmp.so.10.4.1"             "libgmp.so.10"
+        _pick_lib_pad_rf "libtasn1.so.6.6.4"            "libtasn1.so.6"
+        _pick_lib_pad_rf "libunistring.so.5.2.0"        "libunistring.so.5"
+        # libm.so: 补 OHOS 缺失的 frexpl/ldexpl (glib long double 数学)
+        # 系统 libm.so 是空壳, 必须用我们的版本 (含 math 符号需 libc 兜底)
+        _pick_lib_pad_rf "libm.so"                      "libm.so"
+        # GStreamer 链 (winegstreamer 后端: glib + gstreamer core + gst-libs)
+        for so in libglib-2.0.so.0 libgobject-2.0.so.0 libgmodule-2.0.so.0 libgio-2.0.so.0 \
+                  libgthread-2.0.so.0 libpcre2-8.so.0 libintl.so.8 libintl.so libm.so \
+                  libgstreamer-1.0.so.0 libgstbase-1.0.so.0 libgstcontroller-1.0.so.0 \
+                  libgstnet-1.0.so.0 libgstvideo-1.0.so.0 libgstaudio-1.0.so.0 \
+                  libgsttag-1.0.so.0 libgstpbutils-1.0.so.0 libgstallocators-1.0.so.0 \
+                  libgstapp-1.0.so.0 libgstfft-1.0.so.0 libgstriff-1.0.so.0 \
+                  libgstrtp-1.0.so.0 libgstrtsp-1.0.so.0 libgstsdp-1.0.so.0 \
+                  libgstcodecparsers-1.0.so.0 libgstmpegts-1.0.so.0; do
+            # box64 按 SONAME 解析依赖时可能查找无版本名 (libgstvideo-1.0.so),
+            # 与 gnutls 链一致补上无版本软链, 否则 winegstreamer dlopen 报
+            # "Error loading shared library libgstvideo-1.0.so: No such file"
+            local unversioned="${so%.so.0}"
+            if [ "$unversioned" != "$so" ] && [[ "$so" == *.so.0 ]]; then
+                _pick_lib_pad_rf "$so" "$so" "$unversioned.so"
+            else
+                _pick_lib_pad_rf "$so" "$so"
+            fi
+        done
+        # FFmpeg 解码库 (gst-libav 依赖) → rawfile
+        for so in libavcodec.so.60 libavformat.so.60 libavutil.so.58 \
+                  libswscale.so.7 libswresample.so.4 libavfilter.so.9; do
+            _pick_lib_pad_rf "$so" "$so"
+        done
+        # GStreamer 插件 (gst-plugins-base/good + gst-libav) → rawfile
+        local gst_plugin_dir="$SYSROOT_EXT_LIB/gstreamer-1.0"
+        if [ -d "$gst_plugin_dir" ]; then
+            mkdir -p "$wine_data/bin/x86_64-unix/gstreamer-1.0"
+            for pso in "$gst_plugin_dir"/*.so; do
+                [ -f "$pso" ] || continue
+                cp "$pso" "$wine_data/bin/x86_64-unix/gstreamer-1.0/"
+            done
+            log "    GStreamer 插件 ($(ls "$gst_plugin_dir"/*.so 2>/dev/null | wc -l) 个) → rawfile gstreamer-1.0/"
+        else
+            warn "gstreamer-1.0 插件目录缺失: $gst_plugin_dir"
+        fi
 
-        # libfreetype → bin/ (box64 按名 dlopen 搜索路径: .)
+        # libgnutls → bin/ (box64 按名 dlopen 搜索路径: .)
         cp "$wine_data/bin/x86_64-unix/libfreetype.so.6" "$wine_data/bin/"
         cp "$wine_data/bin/x86_64-unix/libfreetype.so" "$wine_data/bin/"
 
@@ -175,9 +240,18 @@ assemble_pad() {
 
     # -- 2. PE DLL + 数据文件 → rawfile (两种架构共用) --
     # x86_64-windows/ — 复制所有运行时 PE 文件
-    # 注意: .cpl 不打包, wineboot 初始化时 mscoree.dll 触发 appwiz.cpl
-    # → install_mono → DialogBoxW 模态框在 OHOS 无头环境永久阻塞
-    for ext in dll drv exe sys acm ax ocx tlb; do
+    # .cpl (含 appwiz.cpl) 是否打包由 BUILD_WINE_MONO 决定:
+    #   =1 (本地默认): 打包 cpl + build_deps 下载 mono msi, 保留 .NET/控制面板.
+    #   =0 (CI 无 curl): 不打包 cpl. 若 mono 缺失, wineboot 初始化时 mscoree.dll
+    #   会 CreateProcess "control.exe appwiz.cpl install_mono" 弹 DialogBoxW 模态框,
+    #   OHOS 无头环境无人响应 → wineboot 永久阻塞 (mscoree WaitForSingleObject 无限
+    #   等待). 去掉 appwiz.cpl 后 control.exe 加载 cpl 失败立即退出, mscoree 走
+    #   "无 .NET 运行时"路径不卡死.
+    local pe_exts="dll drv exe sys acm ax ocx tlb"
+    if [ "${BUILD_WINE_MONO:-1}" = "1" ]; then
+        pe_exts="$pe_exts cpl"
+    fi
+    for ext in $pe_exts; do
         for f in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.$ext; do
             [ -f "$f" ] && cp "$f" "$wine_data/bin/x86_64-windows/"
         done
@@ -200,7 +274,8 @@ assemble_pad() {
     # 注意: wineboot/rpcss/services/conhost 等服务程序只有 x86_64 版,
     # WoW64 下它们由 Wine 以 64 位进程拉起, 属上游 WoW64 的正常行为.
     mkdir -p "$wine_data/bin/i386-windows"
-    for ext in dll drv exe sys acm ax ocx tlb; do
+    # 与 x86_64 一致: cpl 仅当 BUILD_WINE_MONO=1 时打包 (见上方 pe_exts 注释)
+    for ext in $pe_exts; do
         for f in "$BUILD_DIR/wine-ohos/dlls/"*/i386-windows/*.$ext; do
             [ -f "$f" ] && cp "$f" "$wine_data/bin/i386-windows/"
         done
@@ -356,16 +431,9 @@ assemble_pad() {
     image_fetch_sha="$(sha256sum "$smoke_dir/assets/venus_image_fetch.spv" | awk '{print $1}')"
     combined_sample_sha="$(sha256sum "$smoke_dir/assets/venus_combined_sample.spv" | awk '{print $1}')"
     separated_sample_sha="$(sha256sum "$smoke_dir/assets/venus_separated_sample.spv" | awk '{print $1}')"
-    local smoke_suite_version="phase2-vulkan-dxvk-v9-modern-baseline"
-    local dxvk_commit dxvk_modern_commit mesa_commit virglrenderer_commit
-    local guest_venus_icd_sha host_virglrenderer_sha venus_runtime_id
+    local dxvk_commit dxvk_modern_commit
     dxvk_commit="$(git -c safe.directory="$DXVK_SRC" -C "$DXVK_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
     dxvk_modern_commit="$(git -c safe.directory="$DXVK_MODERN_SRC" -C "$DXVK_MODERN_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
-    mesa_commit="$(git -c safe.directory="$ROOT/thirdparty/mesa" -C "$ROOT/thirdparty/mesa" rev-parse HEAD 2>/dev/null || echo unknown)"
-    virglrenderer_commit="$(git -c safe.directory="$ROOT/thirdparty/virglrenderer" -C "$ROOT/thirdparty/virglrenderer" rev-parse HEAD 2>/dev/null || echo unknown)"
-    guest_venus_icd_sha="$(sha256sum "$BUILD_DIR/guest_vulkan/$guest_arch/lib/libvulkan_virtio.so" | awk '{print $1}')"
-    host_virglrenderer_sha="$(sha256sum "$ROOT/entry/libs/$NATIVE_ARCH/libvirglrenderer.so.1" | awk '{print $1}')"
-    venus_runtime_id="venus-${guest_venus_icd_sha:0:12}-${host_virglrenderer_sha:0:12}"
     local dxvk64_d3d11_sha dxvk64_dxgi_sha dxvk32_d3d11_sha dxvk32_dxgi_sha
     local dxvkmodern64_d3d11_sha dxvkmodern64_dxgi_sha dxvkmodern32_d3d11_sha dxvkmodern32_dxgi_sha
     dxvk64_d3d11_sha="$(sha256sum "$wine_data/dxvk/legacy/x64/d3d11.dll" | awk '{print $1}')"
@@ -382,21 +450,6 @@ assemble_pad() {
   "backend": "dxvk",
   "defaultProfile": "legacy",
   "runtimeRoot": "dxvk",
-  "venusRuntime": {
-    "id": "$venus_runtime_id",
-    "guestMesaCommit": "$mesa_commit",
-    "guestIcdSha256": "$guest_venus_icd_sha",
-    "hostVirglrendererCommit": "$virglrenderer_commit",
-    "hostVirglrendererSha256": "$host_virglrenderer_sha",
-    "transportCapabilities": {
-      "remoteMemoryShadow": true,
-      "multiRing": false,
-      "fenceFeedback": false,
-      "queryFeedback": false,
-      "semaphoreFeedback": true,
-      "modernRequiresSynchronousTimelineQueries": true
-    }
-  },
   "runtimes": {
     "legacy": {
       "version": "1.10.3",
@@ -420,7 +473,7 @@ EOF
     cat > "$smoke_dir/manifest.json" <<EOF
 {
   "schemaVersion": 1,
-  "suiteVersion": "$smoke_suite_version",
+  "suiteVersion": "phase2-vulkan-dxvk-v9-modern-baseline",
   "enabledSuites": ["core", "audio", "opengl", "wine-vulkan", "d3d8", "d3d9", "dxvk", "gpu-diagnostics", "dxvk26-requirements", "dxvk-modern-baseline"],
   "managedRoot": "C:\\\\smoke",
   "files": {
@@ -474,35 +527,37 @@ HKLM,%FontSubStr%,"MS Shell Dlg 2",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Arial",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Arial Black",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Calibri",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Cambria",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Cambria",,"Noto Serif"\
 HKLM,%FontSubStr%,"Candara",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Comic Sans MS",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Constantia",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Constantia",,"Noto Serif"\
 HKLM,%FontSubStr%,"Corbel",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Impact",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Palatino Linotype",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"Palatino Linotype",,"Noto Serif"\
 HKLM,%FontSubStr%,"Segoe UI",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Tahoma",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Trebuchet MS",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Verdana",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Georgia",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"Times New Roman",,"HarmonyOS Sans SC"\
+;; Latin: 衬线 (serif)\
+HKLM,%FontSubStr%,"Georgia",,"Noto Serif"\
+HKLM,%FontSubStr%,"Times New Roman",,"Noto Serif"\
 ;; CJK: 简体中文\
 HKLM,%FontSubStr%,"Microsoft JhengHei",,"HarmonyOS Sans TC"\
 HKLM,%FontSubStr%,"Microsoft JhengHei UI",,"HarmonyOS Sans TC"\
 HKLM,%FontSubStr%,"Microsoft YaHei",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"Microsoft YaHei UI",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"SimSun",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"NSimSun",,"HarmonyOS Sans SC"\
+;; CJK: 宋体/楷体 (serif)\
+HKLM,%FontSubStr%,"SimSun",,"Noto Serif CJK SC"\
+HKLM,%FontSubStr%,"NSimSun",,"Noto Serif CJK SC"\
 HKLM,%FontSubStr%,"SimHei",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"FangSong",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"KaiTi",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"FangSong",,"Noto Serif CJK SC"\
+HKLM,%FontSubStr%,"KaiTi",,"Noto Serif CJK SC"\
 HKLM,%FontSubStr%,"YouYuan",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"LiSu",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"DengXian",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"STSong",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"STKaiti",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"STFangsong",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"STSong",,"Noto Serif CJK SC"\
+HKLM,%FontSubStr%,"STKaiti",,"Noto Serif CJK SC"\
+HKLM,%FontSubStr%,"STFangsong",,"Noto Serif CJK SC"\
 HKLM,%FontSubStr%,"STHeiti",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"STXihei",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"STLiti",,"HarmonyOS Sans SC"\
@@ -510,14 +565,14 @@ HKLM,%FontSubStr%,"STXingkai",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"STXinwei",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"STHupo",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"STCaiyun",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"STZhongSong",,"HarmonyOS Sans SC"\
-HKLM,%FontSubStr%,"STBaoli",,"HarmonyOS Sans SC"\
+HKLM,%FontSubStr%,"STZhongSong",,"Noto Serif CJK SC"\
+HKLM,%FontSubStr%,"STBaoli",,"Noto Serif CJK SC"\
 HKLM,%FontSubStr%,"FZShuTi",,"HarmonyOS Sans SC"\
 HKLM,%FontSubStr%,"FZYaoti",,"HarmonyOS Sans SC"\
 ;; CJK: 繁体中文\
 HKLM,%FontSubStr%,"MingLiU",,"HarmonyOS Sans TC"\
 HKLM,%FontSubStr%,"PMingLiU",,"HarmonyOS Sans TC"\
-HKLM,%FontSubStr%,"DFKai-SB",,"HarmonyOS Sans TC"\
+HKLM,%FontSubStr%,"DFKai-SB",,"Noto Serif CJK TC"\
 HKLM,%FontSubStr%,"Consolas",,"Noto Sans Mono"\
 HKLM,%FontSubStr%,"Courier",,"Noto Sans Mono"\
 HKLM,%FontSubStr%,"Courier New",,"Noto Sans Mono"\
@@ -538,6 +593,23 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
             err "BUILD_GUEST_GFX=1 but build/guest_gfx/$guest_arch/lib is missing"
         fi
         log "  guest_gfx: SKIP (build/guest_gfx/$guest_arch/lib not found)"
+    fi
+
+    # x86_64: guest Mesa 库必须可被系统 dlopen (el1 bundle libs); el2 数据区 dlopen 被拒 (ENOENT).
+    # 仅复制 host libs 中不存在的 guest 专用库, 共享依赖 (libwayland-*/libffi/libz/libc++_shared)
+    # 直接复用 el1 中已有的 host 版本.
+    if [ "$NATIVE_ARCH" = "x86_64" ] && [ -d "$BUILD_DIR/guest_gfx/$guest_arch/lib" ]; then
+        log "  guest_gfx -> entry/libs/x86_64 (el1 dlopen for x86_64)"
+        mkdir -p "$ROOT/entry/libs/x86_64"
+        for pattern in libEGL.so libGLESv2.so libGLESv1_CM.so libgallium-*.so libdrm.so; do
+            for f in "$BUILD_DIR/guest_gfx/$guest_arch/lib"/$pattern*; do
+                [ -f "$f" ] && cp -a "$f" "$ROOT/entry/libs/x86_64/"
+            done
+        done
+        for f in "$BUILD_DIR/guest_gfx/$guest_arch/lib"/dri/*.so; do
+            [ -f "$f" ] && cp -a "$f" "$ROOT/entry/libs/x86_64/"
+        done
+        log "  guest_gfx el1: $(ls "$ROOT/entry/libs/x86_64"/libEGL.so* "$ROOT/entry/libs/x86_64"/libgallium-*.so 2>/dev/null | wc -l) libs + $(ls "$ROOT/entry/libs/x86_64"/*_dri.so 2>/dev/null | wc -l) dri drivers"
     fi
 
     # Guest Linux Vulkan runtime is intentionally outside C:\\smoke: it is an
@@ -581,7 +653,7 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
   "schemaVersion": 1,
   "payload": "wine-data.zip",
   "payloadSha256": "$payload_sha",
-  "smokeSuiteVersion": "$smoke_suite_version"
+  "smokeSuiteVersion": "phase2-vulkan-b3-v1"
 }
 EOF
     log "  $zip_name → rawfile/ ($(du -h "$rawfile_dir/$zip_name" | cut -f1))"
