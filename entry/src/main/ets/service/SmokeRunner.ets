@@ -18,6 +18,10 @@ export interface SmokeLaunchRequest {
   prefixMode: string;
   longSeconds: number;
   batchMappedFlush: boolean;
+  experimentId: string;
+  experimentExecutable: string;
+  experimentResultName: string;
+  experimentSourceUrl: string;
 }
 
 interface SmokeTestSpec {
@@ -183,7 +187,8 @@ function latestReplayShaderDirectory(prefix: string, current: string): string {
 
 export function defaultSmokeRequest(): SmokeLaunchRequest {
   return { mode: '', runId: '', suite: 'core', prefixMode: 'reuse', longSeconds: 3600,
-    batchMappedFlush: false };
+    batchMappedFlush: false, experimentId: '', experimentExecutable: '', experimentResultName: '',
+    experimentSourceUrl: '' };
 }
 
 export function parseSmokeRequest(text: string): SmokeLaunchRequest {
@@ -192,13 +197,18 @@ export function parseSmokeRequest(text: string): SmokeLaunchRequest {
   try {
     const value = JSON.parse(text) as SmokeLaunchRequest;
     return {
-      mode: value.mode === 'smoke' || value.mode === 'game' ? value.mode : '',
+      mode: value.mode === 'smoke' || value.mode === 'game' || value.mode === 'experiment' ? value.mode : '',
       runId: safeId(value.runId, `${Date.now()}`),
       suite: safeId(value.suite, 'core').toLowerCase(),
       prefixMode: value.prefixMode === 'clean' ? 'clean' : 'reuse',
       longSeconds: value.longSeconds >= 60 && value.longSeconds <= 3600 ?
         Math.floor(value.longSeconds) : 3600,
-      batchMappedFlush: value.batchMappedFlush === true
+      batchMappedFlush: value.batchMappedFlush === true,
+      experimentId: safeId(value.experimentId || '', ''),
+      experimentExecutable: safeId(value.experimentExecutable || '', ''),
+      experimentResultName: safeId(value.experimentResultName || '', ''),
+      experimentSourceUrl: typeof value.experimentSourceUrl === 'string' ?
+        value.experimentSourceUrl.substring(0, 480) : ''
     };
   } catch (_) {
     return fallback;
@@ -221,11 +231,15 @@ export function syncManagedSmoke(prefixMode: string): boolean {
     'x64/winehua_audio_smoke.exe', 'x64/winehua_graphics_smoke.exe',
     'x64/winehua_vulkan_smoke.exe', 'x64/winehua_d3d11_smoke.exe',
     'x64/winehua_d3d8_smoke.exe', 'x64/winehua_d3d_switch_cube.exe',
-    'x64/winehua_win32_driver.exe',
+    'x64/winehua_gpu_diagnostics.exe',
+    'x64/winehua_win32_driver.exe', 'x64/winehua_dxvk26_requirements.exe',
+    'x64/winehua_d3d12_smoke.exe',
+    'x64/triangle.exe', 'x64/gears.exe',
     'x86/winehua_audio_smoke.exe', 'x86/winehua_graphics_smoke.exe',
     'x86/winehua_vulkan_smoke.exe', 'x86/winehua_d3d11_smoke.exe',
     'x86/winehua_d3d8_smoke.exe', 'x86/winehua_d3d_switch_cube.exe',
-    'x86/winehua_win32_driver.exe',
+    'x86/winehua_gpu_diagnostics.exe',
+    'x86/winehua_win32_driver.exe', 'x86/winehua_dxvk26_requirements.exe',
     'assets/venus_storage_write.spv', 'assets/venus_storage_read.spv',
     'assets/venus_image_fetch.spv', 'assets/venus_combined_sample.spv',
     'assets/venus_separated_sample.spv',
@@ -270,12 +284,44 @@ export function syncManagedSmoke(prefixMode: string): boolean {
   }
 }
 
+export function stageManagedVkd3dRuntime(prefixMode: string): boolean {
+  // The standalone VKD3D button is intentionally restricted to the app-owned
+  // clean prefix. LoadLibrary("d3d12.dll") searches beside the PE, while the
+  // Wine loader's WINEDLLPATH is not part of that Win32 file search path.
+  if (prefixMode !== 'clean') {
+    hilog.error(DOMAIN, 'VKD3D', 'refusing to stage VKD3D runtime outside clean prefix');
+    return false;
+  }
+  const source = `${WINE_ROOT}/vkd3d/limited-500k/x64/d3d12.dll`;
+  const target = `${prefixRoot(prefixMode)}/drive_c/smoke/x64/d3d12.dll`;
+  try {
+    const sourceStat = fs.statSync(source);
+    if (sourceStat.isDirectory() || sourceStat.size <= 0) return false;
+    if (pathExists(target)) fs.unlinkSync(target);
+    fs.copyFileSync(source, target);
+    const targetStat = fs.statSync(target);
+    if (targetStat.isDirectory() || targetStat.size !== sourceStat.size) {
+      fs.unlinkSync(target);
+      return false;
+    }
+    hilog.info(DOMAIN, 'VKD3D',
+      'managed runtime staged prefix=clean file=d3d12.dll bytes=%{public}d', targetStat.size);
+    return true;
+  } catch (error) {
+    try {
+      if (pathExists(target)) fs.unlinkSync(target);
+    } catch (_) {}
+    hilog.error(DOMAIN, 'VKD3D', 'managed runtime staging failed: %{public}s', JSON.stringify(error));
+    return false;
+  }
+}
+
 /* Validate the versioned DXVK payload without injecting it into the prefix's
  * system32/syswow64 directories.  DXVK DLLs belong to the selected WineHua runtime
  * profile; the Wine loader supplies the normal
  * system/builtin fallback for every other process. */
-function validateManagedDxvk(): boolean {
-  const source = `${WINE_ROOT}/dxvk/legacy`;
+function validateManagedDxvk(profile: string): boolean {
+  const source = `${WINE_ROOT}/dxvk/${profile}`;
   const manifest = WINE_ROOT + "/dxvk/manifest.json";
   if (!pathExists(manifest)) return false;
   const required = [
@@ -350,7 +396,14 @@ export class SmokeRunner {
     const includeWineVulkanPresent = this.request.suite === 'wine-vulkan-present' ||
       this.request.suite === 'all';
     const includeDxvk = this.request.suite === 'dxvk' || this.request.suite === 'all';
+    const includeGpuDiagnostics = this.request.suite === 'gpu-diagnostics';
+    const includeDxvkModernBaseline = this.request.suite === 'dxvk-modern-baseline';
+    const includeDxvk26Requirements = this.request.suite === 'dxvk26-requirements';
+    /* Gate A never loads vkd3d. These probes only observe the same Vulkan
+     * layers a future D3D12 runtime would use. */
+    const includeVkd3dCapability = this.request.suite === 'vkd3d-capability';
     const includeDxvkLong = this.request.suite === 'dxvk-long';
+    const includeDxvkModernLong = this.request.suite === 'dxvk-modern-long';
     const includeDxvkReplay = this.request.suite === 'dxvk-replay';
       const includeDxvkLayoutGeneral = this.request.suite === 'dxvk-layout-general';
       const includeDxvkCombined = this.request.suite === 'dxvk-combined';
@@ -629,6 +682,35 @@ export class SmokeRunner {
       tests.push({ id: 'wine-vulkan-present-x86', architecture: 'x86',
         executable: 'winehua_vulkan_smoke.exe', seconds: 5, timeoutMs: 180000 });
     }
+    if (includeDxvk26Requirements) {
+      /* The probe does not load DXVK.  It qualifies the exact Windows Vulkan
+       * transport seen by DXVK 2.6.2 before a Modern DLL is introduced. */
+      tests.push({ id: 'dxvk26-requirements-x86', architecture: 'x86',
+        executable: 'winehua_dxvk26_requirements.exe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'dxvk26-requirements-x64', architecture: 'x64',
+        executable: 'winehua_dxvk26_requirements.exe', seconds: 0, timeoutMs: 90000 });
+      /* Guest qualification is intentionally last. Its renderer teardown can
+       * take longer than a Win32 probe's bounded diagnostic, so it must not
+       * hide the Windows Vulkan transport result needed for DXVK bring-up. */
+      tests.push({ id: 'guest-dxvk26-requirements-x64', architecture: 'guest-x64',
+        executable: 'winehua_guest_vulkan_smoke', seconds: 0, timeoutMs: 90000 });
+    }
+    if (includeVkd3dCapability) {
+      tests.push({ id: 'vkd3d-capability-pe-x64', architecture: 'x64',
+        executable: 'winehua_dxvk26_requirements.exe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'guest-vkd3d-capability-x64', architecture: 'guest-x64',
+        executable: 'winehua_guest_vulkan_smoke', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'wine-vkd3d-capability-x64', architecture: 'x64',
+        executable: 'winehua_vulkan_smoke.exe', seconds: 0, timeoutMs: 90000 });
+    }
+    if (includeGpuDiagnostics) {
+      /* This runs through the Legacy overlay deliberately. The program then
+       * proves its loaded DLL paths and reports Modern eligibility separately. */
+      tests.push({ id: 'gpu-diagnostics-x86', architecture: 'x86',
+        executable: 'winehua_gpu_diagnostics.exe', seconds: 0, timeoutMs: 90000 });
+      tests.push({ id: 'gpu-diagnostics-x64', architecture: 'x64',
+        executable: 'winehua_gpu_diagnostics.exe', seconds: 0, timeoutMs: 90000 });
+    }
     if (includeDxvk) {
       /* On the current Harmony Venus renderer, creating an x64 DXVK device
        * and immediately creating the WoW64/x86 device can occasionally return
@@ -642,8 +724,21 @@ export class SmokeRunner {
       tests.push({ id: 'dxvk-cube-x64', architecture: 'x64',
         executable: 'winehua_d3d_switch_cube.exe', seconds: 8, timeoutMs: 180000 });
     }
+    if (includeDxvkModernBaseline) {
+      tests.push({ id: 'dxvk-modern-baseline-x86', architecture: 'x86',
+        executable: 'winehua_d3d11_smoke.exe', seconds: 5, timeoutMs: 180000 });
+      tests.push({ id: 'dxvk-modern-baseline-x64', architecture: 'x64',
+        executable: 'winehua_d3d11_smoke.exe', seconds: 5, timeoutMs: 180000 });
+      tests.push({ id: 'dxvk-modern-cube-x64', architecture: 'x64',
+        executable: 'winehua_d3d_switch_cube.exe', seconds: 8, timeoutMs: 180000 });
+    }
     if (includeDxvkLong) {
       tests.push({ id: 'dxvk-long-x64', architecture: 'x64',
+        executable: 'winehua_d3d11_smoke.exe', seconds: this.request.longSeconds,
+        timeoutMs: this.request.longSeconds * 1000 + 90000 });
+    }
+    if (includeDxvkModernLong) {
+      tests.push({ id: 'dxvk-modern-long-x64', architecture: 'x64',
         executable: 'winehua_d3d11_smoke.exe', seconds: this.request.longSeconds,
         timeoutMs: this.request.longSeconds * 1000 + 90000 });
     }
@@ -729,7 +824,9 @@ export class SmokeRunner {
                 await sleep(250);
                 }
             }
-            if (spec.id.indexOf('wine-vulkan-present') >= 0 || spec.id.indexOf('dxvk-legacy') >= 0) {
+            if (spec.id.indexOf('wine-vulkan-present') >= 0 ||
+              spec.id.indexOf('dxvk-legacy') >= 0 ||
+              spec.id.indexOf('dxvk-modern') >= 0) {
               /* Process exit closes the vtest socket first; the Venus render
                * server frees the context asynchronously.  Leave a bounded
                * handoff window so the next architecture does not reuse the
@@ -758,7 +855,9 @@ export class SmokeRunner {
       if (!current.found || current.status !== 'running') break;
       await sleep(250);
     }
-    if (spec.id.indexOf('wine-vulkan-present') >= 0 || spec.id.indexOf('dxvk-legacy') >= 0)
+    if (spec.id.indexOf('wine-vulkan-present') >= 0 ||
+      spec.id.indexOf('dxvk-legacy') >= 0 ||
+      spec.id.indexOf('dxvk-modern') >= 0)
       await sleep(8000);
     return this.failureResult(spec, 'timeout', `test exceeded ${spec.timeoutMs} ms`, process);
   }
@@ -1080,6 +1179,9 @@ export class SmokeRunner {
         executablePath: executablePath,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
           '--result', resultPath,
+          ...(spec.id === 'guest-dxvk26-requirements-x64' ?
+            ['--dxvk26-requirements', '1'] : []),
+          ...(spec.id === 'guest-vkd3d-capability-x64' ? ['--vkd3d-capability'] : []),
           ...(spec.id.indexOf('general') >= 0 ? ['--layout', 'general'] : []),
           ...(spec.id.indexOf('sampled-only') >= 0 ? ['--sampled-only'] : []),
           ...(spec.id.indexOf('idle') >= 0 ? ['--force-idle'] : []),
@@ -1192,14 +1294,19 @@ export class SmokeRunner {
 
     const windowsResult = `C:\\smoke\\results\\${this.request.runId}\\${spec.id}.json`;
     const isWineVulkan = spec.executable === 'winehua_vulkan_smoke.exe';
+    const isVkd3dCapability = spec.id === 'wine-vkd3d-capability-x64';
+    const isVkd3dCapabilityPe = spec.id === 'vkd3d-capability-pe-x64';
+    const isDxvk26Requirements = spec.executable === 'winehua_dxvk26_requirements.exe';
+    const isGpuDiagnostics = spec.executable === 'winehua_gpu_diagnostics.exe';
     const isWineVulkanPresent = isWineVulkan && spec.id.indexOf('present') >= 0;
     const isD3d8 = spec.executable === 'winehua_d3d8_smoke.exe';
     const isD3d9 = spec.executable === 'winehua_d3d_switch_cube.exe' &&
       spec.id.indexOf('d3d9-') === 0;
-    const isDxvk = !isD3d9 && (spec.executable === 'winehua_d3d11_smoke.exe' ||
+    const isDxvk = !isD3d9 && (isGpuDiagnostics || spec.executable === 'winehua_d3d11_smoke.exe' ||
       spec.executable === 'winehua_d3d_switch_cube.exe');
+    const isDxvkModern = isDxvk && spec.id.indexOf('dxvk-modern-') === 0;
     let process: ProcessInfo;
-    if (isWineVulkan || isDxvk) {
+    if (isWineVulkan || isDxvk || isDxvk26Requirements) {
       const guestVulkanLibrary = `${GUEST_VULKAN_ROOT}/lib`;
       const guestVulkanIcd = `${GUEST_VULKAN_ROOT}/share/vulkan/icd.d/venus_icd.x86_64.json`;
       const box64LibraryPath = `${guestVulkanLibrary}:${WINE_ROOT}/bin/guest_gfx/lib:` +
@@ -1231,19 +1338,42 @@ export class SmokeRunner {
         /* Host GPU feedback lands in the Host side of WineHua's explicit
          * shadow mapping. Use the synchronous Host query path so a stale
          * Guest availability word cannot hide a valid query result. */
-        'VN_PERF': 'no_fence_feedback,no_query_feedback',
+        'VN_PERF': isDxvk26Requirements
+          /* Timeline semaphore feedback writes a Guest-side slot. WineHua's
+           * remote Host/Guest shadow mapping does not make that write visible
+           * to the Wine process, while the synchronous renderer query is
+           * correct. Qualify the exact Modern runtime path by default. */
+          ? 'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring'
+          : 'no_fence_feedback,no_query_feedback,no_multi_ring',
         /* Keep DLL load evidence for fallback detection without tracing every
          * Vulkan call. A caller can still override WINEDEBUG for a focused
          * diagnostic run through runWineProgram. */
         'WINEDEBUG': '+loaddll,+module'
       };
+      if (isDxvk26Requirements &&
+        this.perfProfile === 'shadow-precise-no-semaphore-feedback') {
+        /* Preserve this profile as an A/B diagnostic without allowing it to
+         * accidentally exercise the unsafe feedback implementation. */
+        smokeEnvironment['VN_PERF'] =
+          'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
+      }
       if (isDxvk) {
         smokeEnvironment['BOX64_DYNAREC_WEAKBARRIER'] = '0';
-        smokeEnvironment['WINEHUA_DXVK_VERSION'] = '1.10.3';
-        smokeEnvironment['WINEHUA_DXVK_RELAXED_FEATURES'] = '1';
-        smokeEnvironment['WINEDLLOVERRIDES'] = 'd3d11=n;dxgi=n';
+        smokeEnvironment['WINEHUA_DXVK_VERSION'] = isDxvkModern ? '2.6.2' : '1.10.3';
+        if (isDxvkModern)
+          smokeEnvironment['VN_PERF'] =
+            'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
+        if (isDxvkModern) {
+          smokeEnvironment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
+          smokeEnvironment['DXVK_WINEHUA_TRACE_SAMPLED'] = '0';
+          smokeEnvironment['DXVK_WINEHUA_TRACE_FLOW'] = '0';
+          smokeEnvironment['DXVK_WINEHUA_TRACE_API'] = '0';
+        }
         smokeEnvironment['DXVK_LOG_LEVEL'] = 'info';
         smokeEnvironment['DXVK_LOG_PATH'] = `C:\\smoke\\results\\${this.request.runId}`;
+        if (!isDxvkModern) {
+        smokeEnvironment['WINEHUA_DXVK_RELAXED_FEATURES'] = '1';
+        smokeEnvironment['WINEDLLOVERRIDES'] = 'd3d11=n;dxgi=n';
         smokeEnvironment['DXVK_WINEHUA_TRACE_SAMPLED'] = '1';
         smokeEnvironment['DXVK_WINEHUA_TRACE_QUERY'] = '1';
         /* Bounded to 4096 records in DXVK. This preserves clear/bind/update/
@@ -1266,7 +1396,14 @@ export class SmokeRunner {
            * it here so a false request remains a real off-side A/B run. */
           smokeEnvironment['DXVK_WINEHUA_BATCH_MAPPED_FLUSH'] = '0';
         }
+        }
         if (this.perfProfile === 'shadow-precise' ||
+          this.perfProfile === 'shadow-precise-no-semaphore-feedback' ||
+          this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring' ||
+          this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring-sync-submit' ||
+          this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring-readback-idle' ||
+          this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring-trace' ||
+          this.perfProfile === 'shadow-full-no-semaphore-feedback-single-ring-trace' ||
           this.perfProfile === 'shadow-precise-single-ring' ||
           this.perfProfile === 'shadow-precise-sync-submit' ||
           this.perfProfile === 'shadow-precise-strong-ring' ||
@@ -1275,6 +1412,7 @@ export class SmokeRunner {
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload' ||
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload-fast' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-upload-wait' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
           this.perfProfile === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
           this.perfProfile === 'shadow-precise-dirty-ring-coverage-poll' ||
@@ -1297,18 +1435,36 @@ export class SmokeRunner {
           smokeEnvironment['DXVK_WINEHUA_PRECISE_SHADOW'] = '1';
           smokeEnvironment['DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED'] = '1';
           smokeEnvironment['VN_WINEHUA_REMOTE_MEMORY_SYNC'] = '1';
+          if (this.perfProfile === 'shadow-precise-no-semaphore-feedback')
+            smokeEnvironment['VN_PERF'] =
+              'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
+          if (this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring' ||
+            this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring-sync-submit' ||
+            this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring-readback-idle' ||
+            this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring-trace' ||
+            this.perfProfile === 'shadow-full-no-semaphore-feedback-single-ring-trace')
+            smokeEnvironment['VN_PERF'] =
+              'no_fence_feedback,no_query_feedback,no_semaphore_feedback,no_multi_ring';
+          if (this.perfProfile ===
+            'shadow-precise-no-semaphore-feedback-single-ring-sync-submit')
+            smokeEnvironment['VN_PERF'] += ',no_async_queue_submit';
           if (this.perfProfile === 'shadow-precise-single-ring')
             smokeEnvironment['VN_PERF'] =
               'no_fence_feedback,no_query_feedback,no_multi_ring';
           if (this.perfProfile === 'shadow-precise-sync-submit')
             smokeEnvironment['VN_PERF'] =
               'no_fence_feedback,no_query_feedback,no_async_queue_submit';
-          if (this.perfProfile === 'shadow-precise-strong-ring' ||
+          if (this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring' ||
+            this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring-sync-submit' ||
+            this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring-readback-idle' ||
+            this.perfProfile === 'shadow-precise-no-semaphore-feedback-single-ring-trace' ||
+            this.perfProfile === 'shadow-precise-strong-ring' ||
             this.perfProfile === 'shadow-precise-legacy-host-sync' ||
             this.perfProfile === 'shadow-precise-dirty-ring' ||
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload' ||
           this.perfProfile === 'shadow-precise-dirty-ring-no-upload-fast' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload' ||
+          this.perfProfile === 'shadow-precise-dirty-ring-upload-wait' ||
           this.perfProfile === 'shadow-precise-dirty-ring-inline-upload-coverage-sort' ||
           this.perfProfile === 'shadow-precise-dirty-ring-coverage-sort-sampled' ||
           this.perfProfile === 'shadow-precise-dirty-ring-coverage-poll' ||
@@ -1326,6 +1482,9 @@ export class SmokeRunner {
             this.perfProfile === 'shadow-precise-strong-ring-fence-poll' ||
             this.perfProfile === 'shadow-precise-strong-ring-mailbox')
             smokeEnvironment['VN_WINEHUA_STRONG_RING_BARRIER'] = '1';
+          if (this.perfProfile ===
+            'shadow-precise-no-semaphore-feedback-single-ring-readback-idle')
+            smokeEnvironment['DXVK_WINEHUA_READBACK_DEVICE_IDLE'] = '1';
           if (this.perfProfile === 'shadow-precise-strong-ring-perf' ||
             this.perfProfile === 'shadow-precise-dirty-ring-perf')
             smokeEnvironment['VN_WINEHUA_PERF_SUMMARY'] = '1';
@@ -1343,6 +1502,13 @@ export class SmokeRunner {
       }
       if (spec.id.indexOf('wine-vulkan-sampled-only') >= 0)
         smokeEnvironment['WINEHUA_VULKAN_SAMPLED_ONLY'] = '1';
+        /* Keep the current Venus runtime capability independent of the
+         * diagnostic profile selected above. Profiles may disable more
+         * feedback paths, but must not accidentally re-enable multi-ring. */
+        if (smokeEnvironment['VN_PERF'].indexOf('no_multi_ring') < 0)
+          smokeEnvironment['VN_PERF'] += ',no_multi_ring';
+        if (isDxvkModern && smokeEnvironment['VN_PERF'].indexOf('no_semaphore_feedback') < 0)
+          smokeEnvironment['VN_PERF'] += ',no_semaphore_feedback';
         if (spec.id.indexOf('dxvk-dynamic-cb') >= 0) {
           smokeEnvironment['WINEHUA_D3D11_DYNAMIC_CB'] = '1';
           smokeEnvironment['DXVK_WINEHUA_FLUSH_DYNAMIC_MAPPED'] = '1';
@@ -1356,13 +1522,15 @@ export class SmokeRunner {
         windowsExePath: `C:\\smoke\\${spec.architecture}\\${spec.executable}`,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
           '--result', windowsResult, isPresent ? '--present' : '--offscreen',
+          ...(isVkd3dCapabilityPe ? ['--vkd3d-capability'] : []),
+          ...(isVkd3dCapability ? ['--capability-audit'] : []),
           ...(isPresent ? ['--seconds', `${spec.seconds}`] : [])],
         environment: smokeEnvironment,
         /* DXVK lives in the WineHua runtime overlay, so the smoke process
          * still runs from its ordinary managed application directory. */
         workingDirectory: `C:\\smoke\\${spec.architecture}`,
         prefixMode: this.request.prefixMode,
-        d3dBackend: isDxvk ? 'dxvk_legacy' : 'wined3d',
+        d3dBackend: isDxvk ? (isDxvkModern ? 'dxvk_modern_2_6' : 'dxvk_legacy') : 'wined3d',
         presentBackend: isPresent ? 'venus_broker_present' : 'venus_offscreen',
         automationMode: true
       }) as ProcessInfo;
@@ -1410,10 +1578,11 @@ export class SmokeRunner {
       return;
     }
 
-      if ((this.request.suite === 'dxvk' || this.request.suite === 'dxvk-long' ||
+      if ((this.request.suite === 'dxvk' || this.request.suite === 'gpu-diagnostics' ||
+        this.request.suite === 'dxvk-long' ||
         this.request.suite === 'dxvk-replay' || this.request.suite === 'dxvk-layout-general' ||
         this.request.suite === 'dxvk-combined' || this.request.suite === 'all') &&
-        !validateManagedDxvk()) {
+        !validateManagedDxvk('legacy')) {
       const summary: SmokeSuiteSummary = {
         schemaVersion: 1, runId: this.request.runId, suite: this.request.suite,
         prefixMode: this.request.prefixMode, status: 'FAIL', stage: 'startup',
@@ -1421,6 +1590,18 @@ export class SmokeRunner {
       };
       writeAtomic(`${stableDirectory}/suite-summary.json`, JSON.stringify(summary, null, 2));
       this.onStatus('Smoke: FAIL (DXVK sync)');
+      return;
+    }
+    if ((this.request.suite === 'dxvk-modern-baseline' ||
+      this.request.suite === 'dxvk-modern-long') &&
+      !validateManagedDxvk('modern-2.6')) {
+      const summary: SmokeSuiteSummary = {
+        schemaVersion: 1, runId: this.request.runId, suite: this.request.suite,
+        prefixMode: this.request.prefixMode, status: 'FAIL', stage: 'startup',
+        message: 'managed DXVK Modern payload validation failed', tests: []
+      };
+      writeAtomic(`${stableDirectory}/suite-summary.json`, JSON.stringify(summary, null, 2));
+      this.onStatus('Smoke: FAIL (DXVK Modern sync)');
       return;
     }
 
