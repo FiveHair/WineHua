@@ -135,9 +135,14 @@ struct Index {
       controller.off('deleteRight');
       controller.off('sendKeyboardStatus');
       controller.off('setPreviewText');
+      controller.off('sendFunctionKey');
       const attr: inputMethod.InputAttribute = {
         textInputType: inputMethod.TextInputType.TEXT,
-        enterKeyType: inputMethod.EnterKeyType.DONE
+        // NEWLINE (API 12+): 软键盘回车显示"换行"键 (DONE 显示"完成")。
+        // 实测回车不发 insertText('\n') — 输入法始终走 sendFunctionKey 功能键
+        // (enterKeyType=8), 且系统吞 KeyDown 只派发 KeyUp; 换行由
+        // WineWindow.ets onKeyEvent 补发 down+up 兜底 (见该处注释)
+        enterKeyType: inputMethod.EnterKeyType.NEWLINE
       };
       const cfg: inputMethod.TextConfig = { inputAttribute: attr };
       controller.attach(true, cfg).then(() => {
@@ -162,6 +167,12 @@ struct Index {
           hilog.info(DOMAIN, 'IME-TEST', '[previewText] "%{public}s" range=[%{public}d,%{public}d]', text, range.start, range.end);
           testNapi.sendImePreedit(text, range.start, range.end);  // 预上屏 → Wine preedit_string
         });
+        // 回车补齐在 WineWindow.ets onKeyEvent 统一兜底 (系统吞 KeyDown 只派
+        // KeyUp 时补发 down+up, 覆盖 IME 激活/非激活所有场景), 此处只留日志
+        controller.on('sendFunctionKey', (fk: inputMethod.FunctionKey) => {
+          hilog.info(DOMAIN, 'IME-TEST', '[sendFunctionKey] enterKeyType=%{public}d (0 UNSPEC 6 DONE 8 NEWLINE)',
+            fk.enterKeyType);
+        });
       }).catch((err: BusinessError) => {
         hilog.error(DOMAIN, 'IME-TEST', '[attach] FAILED code=%{public}d msg=%{public}s', err.code, err.message);
       });
@@ -180,6 +191,7 @@ struct Index {
         c.off('deleteRight');
         c.off('sendKeyboardStatus');
         c.off('setPreviewText');
+        c.off('sendFunctionKey');
         c.hideTextInput();
         c.detach();
       } catch (e) {
