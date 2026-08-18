@@ -187,9 +187,9 @@ jobs:
           echo "== nproc =="
           nproc
 
-      # 先单独构建运行时组件再打 HAP: 运行时构建失败与打包失败分开上报.
-      # 顶层 Makefile 在非 CI 构建中同样以该产物作为 assemble 前置依赖.
-      - name: Build guest graphics runtime (x64 + x86)
+      # 先单独构建两个 DXVK runtime 再打 HAP。这样 Modern 的交叉编译失败
+      # 不会被误报为通用 HAP 打包失败；assemble 仍以它们为硬依赖。
+      - name: Build DXVK Legacy runtime (x64 + x86)
         run: |
           set -euxo pipefail
           make NATIVE_ARCH=arm64-v8a dxvk
@@ -205,6 +205,23 @@ jobs:
                build/dxvk/legacy/x86/bin/d3d11.dll \
                build/dxvk/legacy/x86/bin/dxgi.dll
           sha256sum build/dxvk/legacy/{x64,x86}/bin/{d3d11,dxgi}.dll
+
+      - name: Build DXVK Modern runtime (x64 + x86)
+        run: |
+          set -euxo pipefail
+          make NATIVE_ARCH=arm64-v8a dxvk-modern
+          for dll in \
+            build/dxvk/modern-2.6/x64/bin/d3d11.dll \
+            build/dxvk/modern-2.6/x64/bin/dxgi.dll \
+            build/dxvk/modern-2.6/x86/bin/d3d11.dll \
+            build/dxvk/modern-2.6/x86/bin/dxgi.dll; do
+            test -s "$dll"
+          done
+          file build/dxvk/modern-2.6/x64/bin/d3d11.dll \
+               build/dxvk/modern-2.6/x64/bin/dxgi.dll \
+               build/dxvk/modern-2.6/x86/bin/d3d11.dll \
+               build/dxvk/modern-2.6/x86/bin/dxgi.dll
+          sha256sum build/dxvk/modern-2.6/{x64,x86}/bin/{d3d11,dxgi}.dll
 
       - name: Build HAP
         env:
@@ -276,6 +293,8 @@ jobs:
           # schemaVersion 1: 单 legacy profile (master/main-ui 现状)
           # schemaVersion 2: defaultProfile + runtimes.{legacy,modern-2.6} 双 profile
           # 两套格式的 DLL 都打包在 dxvk/legacy 与 dxvk/modern-2.6 下, 统一校验.
+          # schemaVersion 2 额外校验各 profile 的 state/requiredCapabilities,
+          # 并核对 manifest 登记的 DLL sha256 与实际内嵌一致.
           with zipfile.ZipFile(io.BytesIO(payload)) as wine_data:
               dxvk_manifest = json.loads(wine_data.read("dxvk/manifest.json"))
               schema_version = dxvk_manifest.get("schemaVersion", 1)
@@ -289,6 +308,7 @@ jobs:
                   assert schema_version == 2, (
                       "unexpected dxvk manifest schemaVersion", schema_version
                   )
+                  assert dxvk_manifest["backend"] == "dxvk"
                   assert dxvk_manifest["defaultProfile"] == "legacy"
                   legacy = dxvk_manifest["runtimes"]["legacy"]
                   modern = dxvk_manifest["runtimes"]["modern-2.6"]
@@ -300,22 +320,26 @@ jobs:
                   assert modern["commit"] == expected_modern_commit, (
                       modern["commit"], expected_modern_commit
                   )
+                  assert legacy["state"], ("legacy", legacy)
+                  assert modern["state"], ("modern-2.6", modern)
+                  assert isinstance(legacy["requiredCapabilities"], dict), legacy
+                  assert isinstance(modern["requiredCapabilities"], dict), modern
 
               required = {
-                  "dxvk/legacy/x64/d3d11.dll": 0x8664,
-                  "dxvk/legacy/x64/dxgi.dll": 0x8664,
-                  "dxvk/legacy/x86/d3d11.dll": 0x014C,
-                  "dxvk/legacy/x86/dxgi.dll": 0x014C,
+                  "dxvk/legacy/x64/d3d11.dll": (0x8664, "legacy"),
+                  "dxvk/legacy/x64/dxgi.dll": (0x8664, "legacy"),
+                  "dxvk/legacy/x86/d3d11.dll": (0x014C, "legacy"),
+                  "dxvk/legacy/x86/dxgi.dll": (0x014C, "legacy"),
               }
               # schemaVersion 2 额外打包 modern-2.6 profile, DLL 一并校验
               if schema_version == 2:
                   required.update({
-                      "dxvk/modern-2.6/x64/d3d11.dll": 0x8664,
-                      "dxvk/modern-2.6/x64/dxgi.dll": 0x8664,
-                      "dxvk/modern-2.6/x86/d3d11.dll": 0x014C,
-                      "dxvk/modern-2.6/x86/dxgi.dll": 0x014C,
+                      "dxvk/modern-2.6/x64/d3d11.dll": (0x8664, "modern-2.6"),
+                      "dxvk/modern-2.6/x64/dxgi.dll": (0x8664, "modern-2.6"),
+                      "dxvk/modern-2.6/x86/d3d11.dll": (0x014C, "modern-2.6"),
+                      "dxvk/modern-2.6/x86/dxgi.dll": (0x014C, "modern-2.6"),
                   })
-              for name, expected_machine in required.items():
+              for name, (expected_machine, profile) in required.items():
                   image = wine_data.read(name)
                   assert len(image) > 4096, (name, len(image))
                   assert image[:2] == b"MZ", name
@@ -325,7 +349,14 @@ jobs:
                   assert machine == expected_machine, (
                       name, hex(machine), hex(expected_machine)
                   )
-                  print(f"[dxvk] {name}: machine={machine:#06x} size={len(image)}")
+                  # schemaVersion 2 的 runtimes.<profile>.<arch> 登记了 DLL sha256,
+                  # 核对 manifest 登记值与内嵌实际一致, 防陈旧 DLL 静默漂移.
+                  if schema_version == 2:
+                      arch = "x64" if "/x64/" in name else "x86"
+                      dll = name.rsplit("/", 1)[1]
+                      expected_sha = dxvk_manifest["runtimes"][profile][arch][dll]
+                      assert expected_sha == hashlib.sha256(image).hexdigest(), name
+                  print(f"[dxvk/{profile}] {name}: machine={machine:#06x} size={len(image)}")
 
               # 仅 PE DLL 在 ARM64 HarmonyOS 上不可运行, 需同 payload 内的
               # Vulkan 依赖链文件齐全才能工作, 一并校验.
