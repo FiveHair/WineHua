@@ -330,13 +330,21 @@ assemble_pad() {
     [ -f "$vkd3d_root/manifest.json" ] || err "VKD3D-Proton manifest missing: $vkd3d_root/manifest.json"
     # Keep the upstream VKD3D-Proton demos available as ordinary managed
     # C:\\smoke programs. They are test assets, not runtime DLLs.
-    local vkd3d_upstream_demos="$WINEHUA/.temp/vkd3d-upstream-demos-20260806-payload"
-    [ -f "$vkd3d_upstream_demos/triangle.exe" ] || \
-        err "VKD3D-Proton upstream triangle demo missing: $vkd3d_upstream_demos/triangle.exe"
-    [ -f "$vkd3d_upstream_demos/gears.exe" ] || \
-        err "VKD3D-Proton upstream gears demo missing: $vkd3d_upstream_demos/gears.exe"
-    cp "$vkd3d_upstream_demos/triangle.exe" "$smoke_dir/x64/triangle.exe"
-    cp "$vkd3d_upstream_demos/gears.exe" "$smoke_dir/x64/gears.exe"
+    # Prefer demos built with this limited-500K profile so CI does not depend
+    # on the gitignored .temp payload used by older local trees.
+    local vkd3d_demo_triangle="$vkd3d_root/x64/triangle.exe"
+    local vkd3d_demo_gears="$vkd3d_root/x64/gears.exe"
+    if [ ! -f "$vkd3d_demo_triangle" ] || [ ! -f "$vkd3d_demo_gears" ]; then
+        local vkd3d_upstream_demos="$WINEHUA/.temp/vkd3d-upstream-demos-20260806-payload"
+        vkd3d_demo_triangle="$vkd3d_upstream_demos/triangle.exe"
+        vkd3d_demo_gears="$vkd3d_upstream_demos/gears.exe"
+    fi
+    [ -f "$vkd3d_demo_triangle" ] || \
+        err "VKD3D-Proton triangle demo missing: $vkd3d_demo_triangle"
+    [ -f "$vkd3d_demo_gears" ] || \
+        err "VKD3D-Proton gears demo missing: $vkd3d_demo_gears"
+    cp "$vkd3d_demo_triangle" "$smoke_dir/x64/triangle.exe"
+    cp "$vkd3d_demo_gears" "$smoke_dir/x64/gears.exe"
     local vkd3d_upstream_triangle_sha vkd3d_upstream_gears_sha
     vkd3d_upstream_triangle_sha="$(sha256sum "$smoke_dir/x64/triangle.exe" | awk '{print $1}')"
     vkd3d_upstream_gears_sha="$(sha256sum "$smoke_dir/x64/gears.exe" | awk '{print $1}')"
