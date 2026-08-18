@@ -291,7 +291,8 @@ export class WineEnvService {
   // 环境页"渲染策略"切换: 持久化偏好 + 同步 AppStorage 生效值 + 重读启动参数。
   // 仅写入配置 — 已在运行的 Wine 不受影响, 重启引擎后生效 (UI 负责提示)
   setD3dPreference(backend: string): void {
-    const selected = backend === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
+    const selected = backend === 'dxvk_legacy' ||
+      backend === 'dxvk_modern_2_6' ? backend : 'wined3d';
     PersistentStorage.persistProp<string>('winehua.d3d.preference', selected);
     AppStorage.set<string>('winehua.d3d.preference', selected);
     AppStorage.set<string>('winehua.d3d.backend', selected);
@@ -310,7 +311,8 @@ export class WineEnvService {
     this.driveC = `${this.prefixRoot}/drive_c`;
     this.sockPath = `${this.prefixRoot}/wine-wayland`;
     const backend = AppStorage.get<string>('winehua.d3d.backend') ?? 'dxvk_legacy';
-    this.d3dBackend = backend === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
+    this.d3dBackend = backend === 'dxvk_legacy' ||
+      backend === 'dxvk_modern_2_6' ? backend : 'wined3d';
     this.perfProfile = AppStorage.get<string>('winehua.perf.profile') ?? 'baseline';
     this.gamePath = AppStorage.get<string>('winehua.game.path') ?? '';
     this.gameArguments = AppStorage.get<string[]>('winehua.game.args') ?? [];

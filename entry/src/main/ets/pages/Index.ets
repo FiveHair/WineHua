@@ -542,6 +542,11 @@ struct Index {
             .layoutWeight(1).height(34)
             .backgroundColor(this.d3dBackend === 'dxvk_legacy' ? '#285' : '#333')
             .onClick(() => this.selectD3dBackend('dxvk_legacy'))
+          Button('DXVK 2.6')
+            .layoutWeight(1).height(34)
+            .fontSize(12)
+            .backgroundColor(this.d3dBackend === 'dxvk_modern_2_6' ? '#285' : '#333')
+            .onClick(() => this.selectD3dBackend('dxvk_modern_2_6'))
         }
         .width('100%').margin({ bottom: 8 })
 
