@@ -4,6 +4,7 @@ import { window } from '@kit.ArkUI';
 import testNapi from 'libentry.so';
 import { WineWindowManager } from '../service/WineWindowManager';
 import { PopupWindowManager } from '../service/PopupWindowManager';
+import { DisplaySettingsService } from '../service/DisplaySettingsService';
 
 const DOMAIN = 0x0000;
 const TAG = 'WWA';
@@ -122,6 +123,11 @@ export default class WineWindowAbility extends UIAbility {
             // 禁止 OHOS 标题栏双击最大化 (与 Wine 内置最大化冲突),
             // maximize() 程序调用不受影响
             try { mw.setWindowTitleMoveEnabled(false); } catch (_) {}
+            // 保持屏幕常亮 (设置项): 游戏跑在子窗口 (主要场景), 创建时应用持久化值
+            mw.setWindowKeepScreenOn(DisplaySettingsService.getInstance().keepScreenOn)
+              .catch((e: Object) => {
+                hilog.warn(DOMAIN, TAG, '[WWA] setWindowKeepScreenOn fail: %{public}s', JSON.stringify(e));
+              });
             hilog.info(DOMAIN, TAG, '[WWA] window decor config OK');
           }
         } catch (e) {

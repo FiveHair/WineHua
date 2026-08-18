@@ -1,4 +1,4 @@
-import { promptAction, SegmentButton, SegmentButtonOptions } from '@kit.ArkUI';
+import { promptAction, SegmentButton, SegmentButtonOptions, window } from '@kit.ArkUI';
 import { fileUri, picker } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
@@ -41,6 +41,8 @@ export struct SettingsView {
   @State fontImporting: boolean = false;
   // -- 显示 --
   @State scaleText: string = '';
+  // 保持屏幕常亮 (镜像 DisplaySettingsService, 设置页即时生效)
+  @State keepScreenOn: boolean = false;
 
   private env: WineEnvService = WineEnvService.getInstance();
   private displaySettings: DisplaySettingsService = DisplaySettingsService.getInstance();
@@ -84,6 +86,20 @@ export struct SettingsView {
     FontImportService.getInstance().subscribe(this.mirror);
     this.mirror();
     this.scaleText = this.fmtScale(this.displaySettings.scale);
+    this.keepScreenOn = this.displaySettings.keepScreenOn;
+  }
+
+  // 保持屏幕常亮: 持久化 + 立即应用到主窗口 (EntryAbility 已存引用;
+  // 不依赖 getLastWindow, 多窗口下它会返回游戏子窗口)
+  private toggleKeepScreenOn(v: boolean): void {
+    this.keepScreenOn = v;
+    this.displaySettings.setKeepScreenOn(v);
+    const mainWin = AppStorage.get<window.Window>('winehua.mainWindow');
+    if (mainWin) {
+      mainWin.setWindowKeepScreenOn(v).catch((e: Object) => {
+        hilog.error(0x0000, 'SettingsView', 'setWindowKeepScreenOn fail: %{public}s', JSON.stringify(e));
+      });
+    }
   }
 
   // 状态文本配色, 与标题栏同一套规则: 失败红 / 运行绿 / 就绪或进行中蓝 / 未启动灰
@@ -236,11 +252,26 @@ export struct SettingsView {
             .fontColor($r('app.color.text_tertiary'))
             .width('100%')
 
+          // 保持屏幕常亮 (参照 HiSH): 窗口级 keepScreenOn 标志, 主窗口/游戏
+          // 子窗口启动时各应用一次 (EntryAbility/WineWindowAbility), 切换即时生效
+          Row() {
+            Text('保持屏幕常亮')
+              .fontColor($r('app.color.text_primary'))
+              .layoutWeight(1)
+            Checkbox()
+              .select(this.keepScreenOn)
+              .onChange((v: boolean) => this.toggleKeepScreenOn(v))
+          }
+          .width('100%').alignItems(VerticalAlign.Center)
+          Text('开启后屏幕不会自动熄灭（运行 Windows 程序 / 挂机时适用）')
+            .fontSize(12)
+            .fontColor($r('app.color.text_tertiary'))
+            .width('100%')
+
           // Wine 语言 (从 Wine 引擎卡移入, 同属显示/区域设置):
           // 切换仅写配置, 重启 Wine 引擎后生效
           Text('Wine 语言')
-            .fontSize(13)
-            .fontColor($r('app.color.text_secondary'))
+            .fontColor($r('app.color.text_primary'))
             .width('100%')
           SegmentButton({
             options: SegmentButtonOptions.capsule({
@@ -268,8 +299,7 @@ export struct SettingsView {
           // 虚拟桌面 = 独立窗口承载 Wine 桌面
           if (this.isPcDevice()) {
             Text('桌面模式')
-              .fontSize(13)
-              .fontColor($r('app.color.text_secondary'))
+              .fontColor($r('app.color.text_primary'))
               .width('100%')
             SegmentButton({
               options: SegmentButtonOptions.capsule({

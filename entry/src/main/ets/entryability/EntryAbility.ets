@@ -3,6 +3,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { WineWindowManager } from '../service/WineWindowManager';
+import { DisplaySettingsService } from '../service/DisplaySettingsService';
 import testNapi from 'libentry.so';
 
 const DOMAIN = 0x0000;
@@ -233,6 +234,13 @@ export default class EntryAbility extends UIAbility {
       let mainWin = windowStage.getMainWindowSync();
       if (mainWin) {
         mainWin.setWindowDecorVisible(false);
+        // 保持屏幕常亮 (设置项): 启动时应用持久化值;
+        // 引用存入 AppStorage 供设置页切换时立即应用 (getLastWindow 多窗口下不可靠)
+        mainWin.setWindowKeepScreenOn(DisplaySettingsService.getInstance().keepScreenOn)
+          .catch((e: Object) => {
+            hilog.warn(DOMAIN, 'testTag', 'setWindowKeepScreenOn fail: %{public}s', JSON.stringify(e));
+          });
+        AppStorage.setOrCreate<window.Window>('winehua.mainWindow', mainWin);
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
     });

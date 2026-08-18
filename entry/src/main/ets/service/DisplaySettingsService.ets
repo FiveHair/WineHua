@@ -5,6 +5,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 const DOMAIN: number = 0x0000;
 const STORE_NAME: string = 'display_settings';
 const KEY_SCALE: string = 'scale';
+const KEY_KEEP_SCREEN_ON: string = 'keep_screen_on';
 const DEFAULT_SCALE: number = 2.0;
 // 范围 [1, 3] (用户决策: 0.75 档位取消); 旧版本存过的 <1 值由 clamp 收敛到 1.0
 const MIN_SCALE: number = 1.0;
@@ -30,6 +31,10 @@ export class DisplaySettingsService {
   }
 
   scale: number = DEFAULT_SCALE;
+  // 保持屏幕常亮 (窗口级 keepScreenOn 标志, 参照 HiSH): 持久化同 store,
+  // 生效时机 = 窗口创建/启动时 (EntryAbility 主窗口 + WineWindowAbility 子窗口
+  // 各应用一次), 设置页切换时立即应用到主窗口 (winehua.mainWindow)
+  keepScreenOn: boolean = false;
 
   private store: preferences.Preferences | null = null;
   private initialized: boolean = false;
@@ -44,6 +49,10 @@ export class DisplaySettingsService {
       const v = this.store.getSync(KEY_SCALE, DEFAULT_SCALE) as number;
       if (typeof v === 'number' && Number.isFinite(v)) {
         this.scale = this.clamp(v);
+      }
+      const keep = this.store.getSync(KEY_KEEP_SCREEN_ON, false) as boolean;
+      if (typeof keep === 'boolean') {
+        this.keepScreenOn = keep;
       }
     } catch (e) {
       hilog.error(DOMAIN, 'wine', 'display settings load fail: %{public}s', JSON.stringify(e));
@@ -60,6 +69,19 @@ export class DisplaySettingsService {
       this.store.flush();
     } catch (e) {
       hilog.error(DOMAIN, 'wine', 'display settings persist fail: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  setKeepScreenOn(v: boolean): void {
+    this.keepScreenOn = v;
+    if (!this.store) {
+      return;
+    }
+    try {
+      this.store.putSync(KEY_KEEP_SCREEN_ON, v);
+      this.store.flush();
+    } catch (e) {
+      hilog.error(DOMAIN, 'wine', 'keep screen on persist fail: %{public}s', JSON.stringify(e));
     }
   }
 
