@@ -632,6 +632,29 @@ export class AppLibraryService {
     return (result && result.pid > 0) ? result.pid : -1;
   }
 
+  // 从"最近使用"移除: 清掉 lastRun (不带该字段 = recent 分类消失)。条目本身
+  // 保留在库 — 收藏/开始菜单/来源分类不受影响, 下次启动重新入列。
+  // 不能用 withField({lastRun: undefined}): 它的 undefined 语义是保留原值,
+  // 故内联构造 (对象字面量显式列全字段, 保持 ArkTS 风格)
+  clearRecent(path: string): void {
+    this.entries = this.entries.map((e: AppEntry): AppEntry => {
+      if (e.path != path || e.lastRun === undefined) {
+        return e;
+      }
+      return {
+        path: e.path,
+        name: e.name,
+        icon: e.icon,
+        favorite: e.favorite,
+        builtin: e.builtin,
+        hidden: e.hidden,
+        source: e.source
+      };
+    });
+    this.persist();
+    this.notify();
+  }
+
   // 记录启动时刻 ("最近使用"分类的排序依据)。仅受理成功才记 — 受理失败
   // /闪退不代表用户真的"用"了它; 库外路径 (文件页直接启动未入库 exe) 跳过
   private markLaunched(path: string): void {

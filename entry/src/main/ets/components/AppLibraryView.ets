@@ -487,6 +487,14 @@ export struct AppLibraryView {
             }
           })
       }
+      // 仅"最近使用"分类显示: 清掉 lastRun 时间戳 (应用仍留在库中,
+      // 收藏/来源分类不受影响); 非破坏性操作, 不弹确认
+      if (this.chip == 'recent') {
+        MenuItem({ content: '从最近使用中删除' })
+          .onChange(() => {
+            this.lib.clearRecent(entry.path);
+          })
+      }
       if (!entry.builtin) {
         MenuItem({ content: '从列表移除' })
           .contentFontColor($r('app.color.danger'))
