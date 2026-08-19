@@ -25,6 +25,7 @@ add_library(entry SHARED
     audio_stream.cpp
     graphics_broker.cpp
     virgl_host_config.cpp
+    experiment_payload.cpp
     napi_init.cpp
     wine_process.cpp
     wine_env.cpp
