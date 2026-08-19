@@ -13,7 +13,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
-STAGING="$BUILD_DIR/gnutls_staging"
+# STAGING 按 wine 架构隔离: 跨架构切换 (aarch64↔x86_64) 复用共享目录会残留旧架构库
+# (build_one 每次 rm -rf 重建但 STAGING 不清空) → gnutls configure 链接到旧架构 nettle
+# 报 "Nettle lacks rsa_sec_decrypt"。master 仅 x86_64 无此问题; feature/arm64 引入 aarch64 后必现。
+STAGING="$BUILD_DIR/gnutls_staging-$WINE_ARCH"
 GNULIB_DIR="$ROOT/thirdparty/gnutls/gnulib"   # gnutls 的 gnulib submodule, 共享给 libtasn1
 
 # 幂等跳过: 5 个库的关键产物全部就位
@@ -29,6 +32,12 @@ idempotent_done() {
 
 if idempotent_done; then
     log "GnuTLS 链已就绪，跳过"
+    # 幂等跳过时补复制 .pc 到架构 pkgconfig 目录: SYSROOT_EXT_PC 按架构隔离后,
+    # 跨架构切换 (或共享目录 .pc 被清) 时 stage_pc 不会重跑, 而 gstreamer/wine
+    # configure 依赖这些 .pc → 缺 nettle.pc 报 "HLS crypto library not found"。
+    if [ -d "$STAGING/lib/pkgconfig" ]; then
+        cp "$STAGING"/lib/pkgconfig/*.pc "$SYSROOT_EXT_PC/" 2>/dev/null || true
+    fi
     exit 0
 fi
 
@@ -85,7 +94,8 @@ build_one() {
     mkdir -p "$build"
     cd "$build"
     CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
-    "$src/configure" --host=$GNU_HOST --prefix="$STAGING" --disable-static \
+    "$src/configure" --host=$GNU_HOST --prefix="$STAGING" \
+        --libdir="$STAGING/lib" --disable-static \
         "$@"
     # 阻止 automake 因 NFS clock skew (Makefile.in 比 Makefile.am 旧) 重新生成
     # → 缺 build-aux/mdate-sh 等辅助文件 → 构建失败

@@ -260,7 +260,8 @@ if [ ! -d "$GST_LIBDIR/gstreamer-1.0" ] || \
         -Damrnb=disabled -Damrwbdec=disabled -Ddv1394=disabled -Dgtk3=disabled \
         -Doss=disabled -Doss4=disabled -Dosxaudio=disabled -Dosxvideo=disabled \
         -Dqt5=disabled -Dqt6=disabled -Drpicamsrc=disabled -Dsoup=disabled \
-        -Dv4l2=disabled -Dximagesrc=disabled -Ddirectsound=disabled
+        -Dv4l2=disabled -Dximagesrc=disabled -Ddirectsound=disabled \
+        -Dhls-crypto=nettle
     meson compile -C "$build" -j "$JOBS"
     DESTDIR=/ meson install -C "$build"
     stage_pcs

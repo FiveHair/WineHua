@@ -1263,7 +1263,11 @@ export class SmokeRunner {
          * diagnostic run through runWineProgram. */
         'WINEDEBUG': '+loaddll,+module'
       };
-      // x86_64 (box64 时代): guest venus ELF 经 box64 加载; arm64 原生 aarch64 不需要
+      // guestArch === 'x86_64' 时注入 box64 桥接 env:
+      //  方案② (arm64 设备 + x86_64 wine + box64 转译) — 必需, box64 加载 x86_64 venus guest;
+      //  方案③ (arm64 原生, guestArch=aarch64) — 不注入, aarch64 guest 原生 dlopen;
+      //  方案① (x86_64 设备, guestArch=x86_64) — 多余注入但无害 (C++ guestElfMode 原生
+      //  dlopen .so, 不读 USE_LIBBOX64/BOX64_*, 故不区分设备架构)。
       if (guestArch === 'x86_64') {
         smokeEnvironment['USE_LIBBOX64'] = '1';
         smokeEnvironment['BOX64_LOG'] = '1';

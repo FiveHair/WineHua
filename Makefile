@@ -4,9 +4,8 @@
 #   make                                          # 默认: x86_64 全量构建
 #   make NATIVE_ARCH=x86_64
 #   make NATIVE_ARCH=arm64-v8a
-#   make NATIVE_ARCH=all                          # 双架构 HAP
 #
-#   单个模块: make deps | wine | fex | native | assemble | hap
+#   单个模块: make deps | wine | fex | box64 | box64-wow64 | native | assemble | hap
 #   清理:     make clean
 
 ROOT := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
@@ -15,7 +14,7 @@ ROOT := $(realpath $(dir $(lastword $(MAKEFILE_LIST))))
 # ── 配置 ──
 NATIVE_ARCH ?= x86_64
 # guest 栈架构与 Wine 对齐: arm64 原生 wine → aarch64 venus/virgl guest (同架构 dlopen);
-# x86_64 → x86_64 guest。NATIVE_ARCH=all 双架构时需显式指定 (默认 x86_64, 兼容旧行为)
+# x86_64 → x86_64 guest。(NATIVE_ARCH=all 已移除, 见下方 ARCHES 注释)
 GUEST_ARCH ?= $(WINE_ARCH)
 # guest gfx/vulkan 按架构构建 (mesa venus/virgl 交叉编译 aarch64|x86_64-linux-ohos);
 # 需要 dlopen 的关键 guest 库由 assemble 复制到 entry/libs/<NATIVE_ARCH> (el1 bundle)
@@ -46,12 +45,9 @@ DXVK_ARTIFACTS := \
 DXVK_STAMP := $(STAMPS)/dxvk-legacy
 DXVK_SOURCE_INPUTS := $(shell find $(ROOT)/thirdparty/dxvk/src -type f 2>/dev/null; find $(ROOT)/thirdparty/dxvk -maxdepth 1 -type f 2>/dev/null)
 
-# 架构列表 (NATIVE_ARCH=all 时展开为两个)
-ifeq ($(NATIVE_ARCH),all)
-ARCHES := arm64-v8a x86_64
-else
+# 架构列表 (NATIVE_ARCH=all 已移除: 单一 WINE_ARCH 无法同时满足 arm64 原生与
+# box64+wine 两个 arm64 assemble, 双架构请分别 make NATIVE_ARCH=x86_64 / arm64-v8a)
 ARCHES := $(NATIVE_ARCH)
-endif
 
 # ── 关键产物 (用于验证构建是否完成) ──
 DEPS_SENTINEL   := $(BUILD_DIR)/sysroot-ext/usr/lib/$(WINE_ARCH)-linux-ohos/libfreetype.so.6
@@ -240,9 +236,12 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_gnutls.sh $(SCRIPTS)/b
 # wine — Wine 交叉编译 + wineserver
 # ============================================================
 .PHONY: wine
-wine: $(STAMPS)/wine-$(CONFIG)
+# wine stamp 按 WINE_ARCH 区分: 方案② (arm64 设备 + x86_64 wine) 与方案③ (aarch64)
+# 的 NATIVE_ARCH 相同 (arm64-v8a), 共用 stamp 会让方案② 误用方案③ 的 stamp 跳过构建
+# → assemble 找不到 wine-ohos-x86_64。方案① (NATIVE_ARCH=x86_64) 无冲突但同样带后缀。
+wine: $(STAMPS)/wine-$(CONFIG)-$(WINE_ARCH)
 
-$(STAMPS)/wine-$(CONFIG): $(SCRIPTS)/build_wine.sh $(SCRIPTS)/env.sh $(STAMPS)/deps FORCE | $(STAMPS)
+$(STAMPS)/wine-$(CONFIG)-$(WINE_ARCH): $(SCRIPTS)/build_wine.sh $(SCRIPTS)/env.sh $(STAMPS)/deps FORCE | $(STAMPS)
 	@if [ -f $@ ] && [ -f $(WINE_SENTINEL) ] && \
 	    ! [ "$(SCRIPTS)/build_wine.sh" -nt $@ ] && \
 	    ! find $(ROOT)/thirdparty/wine \
@@ -269,6 +268,7 @@ $(STAMPS)/fex-arm64-v8a: $(SCRIPTS)/build_fex.sh $(SCRIPTS)/env.sh FORCE | $(STA
 	    echo "  [fex] skip (x86_64)"; \
 	    mkdir -p $(dir $@) && touch $@; \
 	elif [ -f $@ ] && \
+	    ! [ "$(SCRIPTS)/build_fex.sh" -nt $@ ] && \
 	    ! find $(ROOT)/thirdparty/fex \
 	           -newer $@ -type f \
 	           \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.S' \
@@ -281,17 +281,19 @@ $(STAMPS)/fex-arm64-v8a: $(SCRIPTS)/build_fex.sh $(SCRIPTS)/env.sh FORCE | $(STA
 	fi
 
 # ============================================================
-# box64 — Box64 WoW64 模拟器 DLL (arm64 原生 wine 转译 32 位 x86 应用, wowbox64.dll)
-#         (fex 的 libwow64fex.dll 同级备选, 运行时 HODLL 选择)
+# box64 — Box64 in-process 转译器 box64.so (box64+wine 方案②)
+#         (arm64 设备 + x86_64 wine 全转译; NATIVE_ARCH=arm64-v8a + WINE_ARCH=x86_64)
 # ============================================================
 .PHONY: box64
 box64: $(STAMPS)/box64-arm64-v8a
 
-$(STAMPS)/box64-arm64-v8a: $(SCRIPTS)/build_box64_wow64.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
-	@if [ "$(WINE_ARCH)" = "x86_64" ]; then \
-	    echo "  [box64] skip (x86_64)"; \
+$(STAMPS)/box64-arm64-v8a: $(SCRIPTS)/build_box64.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
+	@if [ "$(WINE_ARCH)" = "aarch64" ] || [ "$(NATIVE_ARCH)" = "x86_64" ]; then \
+	    echo "  [box64] skip (非 box64+wine 方案, WINE_ARCH=$(WINE_ARCH))"; \
 	    mkdir -p $(dir $@) && touch $@; \
 	elif [ -f $@ ] && \
+	    [ -f $(ROOT)/entry/libs/arm64-v8a/box64.so ] && \
+	    ! [ "$(SCRIPTS)/build_box64.sh" -nt $@ ] && \
 	    ! find $(ROOT)/thirdparty/box64 \
 	           -newer $@ -type f \
 	           \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.py' \
@@ -299,7 +301,32 @@ $(STAMPS)/box64-arm64-v8a: $(SCRIPTS)/build_box64_wow64.sh $(SCRIPTS)/env.sh FOR
 	           2>/dev/null | grep -q .; then \
 	    echo "  [box64] up to date"; \
 	else \
-	    echo "=== box64 ==="; \
+	    echo "=== box64 (box64+wine) ==="; \
+	    bash $(SCRIPTS)/build_box64.sh && touch $@; \
+	fi
+
+# ============================================================
+# box64-wow64 — Box64 WoW64 DLL (arm64 原生 wine 方案③, wowbox64.dll)
+#         (转译 32 位 x86 应用, HODLL 默认引擎; fex 的 libwow64fex.dll 同级备选)
+# ============================================================
+.PHONY: box64-wow64
+box64-wow64: $(STAMPS)/box64-wow64-arm64-v8a
+
+$(STAMPS)/box64-wow64-arm64-v8a: $(SCRIPTS)/build_box64_wow64.sh $(SCRIPTS)/env.sh FORCE | $(STAMPS)
+	@if [ "$(WINE_ARCH)" = "x86_64" ]; then \
+	    echo "  [box64-wow64] skip (非 arm64 原生 wine, WINE_ARCH=x86_64)"; \
+	    mkdir -p $(dir $@) && touch $@; \
+	elif [ -f $@ ] && \
+	    [ -f $(BUILD_DIR)/box64-pe/wowbox64-prefix/src/wowbox64-build/wowbox64.dll ] && \
+	    ! [ "$(SCRIPTS)/build_box64_wow64.sh" -nt $@ ] && \
+	    ! find $(ROOT)/thirdparty/box64 \
+	           -newer $@ -type f \
+	           \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.py' \
+	              -o -name 'CMakeLists.txt' -o -name '*.cmake' \) \
+	           2>/dev/null | grep -q .; then \
+	    echo "  [box64-wow64] up to date"; \
+	else \
+	    echo "=== box64-wow64 (wowbox64.dll) ==="; \
 	    bash $(SCRIPTS)/build_box64_wow64.sh && touch $@; \
 	fi
 
@@ -323,6 +350,7 @@ $$(STAMPS)/$(1)/native: $(SCRIPTS)/build_native.sh $(SCRIPTS)/env.sh FORCE | $$(
 		    [ -f "$$$$libs_dir/libfreetype.so.6" ] && \
 		    [ -f "$$$$libs_dir/libxkbcommon.so.0" ] && \
 		    [ -f "$$$$libs_dir/libxml2.so.2" ] && \
+		    [ -f "$$$$libs_dir/libwayland-server.so.0" ] && \
 		    [ -f "$$$$libs_dir/libwinehua_vtest_server.so" ] && \
 	    ! [ "$(SCRIPTS)/build_native.sh" -nt $$@ ] && \
 	    ! find $(ROOT)/thirdparty/wayland \
@@ -357,7 +385,7 @@ $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFA
 	$(ROOT)/smoke/winehua_d3d8_smoke.c \
 	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
 	$(ROOT)/smoke/winehua_win32_driver.c \
-	$$(STAMPS)/deps $$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native \
+	$$(STAMPS)/deps $$(STAMPS)/wine-$(1)-$(WINE_ARCH) $$(STAMPS)/$(1)/native \
 	$$(STAMPS)/$(1)/host-vulkan \
 	$$(ASSEMBLE_GUEST_INPUTS) | $$(STAMPS)/$(1)
 	@echo "=== assemble ($(1)) ==="
@@ -366,9 +394,10 @@ $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFA
 endef
 $(foreach a,arm64-v8a x86_64,$(eval $(call assemble_rule,$(a))))
 
-# arm64 assemble 额外依赖 fex (libarm64ecfex.dll 转译 x64) + box64 (wowbox64.dll 转译 i386)
+# arm64 assemble 额外依赖: 方案③ fex (libarm64ecfex.dll) + box64-wow64 (wowbox64.dll);
+# 方案② box64 (box64.so)。各 target 内部按 WINE_ARCH skip。
 # 32-bit PE DLL (i386-windows) 已由 wine 主构建 --enable-archs=i386 提供
-$(STAMPS)/arm64-v8a/assemble: $(STAMPS)/fex-arm64-v8a $(STAMPS)/box64-arm64-v8a
+$(STAMPS)/arm64-v8a/assemble: $(STAMPS)/fex-arm64-v8a $(STAMPS)/box64-arm64-v8a $(STAMPS)/box64-wow64-arm64-v8a
 
 # ============================================================
 # hap — HAP 构建 + 签名 (统一 rawfile zip)
@@ -423,14 +452,15 @@ help:
 	@echo ""
 	@echo "全部构建:"
 	@echo "  make                                          # 默认配置全量 → HAP"
-	@echo "  make NATIVE_ARCH=arm64-v8a                    # ARM64"
-	@echo "  make NATIVE_ARCH=all                          # 双架构 HAP"
+	@echo "  make NATIVE_ARCH=arm64-v8a                    # ARM64 (方案② box64+wine: 加 WINE_ARCH=x86_64)"
+	@echo "  make NATIVE_ARCH=x86_64                       # x86_64 (方案①)"
 	@echo ""
 	@echo "单模块:"
 	@echo "  make deps      # 交叉编译依赖 → sysroot-ext"
 	@echo "  make wine      # Wine + wineserver"
 	@echo "  make fex       # FEX 模拟器 DLL (arm64 转译 x64/x86 应用)"
-	@echo "  make box64     # Box64 WoW64 DLL (arm64 转译 32 位 x86 应用, HODLL)"
+	@echo "  make box64     # Box64 in-process 转译器 box64.so (box64+wine 方案②)"
+	@echo "  make box64-wow64 # Box64 WoW64 DLL wowbox64.dll (arm64 原生方案③, HODLL)"
 	@echo "  make native    # Native compositor 依赖"
 	@echo "  make host-vulkan # Host Vulkan exact replay"
 	@echo "  make assemble  # 组装布局"

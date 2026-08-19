@@ -1,4 +1,5 @@
 #include "wine_env.h"
+#include "wine_scheme.h"
 #include "wine_constants.h"
 #include "audio_broker.h"
 #include "audio_ipc_protocol.h"
@@ -41,6 +42,7 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                                       const std::string& prefixDir,
                                       const std::string& wineLang) {
     std::string shareDir = binDir + "/../share";
+    LogWineScheme("BuildWineEnv");
     std::string xkbDir = shareDir + "/X11/xkb";
     std::string midiSoundfontPath = binDir + "/../audio/winehua-gm.sf2";
 #ifdef __aarch64__
@@ -48,7 +50,10 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
 #else
     static constexpr const char* native_lib_dir = "x86_64";
 #endif
-    std::string runtimeLibPath = binDir + ":" + binDir + "/" WINE_UNIX_SUBDIR ":/data/storage/el1/bundle/libs/" + native_lib_dir;
+    // 库搜索路径基座 (不含 el1)。方案①③ 的系统 linker 路径 (runtimeLibPath) 在其后
+    // 追加 el1 bundle libs; 方案② (box64+wine) 的 BOX64_LD_LIBRARY_PATH 不含 el1
+    // arm64 目录 (x86_64 搜索路径里放 arm64 库无意义, 与基线 b6c65a0 一致)。
+    std::string libPathBase = binDir + ":" + binDir + "/" WINE_UNIX_SUBDIR;
     winehua::GraphicsBackendState graphicsState = winehua::GraphicsBroker::GetInstance().GetState();
     std::string guestReceiverLibDir;
     bool useGuestReceiverRuntime = graphicsState.active == winehua::GraphicsBackend::Virgl;
@@ -56,13 +61,18 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
     if (useGuestReceiverRuntime && graphicsState.guestReceiverPresent && !graphicsState.guestReceiverRuntimeDir.empty()) {
         guestReceiverLibDir = graphicsState.guestReceiverRuntimeDir + "/lib";
         if (access(guestReceiverLibDir.c_str(), F_OK) == 0) {
-            runtimeLibPath = guestReceiverLibDir + ":" + runtimeLibPath;
+            libPathBase = guestReceiverLibDir + ":" + libPathBase;
         }
     }
+    std::string runtimeLibPath = libPathBase + ":/data/storage/el1/bundle/libs/" + native_lib_dir;
 
     std::string dllPath = binDir + "/" WINE_PE_SUBDIR ":" + binDir + "/i386-windows:" + binDir;
+#if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
+    // 方案②: box64 转译, el1 arm64 原生库不走 wine PE/unixlib 搜索 (与 wine_child.cpp 一致)
+#else
     // bundled libs 加入 WINEDLLPATH, load_unixlib_by_name() 从此搜索 .so
     dllPath += std::string(":/data/storage/el1/bundle/libs/") + native_lib_dir;
+#endif
 
     // ==== Layer 0: 硬基线 (路径、locale、Wayland socket) ====
     // NOTE: WINEDLLDIR0/1, WINEDLLPATH 在 DXVK 路径下会被 AppendD3dBackendEnv 覆盖
@@ -72,12 +82,12 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "HOME=" + homeDir,
         "WINEPREFIX=" + (prefixDir.empty() ? std::string(WINE_PREFIX) : prefixDir),
         "WINEDATADIR=" + shareDir + "/wine",
-        "WINEDLLDIR=" + binDir + "/x86_64-unix",
-        "WINEDLLDIR0=" + binDir + "/x86_64-windows",
+        "WINEDLLDIR=" + binDir + "/" WINE_UNIX_SUBDIR,
+        "WINEDLLDIR0=" + binDir + "/" WINE_PE_SUBDIR,
         "WINEDLLDIR1=" + binDir + "/i386-windows",
         "WINEDLLDIR2=" + binDir,
         "WINEDLLPATH=" + dllPath,
-        "WINEDEBUG=-all,+opengl,+waylanddrv,+winediag",
+        "WINEDEBUG=-all,+err,+winediag",
         /* Guest Mesa 诊断: dri 驱动查找 / EGL 初始化 / gallium 细节 → wine_stderr.
          * graphics_smoke 的 WINEDEBUG 会被 SmokeRunner 覆盖, 故用 mesa 侧 env 定位 GL 失败. */
         "LIBGL_DEBUG=verbose",
@@ -92,16 +102,26 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         // 与 LANG 同取设置页 wineLang (zh_CN/en_US)
         "LC_ALL=" + wineLang + ".UTF-8",
         "XKB_CONFIG_ROOT=" + xkbDir,
-        "PATH=/usr/local/bin:/data/app/bin:/usr/bin:/vendor/bin:" + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir,
+        "PATH=/usr/local/bin:/data/app/bin:/usr/bin:/vendor/bin:" + binDir + "/" WINE_PE_SUBDIR ":" + binDir + "/i386-windows:" + binDir,
         "TMPDIR=" WINE_TMPDIR,
         "MIDI_SOUNDFONT_PATH=" + midiSoundfontPath,
         // winegstreamer 运行时加载 GStreamer 插件 (gst-plugins-base/good/libav)
         "GST_PLUGIN_PATH=" + binDir + "/" WINE_UNIX_SUBDIR "/gstreamer-1.0",
         "GST_PLUGIN_SYSTEM_PATH=" + binDir + "/" WINE_UNIX_SUBDIR "/gstreamer-1.0",
     };
-    // ==== Layer 1: (Box64 性能调优已移除; arm64 原生 wine + FEX 不需要) ====
-    // ==== Layer 2: 运行时库路径 ====
+#if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
+    // ==== Layer 1: Box64 性能调优 (方案② box64+wine) ====
+    // NOTE: BOX64_DYNAREC_WEAKBARRIER=2 在桌面 DXVK 下会被 AppendStableDesktopDxvkEnv 覆盖为 0
+    AppendBox64PerfStrings(env);
+    // ==== Layer 2: 运行时库路径 (方案②) ====
+    // LD_LIBRARY_PATH 只含 arm64 原生 (box64 宿主); x86_64 wine/guest .so 由 box64
+    // 的 BOX64_LD_LIBRARY_PATH 加载 (DXVK 下被 AppendD3dBackendEnv 覆盖为完整路径)
+    env.push_back("LD_LIBRARY_PATH=/data/app/bin:/usr/local/lib:/system/lib64/module:/system/lib64");
+    env.push_back("BOX64_LD_LIBRARY_PATH=" + libPathBase);
+#else
+    // ==== Layer 2: 运行时库路径 (方案①③: Wine 与设备同架构, 系统 linker 加载) ====
     env.push_back("LD_LIBRARY_PATH=" + runtimeLibPath);
+#endif
     // ==== Layer 3: 音频 bootstrap (条件) ====
     if (audioBootstrapFd >= 0) {
         env.push_back("WINE_OHOS_AUDIO_ENABLE=1");
@@ -167,6 +187,13 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
     const std::string guestVulkanLib = guestVulkanRoot + "/lib";
     const std::string guestVulkanIcd = guestVulkanRoot +
         "/share/vulkan/icd.d/venus_icd." WINE_WINE_ARCH ".json";
+#if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
+    // 方案② box64+wine: box64 的 x86_64 guest 库搜索路径 (wine .so + guest gfx/vulkan)
+    const std::string box64LibraryPath = guestVulkanLib + ":" +
+        binDir + "/guest_gfx/lib:" + binDir + ":" +
+        binDir + "/" WINE_UNIX_SUBDIR ":" +
+        std::string(WINE_RUNTIME_ROOT) + "/lib/x86_64";
+#endif
     const std::string wineDllPath = overlay64 + ":" + overlay86 + ":" +
         binDir + "/" WINE_PE_SUBDIR ":" + binDir + "/i386-windows:" + binDir;
 
@@ -179,6 +206,43 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "WINEHUA_VULKAN_RUNTIME=1",
         "WINEHUA_VULKAN_LOADER_ARCH=" WINE_WINE_ARCH,
         "WINEHUA_VENUS_ICD_ARCH=" WINE_WINE_ARCH,
+#if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
+        // 方案② box64+wine: box64 转译加载 x86_64 venus guest, 注入 box64 桥接 env
+        "USE_LIBBOX64=1",
+        "BOX64_LD_LIBRARY_PATH=" + box64LibraryPath,
+        "BOX64_EMULATED_LIBS=libvulkan.so:libvulkan.so.1:"
+            "libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:"
+            "libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:"
+            "libwayland-client.so:libwayland-client.so.0:libwayland-server.so:"
+            "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
+            "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8:"
+            // GStreamer 链 (winegstreamer): glib + gst core/base + bad/ugly 依赖库。
+            // box64 优先 dlopen 宿主 (aarch64 系统) 版本, 避免转译 glib 的
+            // TLS/原子/线程代码 (OHOS musl 下 box64 转译这些易崩); 宿主无则回退转译。
+            "libglib-2.0.so:libglib-2.0.so.0:"
+            "libgobject-2.0.so:libgobject-2.0.so.0:"
+            "libgio-2.0.so:libgio-2.0.so.0:"
+            "libgmodule-2.0.so:libgmodule-2.0.so.0:"
+            "libgstreamer-1.0.so:libgstreamer-1.0.so.0:"
+            "libgstbase-1.0.so:libgstbase-1.0.so.0:"
+            "libgstvideo-1.0.so:libgstvideo-1.0.so.0:"
+            "libgstaudio-1.0.so:libgstaudio-1.0.so.0:"
+            "libgsttag-1.0.so:libgsttag-1.0.so.0:"
+            "libgstpbutils-1.0.so:libgstpbutils-1.0.so.0:"
+            "libgstallocators-1.0.so:libgstallocators-1.0.so.0:"
+            "libgstapp-1.0.so:libgstapp-1.0.so.0:"
+            "libgstcontroller-1.0.so:libgstcontroller-1.0.so.0:"
+            "libgstfft-1.0.so:libgstfft-1.0.so.0:"
+            "libgstnet-1.0.so:libgstnet-1.0.so.0:"
+            "libgstriff-1.0.so:libgstriff-1.0.so.0:"
+            "libgstrtp-1.0.so:libgstrtp-1.0.so.0:"
+            "libgstrtsp-1.0.so:libgstrtsp-1.0.so.0:"
+            "libgstsdp-1.0.so:libgstsdp-1.0.so.0:"
+            // bad/ugly 插件依赖: videoparsersbad 需 codecparsers, mpegtsdemux 需 mpegts
+            "libgstcodecparsers-1.0.so:libgstcodecparsers-1.0.so.0:"
+            "libgstmpegts-1.0.so:libgstmpegts-1.0.so.0:"
+            "libxml2.so:libxml2.so.2:libz.so:libz.so.1",
+#endif
 #ifdef __aarch64__
         // arm64 原生 wine: venus ICD 是否打包由下方 for 循环后运行时检测
 #else

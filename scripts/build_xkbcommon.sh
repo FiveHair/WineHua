@@ -31,7 +31,8 @@ mkdir -p "$SYSROOT_EXT_INC" "$SYSROOT_EXT_LIB" "$SYSROOT_EXT_PC"
 # ── 1. libffi ──
 build_libffi() {
     local src="$ROOT/thirdparty/libffi"
-    local build="$BUILD_DIR/libffi_build"
+    # build 目录按 WINE_ARCH 隔离: 跨架构复用会残留旧架构配置/产物 (meson/cmake 不总是重配)
+    local build="$BUILD_DIR/libffi_build_$WINE_ARCH"
     if [ -f "$SYSROOT_EXT_LIB/libffi.so.8" ] && [ -f "$SYSROOT_EXT_LIB/libffi.so" ] && [ -f "$SYSROOT_EXT_INC/ffi.h" ]; then return 0; fi
 
     log "--- libffi ---"
@@ -68,7 +69,8 @@ EOF
 # ── 2. libxml2 ──
 build_libxml2() {
     local src="$ROOT/thirdparty/libxml2"
-    local build="$BUILD_DIR/libxml2_build"
+    # build 目录按 WINE_ARCH 隔离 (跨架构复用残留旧配置)
+    local build="$BUILD_DIR/libxml2_build_$WINE_ARCH"
     if [ -f "$SYSROOT_EXT_LIB/libxml2.so.2" ] && [ -d "$SYSROOT_EXT_INC/libxml" ] && [ -f "$SYSROOT_EXT_PC/libxml-2.0.pc" ] && [ -f "$SYSROOT_EXT_LIB/libxml2.so" ]; then return 0; fi
 
     log "--- libxml2 ---"
@@ -101,7 +103,9 @@ EOF
 # ── 3. xkbcommon ──
 build_xkbcommon() {
     local src="$ROOT/thirdparty/libxkbcommon"
-    local build="$BUILD_DIR/xkbcommon_build"
+    # build 目录按 WINE_ARCH 隔离: xkbcommon_build 复用旧 aarch64 配置时 meson 不切换
+    # cross file (实测 ohos-aarch64-cross.txt), 产物保持 aarch64 → wine 链接报 incompatible
+    local build="$BUILD_DIR/xkbcommon_build_$WINE_ARCH"
 
     log "--- xkbcommon + xkbregistry ---"
     find "$src" -type f -exec touch -d '2 seconds ago' {} + 2>/dev/null || true

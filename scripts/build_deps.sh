@@ -80,7 +80,8 @@ if [ "${BUILD_WINE_MONO:-1}" = "1" ]; then
     WINE_MONO_VER="11.1.0"
     WINE_MONO_MSI="wine-mono-${WINE_MONO_VER}-x86.msi"
     WINE_MONO_URL="https://dl.winehq.org/wine/wine-mono/${WINE_MONO_VER}/${WINE_MONO_MSI}"
-    WINE_MONO_DIR="$BUILD_DIR/wine-ohos/share/wine/mono"
+    # mono msi 架构无关, 放架构无关路径 (不依赖 WINE_ARCH, 跨方案/跨架构共享)
+    WINE_MONO_DIR="$BUILD_DIR/wine-mono"
     WINE_MONO_PATH="$WINE_MONO_DIR/$WINE_MONO_MSI"
     if [ ! -f "$WINE_MONO_PATH" ]; then
         log "=== 下载 Wine Mono ${WINE_MONO_VER} ==="

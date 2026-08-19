@@ -89,14 +89,11 @@ case "$NATIVE_ARCH" in
         NATIVE_CPU="x86_64"
         ;;
     all)
-        # 双架构模式: 仅在 package.sh 构建 HAP 时使用
-        # NATIVE_TARGET/NATIVE_CPU_FAMILY 不适用
-        NATIVE_TARGET=""
-        NATIVE_CPU_FAMILY=""
-        NATIVE_CPU=""
+        echo "ERROR: NATIVE_ARCH=all 不再支持 (单一 WINE_ARCH 无法同时满足 arm64 原生与 box64+wine 的 assemble)。请分别构建 NATIVE_ARCH=x86_64 / arm64-v8a。" >&2
+        exit 1
         ;;
     *)
-        echo "ERROR: 不支持的 NATIVE_ARCH: $NATIVE_ARCH (可选: arm64-v8a, x86_64, all)"
+        echo "ERROR: 不支持的 NATIVE_ARCH: $NATIVE_ARCH (可选: arm64-v8a, x86_64)"
         exit 1
         ;;
 esac
@@ -107,6 +104,8 @@ WINE_DEVICE_ROOT="/data/storage/el2/base/files/wine"
 # 源码路径
 WINE_SRC="$ROOT/thirdparty/wine"
 DXVK_SRC="$ROOT/thirdparty/dxvk"
+# box64+wine 方案 (方案②, arm64 设备 + x86_64 wine) 的 in-process 转译器源码
+BOX64_SRC="$ROOT/thirdparty/box64"
 
 # 产物路径
 BUILD_DIR="$ROOT/build"          # 源码构建中间产物
@@ -117,7 +116,9 @@ DXVK_BUILD_ROOT="$BUILD_DIR/dxvk/legacy"
 # sysroot-ext 目录结构
 SYSROOT_EXT_INC="$SYSROOT_EXT/usr/include"
 SYSROOT_EXT_LIB="$SYSROOT_EXT/usr/lib/$TARGET"
-SYSROOT_EXT_PC="$SYSROOT_EXT/usr/lib/pkgconfig"
+# pkgconfig 按架构隔离: 共享目录跨架构切换会残留旧架构 .pc (libdir 指向旧架构)
+# → x86_64 构建解析到 aarch64 .pc → 链接旧架构 .so (gstreamer 链实测必现)
+SYSROOT_EXT_PC="$SYSROOT_EXT/usr/lib/$TARGET/pkgconfig"
 SYSROOT_EXT_SHARE="$SYSROOT_EXT/usr/share"
 
 # Linux/WSL 保留原路径；macOS 使用项目内扫描器和当前工具链的 pkg-config。
@@ -157,7 +158,8 @@ gen_cross_file() {
     cat > "$pcwrap" << PWEOF
 #!/bin/sh
 # PKG_CONFIG_LIBDIR 替换默认搜索路径 (--with-path 只是追加, 宿主 /usr/lib 仍混入)
-export PKG_CONFIG_LIBDIR="$SYSROOT_EXT_PC:$SYSROOT_EXT/usr/lib/$TARGET/pkgconfig:$SYSROOT/usr/lib/pkgconfig"
+# SYSROOT_EXT_PC 已按架构隔离 (usr/lib/$TARGET/pkgconfig), 只加系统 pc 目录
+export PKG_CONFIG_LIBDIR="$SYSROOT_EXT_PC:$SYSROOT/usr/lib/pkgconfig"
 exec "$PKG_CONFIG_BIN" "\$@"
 PWEOF
     chmod +x "$pcwrap"
@@ -176,8 +178,9 @@ gdbus-codegen = '$SYSROOT_EXT/usr/bin/gdbus-codegen'
 [built-in options]
 c_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-I$SYSROOT_EXT_INC']
 c_link_args = ['--target=$TARGET', '--sysroot=$SYSROOT', '-fuse-ld=lld', '-L$SYSROOT_EXT_LIB']
-# pkgconfigdir = libdir/pkgconfig (x86_64-linux-ohos 子目录), 与 /usr/lib/pkgconfig 都要
-pkg_config_path = ['$SYSROOT_EXT/usr/lib/pkgconfig', '$SYSROOT_EXT/usr/lib/$TARGET/pkgconfig', '$SYSROOT/usr/lib/pkgconfig']
+# pkgconfig 只走架构隔离的 SYSROOT_EXT_PC (usr/lib/$TARGET/pkgconfig) + OHOS SDK;
+# 共享 usr/lib/pkgconfig 已废弃 (跨架构残留 aarch64 .pc → x86_64 链接错架构)
+pkg_config_path = ['$SYSROOT_EXT_PC', '$SYSROOT/usr/lib/pkgconfig']
 
 [properties]
 # 不设 sys_root: 编译器 --sysroot 已在 c_args/c_link_args 中，

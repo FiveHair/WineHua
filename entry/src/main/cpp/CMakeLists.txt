@@ -12,6 +12,20 @@ include_directories(
     ${NATIVERENDER_ROOT_PATH}/include
 )
 
+# WINEHUA_WINE_ARCH_IS_X86_64: 方案② (arm64 设备 + x86_64 wine + box64 转译) 的
+# 编译期标记。由 package.sh 写入 entry/.wine_arch 的文件读取 (hvigor daemon 环境快照
+# 丢失 make 的 WINE_ARCH env, ENV{WINE_ARCH} 不可靠 — 实测 daemon 里读不到)。
+# 方案③ (arm64 原生, .wine_arch=aarch64) 不定义 → C++ 走原生 wine 路径。
+# 注意: 方案① (x86_64 设备) 时 .wine_arch=x86_64 也定义此宏, 但 __aarch64__ 未定义,
+# C++ 侧 `__aarch64__ && WINEHUA_WINE_ARCH_IS_X86_64` 组合仍准确锁定方案②。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../.wine_arch")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../../.wine_arch" _wine_arch)
+    string(STRIP "${_wine_arch}" _wine_arch)
+    if(_wine_arch STREQUAL "x86_64")
+        add_definitions(-DWINEHUA_WINE_ARCH_IS_X86_64)
+    endif()
+endif()
+
 if(DEFINED PACKAGE_FIND_FILE)
     include(${PACKAGE_FIND_FILE})
 endif()

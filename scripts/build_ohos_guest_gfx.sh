@@ -11,7 +11,8 @@ WRAPPER_DIR="$BUILD_DIR/tool-wrappers"
 SYSROOT_EXT="$BUILD_DIR/sysroot-ext"
 SYSROOT_EXT_INC="$SYSROOT_EXT/usr/include"
 SYSROOT_EXT_LIB="$SYSROOT_EXT/usr/lib/$TARGET"
-SYSROOT_EXT_PC="$SYSROOT_EXT/usr/lib/pkgconfig"
+# pkgconfig 按架构隔离 (与 env.sh 一致), 避免跨架构切换残留旧架构 .pc
+SYSROOT_EXT_PC="$SYSROOT_EXT/usr/lib/$TARGET/pkgconfig"
 
 MODE="${GUEST_GFX_MODE:-virpipe}"
 PLATFORM="${WINEHUA_GUEST_GFX_PLATFORM:-wayland}"
@@ -21,8 +22,11 @@ LIBDRM_SOURCE_ROOT="${WINEHUA_OHOS_LIBDRM_SOURCE_ROOT:-$ROOT/thirdparty/libdrm}"
 WAYLAND_PROTOCOLS_SOURCE_ROOT="${WINEHUA_WAYLAND_PROTOCOLS_SOURCE_ROOT:-}"
 WAYLAND_PROTOCOLS_URL="${WINEHUA_WAYLAND_PROTOCOLS_URL:-https://gitlab.freedesktop.org/wayland/wayland-protocols.git}"
 WAYLAND_PROTOCOLS_TAG="${WINEHUA_WAYLAND_PROTOCOLS_TAG:-1.39}"
-BUILD_ROOT="${WINEHUA_GUEST_GFX_BUILD_ROOT:-$ROOT/build/guest_gfx_build/${NATIVE_ARCH:-x86_64}/$PLATFORM-$MODE}"
-INSTALL_ROOT="${WINEHUA_GUEST_GFX_INSTALL_ROOT:-$ROOT/build/guest_gfx_install/${NATIVE_ARCH:-x86_64}}"
+# guest 构建目录按 WINE_ARCH 隔离: 方案② (arm64 设备 + x86_64 guest) 与方案③
+# (aarch64 guest) 的 NATIVE_ARCH 都是 arm64-v8a, 共享 build 目录会复用旧架构 meson
+# 配置 → "EGL requires DRI" / 检测到旧 aarch64 target。NATIVE_ARCH 是设备, 不能作 guest 键。
+BUILD_ROOT="${WINEHUA_GUEST_GFX_BUILD_ROOT:-$ROOT/build/guest_gfx_build/${WINE_ARCH}/$PLATFORM-$MODE}"
+INSTALL_ROOT="${WINEHUA_GUEST_GFX_INSTALL_ROOT:-$ROOT/build/guest_gfx_install/${WINE_ARCH}}"
 PACKAGE_BUNDLE=1
 FETCH_IF_MISSING=1
 CLEAN=0
@@ -443,7 +447,8 @@ fetch_modern_wayland_protocols_root() {
 }
 
 ensure_target_libdrm() {
-    local build_root="$ROOT/build/libdrm_build/${NATIVE_ARCH}"
+    # libdrm 按 WINE_ARCH 隔离 (guest 库架构), 与 BUILD_ROOT 一致; NATIVE_ARCH 是设备架构不能作 guest 键
+    local build_root="$ROOT/build/libdrm_build/${WINE_ARCH}"
     local arch_pc_dir="$SYSROOT_EXT/usr/lib/$TARGET/pkgconfig"
     local meson_args=()
 
@@ -510,7 +515,10 @@ ensure_target_libdrm() {
 
     if [ -f "$arch_pc_dir/libdrm.pc" ]; then
         mkdir -p "$SYSROOT_EXT_PC"
-        cp "$arch_pc_dir/libdrm.pc" "$SYSROOT_EXT_PC/libdrm.pc"
+        # SYSROOT_EXT_PC 按架构隔离后与 arch_pc_dir 同目录 (meson install 已就位), 跳过自复制
+        if [ "$arch_pc_dir/libdrm.pc" != "$SYSROOT_EXT_PC/libdrm.pc" ]; then
+            cp "$arch_pc_dir/libdrm.pc" "$SYSROOT_EXT_PC/libdrm.pc"
+        fi
     fi
 
     [ -f "$SYSROOT_EXT_LIB/libdrm.so" ] || err "libdrm build finished but libdrm.so is missing from sysroot-ext"

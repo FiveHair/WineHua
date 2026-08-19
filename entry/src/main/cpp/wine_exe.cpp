@@ -273,8 +273,14 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
     if (!options.workingDirectory.empty())
         UpsertEnvLine(envStrs,"WINEHUA_WORKING_DIRECTORY=" + options.workingDirectory);
 
-    // Wine 与设备同架构: 统一带 wine 前缀 (arm64 原生 __wine_main 需要 argv[0]=wine)
+    // wine 前缀 token: box64 (方案②) 不带 — argv[0] 会落到 guest main_argv[1] 被
+    // 当作程序名 (start.exe fallback → exit(1)); 原生 (方案①③) __wine_main 直启
+    // 需要 argv[0]=wine 作 loader 名。
+#if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
+    std::string entryParams = binDir + "|" + exePath;
+#else
     std::string entryParams = binDir + "|wine|" + exePath;
+#endif
     for (const std::string& arg : options.argv) entryParams += "|" + arg;
 
     const pid_t pid = SpawnViaBroker(entryParams, envStrs);
@@ -702,7 +708,10 @@ napi_value RunWineExe(napi_env env, napi_callback_info info)
         wineEnv.push_back("WINEHUA_DESKTOP=shell");
 
     {
-#ifdef __aarch64__
+        // wine 前缀 token 的规则同 LaunchWineProgram: 仅 box64 (方案②) 不带;
+        // 方案③ arm64 原生 (__aarch64__ 但非 WINEHUA_WINE_ARCH_IS_X86_64) 走
+        // __wine_main 直启, 仍需 argv[0]=wine —— 不能用纯 __aarch64__ 判定。
+#if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
         std::string entryParams = std::string(binDir) + "|" + exePath;
 #else
         std::string entryParams = std::string(binDir) + "|wine|" + exePath;

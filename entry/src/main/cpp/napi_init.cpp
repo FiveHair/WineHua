@@ -8,6 +8,7 @@
 #include "audio_ipc_protocol.h"
 #include "graphics_broker.h"
 #include "wine_constants.h"
+#include "wine_scheme.h"
 #include "wine_env.h"
 #include "wine_process.h"
 #include "wine_launch.h"
@@ -895,6 +896,7 @@ static napi_value KillProcess(napi_env env, napi_callback_info info) {
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports) {
     OH_LOG_WARN(LOG_APP, "[MW-NAPI]  Init called, env=%{public}p", env);
+    LogWineScheme("libentry.so (主进程)");
 
     // 注册 NCP 子进程退出回调 (最早时机, 无条件): 沙箱 /proc 对 NCP 进程
     // 不可见, 退出检测以系统回调为权威信号。手机 fork 模式注册后不触发

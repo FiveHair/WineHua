@@ -20,15 +20,19 @@ glslangValidator               # DXVK 配置阶段硬依赖 (缺少时 make dxvk
 
 ## 平台
 
-| 平台 | Makefile 命令 | `NATIVE_ARCH` | Wine | Box64 | 打包 |
-|------|-------------|---------------|------|-------|------|
-| arm64 | `make NATIVE_ARCH=arm64-v8a` | `arm64-v8a` | x86_64 ELF → rawfile zip | box64.so (dlopen) | rawfile zip |
-| x86_64 | `make NATIVE_ARCH=x86_64` | `x86_64` | Wine .so → libs/ | 无 | rawfile zip |
-| 双架构 HAP | `make NATIVE_ARCH=all` | 双架构 | 同上 | arm64 含 Box64 | rawfile zip |
+三种构建方案（`NATIVE_ARCH` = 设备架构，`WINE_ARCH` = Wine/模拟层架构）：
 
-默认值：`NATIVE_ARCH=x86_64`（注意 `scripts/env.sh` 直接运行脚本时默认 `arm64-v8a`）。
+| 方案 | Makefile 命令 | `NATIVE_ARCH` | `WINE_ARCH` | Wine | 转译 |
+|------|-------------|---------------|-------------|------|------|
+| ① x86_64 原生 | `make NATIVE_ARCH=x86_64` | `x86_64` | `x86_64` | Wine .so → libs/ | 无 |
+| ② box64+wine | `make NATIVE_ARCH=arm64-v8a WINE_ARCH=x86_64` | `arm64-v8a` | `x86_64` | x86_64 ELF → rawfile zip | box64.so (NCP dlopen) |
+| ③ arm64 原生 | `make NATIVE_ARCH=arm64-v8a` | `arm64-v8a` | `aarch64` | Wine aarch64 .so → libs/ | FEX (`libarm64ecfex.dll`/`libwow64fex.dll`) + Box64 wow64 (`wowbox64.dll`, HODLL 默认) |
 
-> Wine 和 wineserver 通过 NCP（`OH_Ability_StartNativeChildProcess`）创建子进程。arm64 下 Box64 编译为 box64.so 由 NCP 子进程 dlopen 加载。
+默认值：`NATIVE_ARCH=x86_64`（注意 `scripts/env.sh` 直接运行脚本时默认 `arm64-v8a`）；`WINE_ARCH` 默认由 `NATIVE_ARCH` 推导（arm64→aarch64 方案③，x86_64→x86_64 方案①）。
+
+> `NATIVE_ARCH=all` 双架构 HAP 已移除：单一 `WINE_ARCH` 无法同时满足方案②/③ 的 arm64 assemble。需要多个 HAP 时分别执行各方案的完整构建。
+
+> Wine 和 wineserver 通过 NCP（`OH_Ability_StartNativeChildProcess`）创建子进程。方案② 下 Box64 编译为 box64.so 由 NCP 子进程 dlopen 加载。
 
 ---
 
@@ -37,14 +41,14 @@ glslangValidator               # DXVK 配置阶段硬依赖 (缺少时 make dxvk
 ### 完整构建
 
 ```bash
-# 默认: x86_64
+# 默认: x86_64 (方案①)
 make
 
-# arm64（当前调试目标）
+# arm64 原生 wine (方案③)
 make NATIVE_ARCH=arm64-v8a
 
-# 双架构 HAP
-make NATIVE_ARCH=all
+# box64+wine (方案②)
+make NATIVE_ARCH=arm64-v8a WINE_ARCH=x86_64
 ```
 
 ### 单阶段构建
@@ -52,7 +56,9 @@ make NATIVE_ARCH=all
 ```bash
 make deps                          # 交叉编译依赖 → build/sysroot-ext/（含 guest_gfx + guest_vulkan）
 make wine                          # Wine + wineserver
-make box64                         # Box64 ARM64 翻译器 (仅 arm64)
+make fex                           # FEX 转译 DLL (方案③, WINE_ARCH=aarch64)
+make box64                         # Box64 box64.so (方案②, NATIVE_ARCH=arm64-v8a + WINE_ARCH=x86_64)
+make box64-wow64                   # Box64 wowbox64.dll (方案③, 32 位应用 HODLL 引擎)
 make native                        # 各架构原生 compositor 依赖
 make dxvk                          # DXVK Legacy fork (x64 + x86 DLL)
 make host-vulkan                   # Host Vulkan exact replay 诊断模块

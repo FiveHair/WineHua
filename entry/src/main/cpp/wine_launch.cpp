@@ -451,9 +451,17 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         // (musl 无 locale 数据, Wine 只读 LC_ALL 兜底解析 LCID)
         const std::string wbLangEnv = "|__env=LANG=" + p->wineLang + ".UTF-8" +
             "|__env=LC_ALL=" + p->wineLang + ".UTF-8";
-        // Wine 与设备同架构: 统一带 wine 前缀 (arm64 原生 __wine_main 需要 argv[0]=wine)
+        // box64 (方案②): 不带 wine 前缀 — box64 会把 entryParams argv[0] 放到 guest
+        // main_argv[1] (guest argv[0]=wine 二进制路径), 带 "wine" 会被当成程序名 →
+        // start.exe fallback → ShellExecute("wine") 找不到 → exit(1)。
+        // 原生 (方案①③): __wine_main 直启, 需要 argv[0]="wine" 作 loader 名。
+#if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag +
+            "wineboot|--init|__env=WINEPREFIX=" + p->prefixDir + wbLangEnv;
+#else
         std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag +
             "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir + wbLangEnv;
+#endif
         // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
@@ -521,9 +529,16 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
          * 无条件重装 wine.inf 并弹出 "Setting up Wine" 等待窗; --init 传
          * force=false, 仅当 wine.inf 时间戳变化 (升级) 才重装。 */
         OH_LOG_WARN(LOG_APP, "[Launch-Async] prefix ready; seeding wineboot boot event (--init)...");
+        // wine 前缀 token 的方案差异同上 (box64 不带, 原生带)
+#if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
+        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" +
+            "wineboot|--init|__env=WINEPREFIX=" + p->prefixDir +
+            "|__env=LANG=" + p->wineLang + ".UTF-8|__env=LC_ALL=" + p->wineLang + ".UTF-8";
+#else
         std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" +
             "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir +
             "|__env=LANG=" + p->wineLang + ".UTF-8|__env=LC_ALL=" + p->wineLang + ".UTF-8";
+#endif
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
         NativeChildProcess_Options options = {};
@@ -618,7 +633,14 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         AppendD3dBackendEnv(explorerEnv, p->d3dBackend, p->winehuaBin);
         AppendStableDesktopDxvkEnv(explorerEnv, *p);
 
+        // wine 前缀 token: box64 (方案②) 不带 (argv[0] 会落到 guest main_argv[1]
+        // 被当作程序名 → start.exe fallback → exit(1)); 原生 (方案①③) 带
+        // (__wine_main 需要 argv[0]=wine)。同 wineboot spawn 处规则。
+#if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
+        std::string exEntry = p->winehuaBin + "|__winehua_desktop__|explorer|" + std::string(desktopArg);
+#else
         std::string exEntry = p->winehuaBin + "|__winehua_desktop__|wine|explorer|" + std::string(desktopArg);
+#endif
         // broker 自动添加 homeDir 前缀、序列化 env、创建 audio bootstrap fd
         int32_t exPid = SpawnViaBroker(exEntry, explorerEnv);
         OH_LOG_WARN(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d (via broker)", exPid);

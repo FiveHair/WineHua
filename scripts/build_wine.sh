@@ -66,17 +66,23 @@ build_native_tools() {
 }
 
 build_ohos_unix() {
-    log "--- OHOS 交叉编译 (Unix .so) ---"
+    log "--- OHOS 交叉编译 (Unix .so, WINE_ARCH=$WINE_ARCH) ---"
 
-    mkdir -p "$BUILD_DIR/wine-ohos"
-    cd "$BUILD_DIR/wine-ohos"
+    # 构建目录按 WINE_ARCH 隔离: 同工作树切换架构 (方案① x86_64 ↔ 方案③ arm64 原生)
+    # 时不复用跨架构 configure 缓存。方案①/② (WINE_ARCH=x86_64) 共享 wine-ohos-x86_64。
+    local wine_build_dir="$BUILD_DIR/wine-ohos-$WINE_ARCH"
+    mkdir -p "$wine_build_dir"
+    cd "$wine_build_dir"
 
-    # 检查是否需要重新 configure (FreeType/Wayland/Vulkan/GnuTLS/GStreamer 启用状态变更)
+    # 检查是否需要重新 configure。只查 wine 真正生成到 config.h 的 SONAME 宏
+    # (freetype/vulkan/gnutls 用 WINE_CHECK_SONAME); wayland/gstreamer 不生成
+    # SONAME 宏 (config.h.in 无条目), 旧检查 SONAME_LIBWAYLAND_CLIENT /
+    # SONAME_LIBGSTREAMER_1_0 永远为真 → 每次都重配, 已移除。
+    # 外加 host 校验 (config.status 的 --host), 防止切换架构后复用旧 host 缓存。
     if [ ! -f "Makefile" ] || ! grep -q '#define SONAME_LIBFREETYPE' include/config.h 2>/dev/null \
-       || ! grep -q '#define SONAME_LIBWAYLAND_CLIENT' include/config.h 2>/dev/null \
        || ! grep -q '#define SONAME_LIBVULKAN "libvulkan.so.1"' include/config.h 2>/dev/null \
        || ! grep -q '#define SONAME_LIBGNUTLS' include/config.h 2>/dev/null \
-       || ! grep -q '#define SONAME_LIBGSTREAMER_1_0' include/config.h 2>/dev/null; then
+       || ! grep -q -- "--host=$HOST_TRIPLE" config.status 2>/dev/null; then
         export FREETYPE_CFLAGS="-I$SYSROOT_EXT_INC/freetype2"
         export FREETYPE_LIBS="-L$SYSROOT_EXT_LIB -lfreetype"
         export ac_cv_header_ft2build_h=yes
@@ -188,21 +194,29 @@ build_ohos_unix() {
 
 build_wineserver() {
     log "--- 编译 wineserver (含 OHOS 修复) ---"
-    local out="$BUILD_DIR/wine_server"
+    # 目录按 WINE_ARCH 隔离 (方案①/② 共用 wine_server-x86_64, 产物形式不同 → 见 pie_mode)
+    local out="$BUILD_DIR/wine_server-$WINE_ARCH"
     # 数据文件在应用 sandbox 内
     local bindir="$WINE_DEVICE_ROOT/bin"
     local datadir="$WINE_DEVICE_ROOT/share"
-    local wine_include="-I$WINE_SRC/include -I$WINE_SRC/include/wine -I$WINE_SRC/server -I$BUILD_DIR/wine-ohos/include"
-    # 统一产 libwineserver.so (设备原生架构, 系统 linker 直接 dlopen 加载)
-    local srv_target="$NATIVE_TARGET"
-    local srv_cflags="--target=$srv_target --sysroot=$SYSROOT -D__MUSL__ -D_GNU_SOURCE \
+    local wine_include="-I$WINE_SRC/include -I$WINE_SRC/include/wine -I$WINE_SRC/server -I$BUILD_DIR/wine-ohos-$WINE_ARCH/include"
+    # 目标架构 = WINE_ARCH 的 TARGET (wineserver 与 wine 同架构)。
+    # 产物形式: box64+wine 方案 (arm64 设备 + x86_64 wine) → x86_64 PIE 可执行 (box64 转译);
+    # 其余 (方案① x86_64 原生 / 方案③ arm64 原生) → native libwineserver.so (dlopen)。
+    local srv_target="$TARGET"
+    local pie_mode=0
+    if [ "$WINE_ARCH" = "x86_64" ] && [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
+        pie_mode=1
+    fi
+    local srv_cflags="--target=$srv_target --sysroot=$SYSROOT -D__MUSL__ -D__ANDROID__ -D__OHOS__ -D_GNU_SOURCE \
         -DWINE_UNIX_LIB -D_NTSYSTEM_ -D__WINESRC__ -DFAR= -D_ACRTIMP= -DWINBASEAPI= -DZ_SOLO \
-        -D__ANDROID__ -D__OHOS__ -DBINDIR=\"$bindir\" -DDATADIR=\"$datadir\" \
+        -DBINDIR=\"$bindir\" -DDATADIR=\"$datadir\" \
         -fPIC $wine_include"
 
     mkdir -p "$out"
     local need_rebuild=0
     local target_binary="$out/libwineserver.so"
+    [ "$pie_mode" = "1" ] && target_binary="$out/wineserver"
     if [ ! -f "$target_binary" ]; then
         need_rebuild=1
     else
@@ -225,14 +239,22 @@ build_wineserver() {
 
     # musl_compat.c 已在 WINE_SRC/server/ 中, 遍历编译时已打包
 
-    # 编译为共享库 (dlopen 加载), 目标 = 设备原生架构
-    log "  wineserver → libwineserver.so ($NATIVE_ARCH)"
-    $CLANG --target=$NATIVE_TARGET --sysroot=$SYSROOT -fuse-ld=lld \
-        -shared -Wl,-soname,libwineserver.so \
-        -o "$out/libwineserver.so" "$out"/*.o -lm
-    mkdir -p "$NATIVE_LIBS"
-    cp "$out/libwineserver.so" "$NATIVE_LIBS/"
-    log "  → $NATIVE_LIBS/libwineserver.so"
+    if [ "$pie_mode" = "1" ]; then
+        # box64+wine: x86_64 PIE 可执行, box64 转译加载
+        log "  wineserver → x86_64 PIE ELF (box64 转译, arm64 设备)"
+        $CLANG --target=$srv_target --sysroot=$SYSROOT -fuse-ld=lld -pie \
+            -o "$out/wineserver" "$out"/*.o -lm
+        log "  → $out/wineserver"
+    else
+        # 原生: 编译为共享库 (dlopen 加载), 目标 = wine 架构
+        log "  wineserver → libwineserver.so ($srv_target)"
+        $CLANG --target=$srv_target --sysroot=$SYSROOT -fuse-ld=lld \
+            -shared -Wl,-soname,libwineserver.so \
+            -o "$out/libwineserver.so" "$out"/*.o -lm
+        mkdir -p "$NATIVE_LIBS"
+        cp "$out/libwineserver.so" "$NATIVE_LIBS/"
+        log "  → $NATIVE_LIBS/libwineserver.so"
+    fi
 }
 
 # ---- main ----

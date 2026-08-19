@@ -875,21 +875,31 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
             std::string guestLibDir = state.guestReceiverRuntimeDir + "/lib";
             env.push_back("EGL_PLATFORM=wayland");
             if (FileExists(guestLibDir + "/libEGL.so"))
-#ifdef __aarch64__
+#if defined(__aarch64__) && !defined(WINEHUA_WINE_ARCH_IS_X86_64)
+                // 方案③ arm64 原生: el1 dlopen (el2 被拒). 方案② (box64+wine) 走
+                // #else guestLibDir — guest 是 x86_64, EGL 在 el2 由 box64 转译加载,
+                // el1 的 arm64 libEGL.so 不存在, 注入会致 explorer 的 EGL 初始化失败.
                 env.push_back("WINEHUA_EGL_LIBRARY_PATH=/data/storage/el1/bundle/libs/arm64/libEGL.so");
 #elif defined(__x86_64__)
                 env.push_back("WINEHUA_EGL_LIBRARY_PATH=/data/storage/el1/bundle/libs/x86_64/libEGL.so");
 #else
                 env.push_back("WINEHUA_EGL_LIBRARY_PATH=" + guestLibDir + "/libEGL.so");
 #endif
-#if 0
-            // (Box64 EMULATED_LIBS 已随 box64 整体模拟方案移除; arm64 原生 wine + FEX 不需要)
+#if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
+            // 方案② box64+wine: 非 DXVK 基线值 (8 个 lib, 不含 libvulkan)。
+            // DXVK 路径下 AppendD3dBackendEnv 会用 14 个 lib (含 libvulkan) 覆盖此值。
+            env.push_back("BOX64_EMULATED_LIBS=libEGL.so:libEGL.so.1:libGLESv2.so:libGLESv2.so.2:"
+                          "libGLESv1_CM.so:libGLESv1_CM.so.1:libGL.so:libGL.so.1:"
+                          "libwayland-client.so:libwayland-client.so.0:libwayland-server.so:"
+                          "libwayland-server.so.0:libwayland-egl.so:libwayland-egl.so.1:"
+                          "libdrm.so:libdrm.so.2:libffi.so:libffi.so.8");
 #endif
-#ifdef __aarch64__
+#if defined(__aarch64__) && !defined(WINEHUA_WINE_ARCH_IS_X86_64)
             // LIBGL_DRIVERS_PATH 由 virgl 块末尾统一 Upsert 到 el1 (guestEnv push 之后), 不在此设置
 #elif defined(__x86_64__)
             // LIBGL_DRIVERS_PATH 由下方 softpipe 块统一指向 el1, 不在此重复设置
 #else
+            // 方案② (box64+wine): dri 在 el2 guestLibDir, 由 box64 转译加载
             if (DirExists(guestLibDir + "/dri")) env.push_back("LIBGL_DRIVERS_PATH=" + guestLibDir + "/dri");
 #endif
             if (DirExists(guestLibDir + "/egl")) env.push_back("EGL_DRIVERS_PATH=" + guestLibDir + "/egl");
@@ -901,10 +911,11 @@ void GraphicsBroker::AppendWineEnv(std::vector<std::string>& env) const
         env.push_back("WINEHUA_VTEST_PRESENT=surface-queue");
         env.push_back(std::string("WINEHUA_ZERO_COPY_READY_DIR=") + ZERO_COPY_READY_DIR);
         for (const std::string& extra : guestEnv) env.push_back(extra);
-#ifdef __aarch64__
-        // arm64 真机 virgl/vtest: dri drivers 平铺复制到 el1 bundle。必须在 guestEnv
+#if defined(__aarch64__) && !defined(WINEHUA_WINE_ARCH_IS_X86_64)
+        // 方案③ arm64 原生: dri drivers 平铺复制到 el1 bundle。必须在 guestEnv
         // push 之后 Upsert 覆盖 env 文件的 LIBGL_DRIVERS_PATH=$ORIGIN/lib/dri (已展开 el2) —
         // entryParams 按序 setenv, 最后设置的 el1 才生效 (与 x86_64 softpipe 块同构)。
+        // 方案② (box64+wine) 不走这里 — guest 是 x86_64, dri 在 el2, 走下方 #else 只设 VTEST_SOCKET_NAME.
         UpsertEnvLine(env, "LIBGL_DRIVERS_PATH=/data/storage/el1/bundle/libs/arm64");
         if (!state.virglSocketPath.empty()) env.push_back("VTEST_SOCKET_NAME=" + state.virglSocketPath);
 #elif defined(__x86_64__)
