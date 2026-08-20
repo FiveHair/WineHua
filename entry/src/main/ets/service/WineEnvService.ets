@@ -18,7 +18,8 @@ export const SOCK = '/data/storage/el2/base/files/.wine/wine-wayland';
 // Wine 运行时从 rawfile 解压到 files/
 const WINE_ROOT = `${FILES_BASE}/wine`;
 export const WINE_BIN = `${WINE_ROOT}/bin`;
-export const WINE_LIB = `${WINE_BIN}/x86_64-unix`;
+export const WINE_UNIX_SUBDIR = 'aarch64-unix';
+export const WINE_LIB = `${WINE_BIN}/${WINE_UNIX_SUBDIR}`;
 const BIN_DIR = WINE_BIN;
 const BOX64 = `${WINE_BIN}/box64`;
 

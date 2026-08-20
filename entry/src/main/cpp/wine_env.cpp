@@ -19,6 +19,30 @@
 #define LOG_TAG "WL_NAPI"
 #include <hilog/log.h>
 
+#ifdef __aarch64__
+static constexpr const char kNativeLibDirName[] = "arm64";
+#else
+static constexpr const char kNativeLibDirName[] = "x86_64";
+#endif
+
+static std::string BundleNativeLibsDir()
+{
+    return std::string("/data/storage/el1/bundle/libs/") + kNativeLibDirName;
+}
+
+static std::string UnixlibSearchPath(const std::string& binDir)
+{
+    return binDir + "/" WINE_UNIX_SUBDIR ":" + BundleNativeLibsDir();
+}
+
+static std::string BuiltinWineDllPath(const std::string& binDir)
+{
+    return binDir + "/" WINE_PE_SUBDIR ":" +
+           binDir + "/i386-windows:" +
+           binDir + ":" +
+           UnixlibSearchPath(binDir);
+}
+
 int CreateAudioBootstrapFd(const std::string& runtimeDir) {
     if (!winehua::AudioBroker::GetInstance().EnsureStarted(runtimeDir)) {
         OH_LOG_ERROR(LOG_APP, "[AudioBroker] failed to start for runtimeDir=%{public}s", runtimeDir.c_str());
@@ -41,6 +65,7 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
                                       const std::string& homeDir,
                                       const std::string& prefixDir,
                                       const std::string& wineLang) {
+    (void)libPath;
     std::string shareDir = binDir + "/../share";
     LogWineScheme("BuildWineEnv");
     std::string xkbDir = shareDir + "/X11/xkb";
@@ -70,8 +95,8 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
 #if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
     // 方案②: box64 转译, el1 arm64 原生库不走 wine PE/unixlib 搜索 (与 wine_child.cpp 一致)
 #else
-    // bundled libs 加入 WINEDLLPATH, load_unixlib_by_name() 从此搜索 .so
-    dllPath += std::string(":/data/storage/el1/bundle/libs/") + native_lib_dir;
+    // unixlib + bundled libs so load_unixlib_by_name() can find wineohos.so
+    dllPath += std::string(":") + UnixlibSearchPath(binDir);
 #endif
 
     // ==== Layer 0: 硬基线 (路径、locale、Wayland socket) ====
@@ -82,6 +107,8 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         "HOME=" + homeDir,
         "WINEPREFIX=" + (prefixDir.empty() ? std::string(WINE_PREFIX) : prefixDir),
         "WINEDATADIR=" + shareDir + "/wine",
+        "WINEBINDIR=" + binDir,
+        "WINEUNIXDIR=" + binDir,
         "WINEDLLDIR=" + binDir + "/" WINE_UNIX_SUBDIR,
         "WINEDLLDIR0=" + binDir + "/" WINE_PE_SUBDIR,
         "WINEDLLDIR1=" + binDir + "/i386-windows",
@@ -194,8 +221,13 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         binDir + "/" WINE_UNIX_SUBDIR ":" +
         std::string(WINE_RUNTIME_ROOT) + "/lib/x86_64";
 #endif
+    /* DXVK overlays must stay first so d3d11/dxgi resolve to the managed PE
+     * copies. Keep unixlib search dirs after that: wineohos.so is packaged in
+     * HAP native libs, not wine/bin/aarch64-unix, and ntdll redirects dll_dir
+     * to WINEUNIXDIR (wine/bin). Without these tails, mmdevapi cannot load
+     * wineohos.drv's unixlib and GetDefaultAudioEndpoint returns E_NOTFOUND. */
     const std::string wineDllPath = overlay64 + ":" + overlay86 + ":" +
-        binDir + "/" WINE_PE_SUBDIR ":" + binDir + "/i386-windows:" + binDir;
+        BuiltinWineDllPath(binDir);
 
     const std::vector<std::string> managed = {
         "WINEHUA_D3D_BACKEND=" + d3dBackend,
@@ -272,6 +304,7 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "WINEDLLDIR1=" + overlay86,
     };
     for (const std::string& line : managed) UpsertEnvLine(env, line);
+    OH_LOG_INFO(LOG_APP, "[WineEnv] DXVK WINEDLLPATH=%{public}s", wineDllPath.c_str());
 #ifdef __aarch64__
     // arm64: 若 aarch64 venus ICD 已打包 (guest_vulkan bundle 存在 icd json) 则 DXVK
     // 走 venus→vtest 硬件加速; 否则回退宿主 Vulkan (旧 HAP / venus 未构建)。

@@ -231,7 +231,7 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
         : (gBrokerHomeDir.empty() ? "/storage/Users/currentUser/Download" : gBrokerHomeDir);
     const std::string sockDir = prefixDir;
     const std::string sockName = "wine-wayland";
-    const std::string libPath = binDir + ":" + binDir + "/x86_64-unix";
+    const std::string libPath = binDir + ":" + binDir + "/" WINE_UNIX_SUBDIR;
     const std::string exePath = NativePathToWindows(options.windowsExePath, prefixDir);
 
     winehua::GraphicsBroker::GetInstance().SetWineRuntimeBinaryDir(binDir);
