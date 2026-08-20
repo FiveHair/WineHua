@@ -36,10 +36,11 @@
 #endif
 
 /* RequestBuffer timeout 0 returns immediately and never waits for a free
- * NativeImage slot. 16 ms was too short to distinguish a timeout from an
- * immediate producer error. 100 ms covers first-buffer GPU allocation
- * without stalling vtest for the OHOS 3000 ms default. */
-constexpr int32_t kRequestTimeoutMs = 100;
+ * NativeImage slot. Warmup uses kDirectFirstBufferTimeoutMs so the first
+ * GPU allocation can finish. After that, kDirectQueuePaceTimeoutMs is 0:
+ * blocking dequeue deadlocks with NativeImage consume (same SET_TIMEOUT).
+ * Do not use the OHOS 3000 ms default. */
+constexpr int32_t kRequestTimeoutMs = winehua::kDirectFirstBufferTimeoutMs;
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -792,12 +793,28 @@ bool NativeWindowVkTarget::Configure(OHNativeWindow* window, uint32_t width,
         static_cast<uint64_t>(NATIVEBUFFER_USAGE_HW_RENDER |
                               NATIVEBUFFER_USAGE_HW_TEXTURE));
     OH_NativeWindow_NativeWindowHandleOpt(window_, SET_FORMAT, nativeFormat_);
-    OH_NativeWindow_NativeWindowHandleOpt(window_, SET_TIMEOUT, kRequestTimeoutMs);
+    appliedTimeoutMs_ = 0x7fffffff;
+    SetRequestTimeoutMs(kDirectFirstBufferTimeoutMs);
     OH_LOG_INFO(LOG_APP,
                 "[NW-DIRECT] VK configure size=%{public}ux%{public}u "
                 "vk_format=%{public}u native_format=%{public}d",
                 width, height, static_cast<uint32_t>(sourceFormat), nativeFormat_);
     return true;
+}
+
+void NativeWindowVkTarget::SetRequestTimeoutMs(int32_t timeoutMs)
+{
+    if (!window_ || appliedTimeoutMs_ == timeoutMs)
+        return;
+    const int32_t setRet =
+        OH_NativeWindow_NativeWindowHandleOpt(window_, SET_TIMEOUT, timeoutMs);
+    int32_t got = timeoutMs;
+    OH_NativeWindow_NativeWindowHandleOpt(window_, GET_TIMEOUT, &got);
+    appliedTimeoutMs_ = timeoutMs;
+    OH_LOG_INFO(LOG_APP,
+                "[NW-DIRECT] VK SET_TIMEOUT want=%{public}d got=%{public}d "
+                "ret=%{public}d",
+                timeoutMs, got, setRet);
 }
 
 void NativeWindowVkTarget::DestroySlot(VkDirectSlot& slot)
@@ -817,6 +834,7 @@ void NativeWindowVkTarget::Reset()
     device_ = VK_NULL_HANDLE;
     physical_ = VK_NULL_HANDLE;
     nativeFormat_ = 0;
+    appliedTimeoutMs_ = 0x7fffffff;
 }
 
 VkDirectSlot* NativeWindowVkTarget::ImportLocked(OHNativeWindowBuffer* windowBuffer)

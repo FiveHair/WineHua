@@ -688,7 +688,10 @@ void EglRenderer::RenderLoop() {
     RendererPerfWindow perf;
 
     static constexpr long long kFallbackPeriodNs = 16666667;
-    static constexpr auto kVSyncTimeout = std::chrono::milliseconds(100);
+    /* 100 ms matched Direct RequestBuffer timeout: a missed NativeVSync tick
+     * starved NativeImage for a full 100 ms, cube RequestBuffer expired, and
+     * Venus fake-presented. Wait two display periods (12–33 ms) then use the
+     * deadline fallback so the consumer keeps releasing slots. */
     const char vsyncName[] = "WineHuaRenderer";
     OH_NativeVSync* nativeVsync = OH_NativeVSync_Create(vsyncName, sizeof(vsyncName) - 1);
     if (nativeVsync) {
@@ -719,8 +722,12 @@ void EglRenderer::RenderLoop() {
             const int requestResult = OH_NativeVSync_RequestFrame(
                 nativeVsync, &EglRenderer::OnVSync, this);
             if (requestResult == 0) {
+                long long waitNs = vsyncPeriodNs > 0 ? vsyncPeriodNs * 2 : 24000000LL;
+                if (waitNs < 12000000LL) waitNs = 12000000LL;
+                if (waitNs > 33000000LL) waitNs = 33000000LL;
                 std::unique_lock<std::mutex> lock(vsyncMutex_);
-                const bool signaled = vsyncCv_.wait_for(lock, kVSyncTimeout, [&]() {
+                const bool signaled = vsyncCv_.wait_for(
+                    lock, std::chrono::nanoseconds(waitNs), [&]() {
                     return !running_ || vsyncSequence_ != requestedSequence;
                 });
                 lock.unlock();

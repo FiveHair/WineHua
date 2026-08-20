@@ -395,23 +395,23 @@ struct VenusSurfaceQueueTarget::Impl {
 
         const uint64_t nowNs = NowNs();
         /* Direct copy-every-frame: after MAIN attach, do not discard a
-         * finished present just because the display period has not elapsed.
-         * return 1 tells the guest Present succeeded while no new buffer is
-         * queued; the compositor then holds an older image and the camera
-         * looks like it reversed. Do not sleep to the next vsync either —
-         * that hitch shows up as a stutter when frame time jumps (Heaven
-         * walking start). After warmup, backpressure is RequestBuffer on a
-         * full queue and the guest deadline is 0. WSI and the first warmup
-         * frames still clock-pace with return 1. */
+         * finished present just because the display period has not elapsed,
+         * and do not sleep to vsync in this NCP thread. Guest Venus waits
+         * nextPresentDeadlineNs on the following Present (render overlaps
+         * the remaining period). RequestBuffer uses timeout 0; a full queue
+         * returns 1 immediately and still publishes a deadline so the guest
+         * cannot uncap. WSI and the first warmup frames still clock-pace. */
         const bool directQueuePace = DirectNativeWindowEnabled() &&
             framesPresented_ >= kDirectPresentWarmupFrames;
         if (directQueuePace) {
+            vkDirect_.SetRequestTimeoutMs(kDirectQueuePaceTimeoutMs);
             static bool loggedQueuePace;
             if (!loggedQueuePace) {
                 loggedQueuePace = true;
                 OH_LOG_INFO(LOG_APP,
                             "[VENUS-DIRECT] queue_pace=1 clock_drop=0 vsync_sleep=0 "
-                            "warmup=%{public}llu",
+                            "timeout_ms=%{public}d guest_deadline=1 warmup=%{public}llu",
+                            kDirectQueuePaceTimeoutMs,
                             static_cast<unsigned long long>(framesPresented_));
             }
         }
@@ -419,6 +419,12 @@ struct VenusSurfaceQueueTarget::Impl {
             ++dx11Stages_.fakePresent;
             const uint64_t intervalUs =
                 lastPresentNs_ ? (NowNs() - lastPresentNs_) / 1000 : 0;
+            if (nextPresentDeadlineNs) {
+                const uint64_t now = NowNs();
+                const uint64_t paced = lastPresentNs_
+                    ? lastPresentNs_ + framePeriodNs_ : now + framePeriodNs_;
+                *nextPresentDeadlineNs = paced > now ? paced : now + framePeriodNs_;
+            }
             OH_LOG_WARN(LOG_APP,
                         "[DX11-PROVENANCE] CLASS=%{public}s serial=%{public}u "
                         "reason=%{public}s extra_us=%{public}llu interval_us=%{public}llu "
@@ -546,9 +552,7 @@ struct VenusSurfaceQueueTarget::Impl {
                                 scanoutOk ? 1 : 0);
                 }
                 if (nextPresentDeadlineNs)
-                    *nextPresentDeadlineNs =
-                        framesPresented_ >= kDirectPresentWarmupFrames
-                            ? 0 : lastPresentNs_ + framePeriodNs_;
+                    *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
                 return 0;
             };
             auto recordCopyOrBarrier = [&](bool skip) -> VkResult {
@@ -1261,7 +1265,8 @@ private:
             windowLease_.Get(), SET_USAGE,
             static_cast<uint64_t>(NATIVEBUFFER_USAGE_HW_RENDER |
                                   NATIVEBUFFER_USAGE_HW_TEXTURE));
-        OH_NativeWindow_NativeWindowHandleOpt(windowLease_.Get(), SET_TIMEOUT, 100);
+        OH_NativeWindow_NativeWindowHandleOpt(
+            windowLease_.Get(), SET_TIMEOUT, kDirectFirstBufferTimeoutMs);
 
         if (DirectNativeWindowEnabled()) {
             VkResult result = VK_SUCCESS;

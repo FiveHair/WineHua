@@ -39,10 +39,18 @@ bool PresentUncapRequested();
 bool NativeImageDropUnreadRequested();
 /* First Direct presents keep a vsync deadline so MAIN can attach NativeImage.
  * After this, Venus copy-every-frame does not clock-drop (return 1) and does
- * not sleep to vsync. Backpressure is RequestBuffer on a full queue; the
- * guest deadline is 0. Returning 1 publishes no pixels while the guest
- * keeps simulating (camera rewind). */
+ * not sleep to vsync in NCP. Guest Venus waits the Host deadline on the next
+ * Present. Returning 1 publishes no pixels while the guest keeps simulating
+ * (Heaven walking rewind) — only used when RequestBuffer has no slot. */
 constexpr uint64_t kDirectPresentWarmupFrames = 24;
+/* First-buffer GPU allocation can need ~100 ms. After warmup, RequestBuffer
+ * must use timeout 0: NativeImage UpdateSurfaceImage shares SET_TIMEOUT, so
+ * a blocking dequeue deadlocks with consume. Do not poll RequestBuffer
+ * while holding the present mutex either (that starves MAIN and hits the
+ * 250 ms watchdog). Queue-full returns 1 immediately; guest Venus waits
+ * the Host deadline on the next Present so cube cannot run at 600 FPS. */
+constexpr int32_t kDirectFirstBufferTimeoutMs = 100;
+constexpr int32_t kDirectQueuePaceTimeoutMs = 0;
 
 struct FramePercentiles {
     uint64_t p50 = 0;
@@ -184,6 +192,7 @@ public:
                    VkPhysicalDevice physical, VkDevice device,
                    VkFormat sourceFormat);
     bool BeginFrame();
+    void SetRequestTimeoutMs(int32_t timeoutMs);
     bool AcquireGpu(VkSemaphore semaphore, VkFence fence);
     int SignalRelease(VkQueue queue, uint32_t waitSemaphoreCount,
                       const VkSemaphore* waitSemaphores);
@@ -224,6 +233,7 @@ private:
     uint64_t flushUs_ = 0;
     const char* lastBeginReason_ = "";
     int32_t lastRequestResult_ = 0;
+    int32_t appliedTimeoutMs_ = 0x7fffffff;
 };
 
 } // namespace winehua
