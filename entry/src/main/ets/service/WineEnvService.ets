@@ -177,7 +177,7 @@ export class WineEnvService {
   private driveC: string = DRIVE_C;
   private sockPath: string = SOCK;
   private d3dBackend: string = 'vkd3d_limited_500k';
-  private dxvkBackend: string = 'dxvk_legacy';
+  private dxvkBackend: string = 'dxvk_modern_2_6';
   // Wine locale 语言 ("zh_CN"/"en_US"), 设置页可切, 重启引擎后生效。
   // 持久化走 preferences API (同 DisplaySettingsService) — 不用 PersistentStorage:
   // 实测本应用 persistProp 在冷启动时不从磁盘恢复值 (haps/entry/files/
@@ -310,6 +310,9 @@ export class WineEnvService {
       this.setDxvkPreference(selected);
       return;
     }
+    if (selected === 'vkd3d_limited_500k') {
+      this.setDxvkPreference('dxvk_modern_2_6');
+    }
     this.updateLaunchRequest();
     hilog.info(DOMAIN, 'GameTest', 'D3D backend selected=%{public}s', selected);
     this.notify();
@@ -345,7 +348,10 @@ export class WineEnvService {
     const backend = AppStorage.get<string>('winehua.d3d.backend') ?? 'vkd3d_limited_500k';
     this.d3dBackend = this.normalizeD3dBackend(backend);
     this.dxvkBackend = this.normalizeDxvkBackend(
-      AppStorage.get<string>('winehua.dxvk.backend') ?? 'dxvk_legacy');
+      AppStorage.get<string>('winehua.dxvk.backend') ?? 'dxvk_modern_2_6');
+    if (this.d3dBackend === 'vkd3d_limited_500k' && this.dxvkBackend !== 'dxvk_modern_2_6') {
+      this.dxvkBackend = 'dxvk_modern_2_6';
+    }
     this.perfProfile = AppStorage.get<string>('winehua.perf.profile') ?? 'baseline';
     this.gamePath = AppStorage.get<string>('winehua.game.path') ?? '';
     this.gameArguments = AppStorage.get<string[]>('winehua.game.args') ?? [];

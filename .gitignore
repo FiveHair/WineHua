@@ -22,6 +22,9 @@ Thumbs.db
 
 # Temp
 .temp/
+.temp-agent*
+build-*.log
+build-*.exit
 
 # Build output (root)
 build/

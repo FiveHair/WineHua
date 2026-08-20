@@ -175,7 +175,17 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
 {
     if (d3dBackend == "vkd3d_limited_500k")
     {
-        const bool modern26 = dxvkBackend == "dxvk_modern_2_6";
+        /* DXGI 1.10.3 + vkd3d hangs explorer-launched D3D12 on fence_wait.
+         * Desktop children inherit this overlay, so mixed routing must keep
+         * D3D11/DXGI on 2.6.2 whenever D3D12 is vkd3d. Explicit DXVK-only
+         * sessions still select 1.10.3 through the dxvk_legacy backend. */
+        if (dxvkBackend != "dxvk_modern_2_6") {
+            OH_LOG_WARN(LOG_APP,
+                        "vkd3d_limited_500k requires DXVK 2.6.2 DXGI "
+                        "(got %{public}s); using modern-2.6 for explorer-launched D3D12",
+                        dxvkBackend.c_str());
+        }
+        const bool modern26 = true;
         const std::string dxvkRuntimeProfile = modern26 ? "modern-2.6" : "legacy";
         const std::string overlayRoot = std::string(WINE_RUNTIME_ROOT) +
             "/vkd3d/limited-500k";
@@ -254,10 +264,8 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
                 : "no_fence_feedback,no_query_feedback,no_multi_ring"),
             "VN_WINEHUA_STRONG_RING_BARRIER=1",
             "VN_WINEHUA_REMOTE_MEMORY_SYNC=1",
-            "VN_WINEHUA_PERSISTENT_MAP_SYNC=1",
             "VN_WINEHUA_DIRECT_FENCE_WAIT=1",
             "VKR_WINEHUA_SHADOW_FROM_HOST=precise",
-            "VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC=1",
             "WINEDLLOVERRIDES=d3d12=n;d3d11=n;dxgi=n",
             "WINEDLLPATH=" + wineDllPath,
             "WINEDLLDIR0=" + overlay64,
@@ -271,6 +279,12 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
             "WINEDLLDIR5=" + binDir,
         };
         for (const std::string& line : managed) UpsertEnvLine(env, line);
+        /* Product default stays ON. Submit publishes the union of explicit
+         * flush ranges (Guest Push Dirty), not the whole mapped window. */
+        if (!EnvHasKey(env, "VN_WINEHUA_PERSISTENT_MAP_SYNC"))
+            UpsertEnvLine(env, "VN_WINEHUA_PERSISTENT_MAP_SYNC=1");
+        if (!EnvHasKey(env, "VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC"))
+            UpsertEnvLine(env, "VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC=1");
         /* DX12 present reuses the Venus NativeBuffer+fence target.
          * Upload stays Guest Push Dirty / shadow-precise. ROUNDTRIP_ONLY
          * skips wait_all of unrelated ring commands. Guest present still

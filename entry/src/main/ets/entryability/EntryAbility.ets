@@ -59,6 +59,9 @@ export default class EntryAbility extends UIAbility {
       value('winehua.dxvk_backend', 'auto') : persistedDxvk);
     if (d3dBackend === 'dxvk_legacy') dxvkBackend = 'dxvk_legacy';
     if (d3dBackend === 'dxvk_modern_2_6') dxvkBackend = 'dxvk_modern_2_6';
+    /* Explorer children inherit the desktop overlay. DXGI 1.10.3 + vkd3d
+     * hangs D3D12 on fence_wait, so mixed routing keeps DXGI on 2.6.2. */
+    if (d3dBackend === 'vkd3d_limited_500k') dxvkBackend = 'dxvk_modern_2_6';
     let gamePath = value('winehua.game_path', '');
     const experimentId = value('winehua.experiment_id', '');
     const experimentExecutable = value('winehua.experiment_executable', '');
@@ -138,7 +141,7 @@ export default class EntryAbility extends UIAbility {
         'BOX64_AVX'
       ];
       const allowedKey = key === 'VKD3D_DEBUG' ||
-        /^(WINEDEBUG|DXVK_|VKD3D_TEST_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$/.test(key) ||
+        /^(WINEDEBUG|DXVK_|VKD3D_TEST_|VKD3D_WINEHUA_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$/.test(key) ||
         allowedBox64Keys.indexOf(key) >= 0;
       if (!allowedKey ||
         envValue.length > 1024 || d3dEnvKeys.length >= 32) {

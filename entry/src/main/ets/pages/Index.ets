@@ -38,8 +38,8 @@ interface WineProcessHandle {
 struct Index {
   @StorageLink('winehua.d3d.backend') d3dBackendText: string = 'vkd3d_limited_500k';
   @StorageLink('winehua.d3d.preference') d3dPreferenceText: string = 'vkd3d_limited_500k';
-  @StorageLink('winehua.dxvk.backend') dxvkBackendText: string = 'dxvk_legacy';
-  @StorageLink('winehua.dxvk.preference') dxvkPreferenceText: string = 'auto';
+  @StorageLink('winehua.dxvk.backend') dxvkBackendText: string = 'dxvk_modern_2_6';
+  @StorageLink('winehua.dxvk.preference') dxvkPreferenceText: string = 'dxvk_modern_2_6';
   @StorageLink('winehua.game.d3d_env_keys') d3dEnvKeys: string[] = [];
   @StorageLink('winehua.game.d3d_env_values') d3dEnvValues: string[] = [];
   @StorageLink('winehua.perf.profile') perfProfileText: string = 'baseline';
@@ -72,7 +72,7 @@ struct Index {
   @State desktopWindowActive: boolean = false;
   private wm: WineWindowManager = WineWindowManager.getInstance();
   private d3dBackend: string = 'vkd3d_limited_500k';
-  private dxvkBackend: string = 'dxvk_legacy';
+  private dxvkBackend: string = 'dxvk_modern_2_6';
   @State vkd3dSmokePhase: string = 'idle';
   @State vkd3dSmokeStatus: string = '尚未运行';
   @State vkd3dSmokeDetail: string = '在当前 Wine 会话验证 D3D12 能力查询、回读、Fence 与 1000 帧动态渲染。';
@@ -166,8 +166,8 @@ struct Index {
     this.d3dBackend = this.d3dBackendText === 'dxvk_legacy' ||
       this.d3dBackendText === 'dxvk_modern_2_6' ||
       this.d3dBackendText === 'vkd3d_limited_500k' ? this.d3dBackendText : 'wined3d';
-    this.dxvkBackend = this.dxvkBackendText === 'dxvk_modern_2_6' ?
-      'dxvk_modern_2_6' : 'dxvk_legacy';
+    this.dxvkBackend = this.dxvkBackendText === 'dxvk_legacy' ?
+      'dxvk_legacy' : 'dxvk_modern_2_6';
     this.setupIme();
     const env = this.env;
     const mirror = (): void => {
@@ -377,6 +377,11 @@ struct Index {
       this.dxvkBackend = selected;
       this.dxvkBackendText = selected;
       this.dxvkPreferenceText = selected;
+    } else if (selected === 'vkd3d_limited_500k') {
+      this.dxvkBackend = 'dxvk_modern_2_6';
+      this.dxvkBackendText = 'dxvk_modern_2_6';
+      this.dxvkPreferenceText = 'dxvk_modern_2_6';
+      this.env.setDxvkPreference('dxvk_modern_2_6');
     }
     this.env.setD3dPreference(selected);
     this.statusText = selected === 'dxvk_legacy' ? 'DXVK Legacy' :
