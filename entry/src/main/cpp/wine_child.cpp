@@ -88,23 +88,53 @@ static const char *basename_of_path(const char *path)
     return slash ? slash + 1 : path;
 }
 
+static void normalize_basename(const char *path, char *out, size_t out_size)
+{
+    const char *base = basename_of_path(path);
+    size_t j = 0;
+
+    if (!base || !out || !out_size) return;
+    for (size_t i = 0; base[i] && j < out_size - 1; ++i)
+    {
+        char c = base[i];
+        /* Match executable stems rather than their filesystem spelling.  The
+           desktop smoke is named winehua_audio_smoke.exe, so keeping '_'
+           makes the audio diagnostic probe miss its own profile. */
+        if (c == ' ' || c == '\t' || c == '_' || c == '-') continue;
+        if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+        out[j++] = c;
+    }
+    out[j] = '\0';
+}
+
 static bool is_audio_test_exe(int argc, char *argv[])
 {
-    const char *base;
+    char norm[128];
 
-    if (argc <= 0 || !argv[0]) return false;
-    base = basename_of_path(argv[0]);
-    return !strcasecmp(base, "winehua_audio_test.exe") ||
-           !strcasecmp(base, "winehua_audio_test32.exe");
+    /* argv[0] 是 wine 加载器, 实际程序从 argv[1] 开始。
+       保留 audio_test 兼容性，并匹配当前打包并由 SmokeRunner 启动的
+       winehua_audio_smoke.exe；模糊匹配容忍空格、下划线与连字符变体。 */
+    for (int i = 1; i < argc; ++i)
+    {
+        if (!argv[i]) continue;
+        normalize_basename(argv[i], norm, sizeof(norm));
+        if (strstr(norm, "audiotest") != NULL ||
+            strstr(norm, "audiosmoke") != NULL) return true;
+    }
+    return false;
 }
 
 static bool is_sdl_audio_test_exe(int argc, char *argv[])
 {
-    const char *base;
+    char norm[128];
 
-    if (argc <= 0 || !argv[0]) return false;
-    base = basename_of_path(argv[0]);
-    return !strcasecmp(base, "mj_x86.exe") || !strcasecmp(base, "mj_x86d.exe");
+    for (int i = 1; i < argc; ++i)
+    {
+        if (!argv[i]) continue;
+        normalize_basename(argv[i], norm, sizeof(norm));
+        if (strstr(norm, "mjx86") != NULL) return true;
+    }
+    return false;
 }
 
 static bool program_is(const char *program, const char *name)
@@ -277,9 +307,14 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
     setenv("BOX64_LD_LIBRARY_PATH", libDir.c_str(), 1);
     SetBox64PerfEnv();
     setenv("USE_LIBBOX64", "1", 1);  // 供 wine process.c 识别 in-process box64
+#elif defined(__aarch64__)
+    // 方案③ arm64 原生 wine: Harmony musl 会因 el2 目录拒绝整条
+    // LD_LIBRARY_PATH 或跳过后续 el1 项。guest GL/Vulkan 已复制到 HAP
+    // native libs, 只保留 el1 供系统 dlopen。
+    setenv("LD_LIBRARY_PATH",
+           (std::string("/data/storage/el1/bundle/libs/") + native_lib_dir).c_str(), 1);
 #else
-    // 方案①③ (Wine 与设备同架构): 系统 linker 直接加载, Wine .so 打包在
-    // bundle libs (el1, 系统 dlopen 允许), 依赖也从该目录解析
+    // 方案① x86_64 原生 wine
     setenv("LD_LIBRARY_PATH",
            (libDir + ":/data/storage/el1/bundle/libs/" + native_lib_dir).c_str(), 1);
 #endif
@@ -312,7 +347,8 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
 #if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)
         // 方案②: box64 转译, el1 arm64 原生库不走 wine PE 搜索
 #else
-        dllPath += ":/data/storage/el1/bundle/libs/" + std::string(native_lib_dir);
+        // 方案①③: unixlib + HAP native libs, so mmdevapi can load wineohos.so
+        dllPath += std::string(":") + libDir + ":/data/storage/el1/bundle/libs/" + native_lib_dir;
 #endif
         setenv("WINEDLLPATH", dllPath.c_str(), 1);
     }
@@ -356,6 +392,106 @@ static void apply_entry_param_env_overrides(const std::vector<std::string>& envO
             OH_LOG_INFO(LOG_APP, "[WineChild] env override %{public}s=%{public}s",
                         key.c_str(), value.c_str());
     }
+}
+
+#ifdef __aarch64__
+static constexpr const char kChildNativeLibDir[] = "arm64";
+#else
+static constexpr const char kChildNativeLibDir[] = "x86_64";
+#endif
+
+static bool path_has_component(const std::string& path, const std::string& dir)
+{
+    if (dir.empty() || path.empty()) return false;
+    size_t start = 0;
+    while (start <= path.size())
+    {
+        size_t end = path.find(':', start);
+        if (end == std::string::npos) end = path.size();
+        if (path.compare(start, end - start, dir) == 0) return true;
+        if (end == path.size()) break;
+        start = end + 1;
+    }
+    return false;
+}
+
+static void append_path_component(std::string& path, const std::string& dir)
+{
+    if (dir.empty() || path_has_component(path, dir)) return;
+    if (!path.empty()) path += ':';
+    path += dir;
+}
+
+static void replace_all(std::string& haystack, const char* from, const char* to)
+{
+    if (!from || !from[0] || !to) return;
+    const size_t fromLen = strlen(from);
+    const size_t toLen = strlen(to);
+    size_t pos = 0;
+    while ((pos = haystack.find(from, pos)) != std::string::npos)
+    {
+        haystack.replace(pos, fromLen, to);
+        pos += toLen;
+    }
+}
+
+/* Parent __env may overlay WINEDLLPATH with DXVK PE dirs and drop the HAP
+ * native-lib directory where wineohos.so is packaged. ntdll redirects dll_dir
+ * to WINEUNIXDIR (wine/bin), so unixlib search must still include bundle libs. */
+static void reassert_arch_wine_runtime_env(const char* binDir)
+{
+    if (!binDir || !binDir[0]) return;
+
+    const std::string unixDir = std::string(binDir) + "/" WINE_UNIX_SUBDIR;
+    const std::string peDir = std::string(binDir) + "/" WINE_PE_SUBDIR;
+    const std::string i386Dir = std::string(binDir) + "/i386-windows";
+    const std::string bundleDir = std::string("/data/storage/el1/bundle/libs/") + kChildNativeLibDir;
+
+    setenv("WINEBINDIR", binDir, 1);
+    setenv("WINEUNIXDIR", binDir, 1);
+    setenv("WINEDLLDIR", unixDir.c_str(), 1);
+
+    const char* dllDir0 = getenv("WINEDLLDIR0");
+    if (!dllDir0 || !dllDir0[0] ||
+        (strstr(dllDir0, "x86_64-windows") != nullptr &&
+         strstr(dllDir0, "/dxvk/") == nullptr))
+        setenv("WINEDLLDIR0", peDir.c_str(), 1);
+
+    const char* existing = getenv("WINEDLLPATH");
+    std::string dllPath = existing ? existing : "";
+#ifdef __aarch64__
+    replace_all(dllPath, "x86_64-windows", WINE_PE_SUBDIR);
+    replace_all(dllPath, "x86_64-unix", WINE_UNIX_SUBDIR);
+#endif
+    append_path_component(dllPath, peDir);
+    append_path_component(dllPath, i386Dir);
+    append_path_component(dllPath, binDir);
+    append_path_component(dllPath, unixDir);
+    append_path_component(dllPath, bundleDir);
+    setenv("WINEDLLPATH", dllPath.c_str(), 1);
+
+#if defined(__aarch64__) && !defined(WINEHUA_WINE_ARCH_IS_X86_64)
+    /* Parent __env still serializes el2 guest_gfx/wine/bin first. That
+     * poisons musl ICD/loader scans on 方案③; force the el1-only path.
+     * 方案② keeps the box64 host LD_LIBRARY_PATH from setup_wine_env. */
+    setenv("LD_LIBRARY_PATH", bundleDir.c_str(), 1);
+#endif
+
+    const char* path = getenv("PATH");
+    if (path && strstr(path, "x86_64-windows"))
+    {
+        std::string p = path;
+        replace_all(p, "x86_64-windows", WINE_PE_SUBDIR);
+        setenv("PATH", p.c_str(), 1);
+    }
+
+    OH_LOG_INFO(LOG_APP,
+                "[WineChild] reassert WINEDLLDIR=%{public}s WINEDLLDIR0=%{public}s "
+                "WINEDLLPATH=%{public}s LD_LIBRARY_PATH=%{public}s",
+                unixDir.c_str(),
+                getenv("WINEDLLDIR0") ? getenv("WINEDLLDIR0") : "",
+                dllPath.c_str(),
+                getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "");
 }
 
 static void log_d3d_environment_summary()
@@ -406,6 +542,35 @@ static void log_d3d_environment_summary()
                 mesaLogLevel ? mesaLogLevel : "",
                 batchMappedFlush ? batchMappedFlush : "",
                 rgba8SnormRt ? rgba8SnormRt : "");
+    const char* ldPath = getenv("LD_LIBRARY_PATH");
+    const char* icd = getenv("VK_ICD_FILENAMES");
+    const char* drivers = getenv("VK_DRIVER_FILES");
+    OH_LOG_INFO(LOG_APP,
+                "[WineChild] vulkan scan LD_LIBRARY_PATH=%{public}s "
+                "VK_ICD_FILENAMES=%{public}s VK_DRIVER_FILES=%{public}s",
+                ldPath ? ldPath : "",
+                icd ? icd : "",
+                drivers ? drivers : "");
+#ifdef __aarch64__
+    void* vulkan = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!vulkan)
+    {
+        const char* err = dlerror();
+        OH_LOG_ERROR(LOG_APP, "[WineChild] dlopen libvulkan.so.1 failed: %{public}s",
+                     err ? err : "(null)");
+    }
+    else
+    {
+        Dl_info info;
+        void* sym = dlsym(vulkan, "vkCreateInstance");
+        if (sym && dladdr(sym, &info) && info.dli_fname)
+            OH_LOG_INFO(LOG_APP, "[WineChild] libvulkan.so.1 loaded from %{public}s",
+                        info.dli_fname);
+        else
+            OH_LOG_INFO(LOG_APP, "[WineChild] libvulkan.so.1 loaded, path unknown");
+        dlclose(vulkan);
+    }
+#endif
 }
 
 static void prepare_host_elf_environment(const char *homeDir)
@@ -517,7 +682,23 @@ extern "C" void Main(NativeChildProcess_Args args)
     // Step B: entryParams 中的环境覆盖应用。
     apply_entry_param_env_overrides(envOverrides);
 
-    if (!hostElfMode) log_d3d_environment_summary();
+    if (!hostElfMode) {
+        reassert_arch_wine_runtime_env(binDir);
+        /* Parent serializes WINEDEBUG=-all,+opengl,... which clobbers the
+         * audio diagnostic profile selected in setup_wine_env(). Restore it
+         * so mmdevapi/wineohos traces actually appear for audio tests. */
+        if (is_audio_test_exe(argc, argv) || is_sdl_audio_test_exe(argc, argv))
+        {
+            const char *profile = select_winedebug_profile(argc, argv);
+            setenv("WINEDEBUG", profile, 1);
+            OH_LOG_INFO(LOG_APP, "[WineChild] restored audio WINEDEBUG=%{public}s", profile);
+        }
+        log_d3d_environment_summary();
+        OH_LOG_INFO(LOG_APP,
+                    "[WineChild] final WINEDLLDIR=%{public}s WINEDEBUG=%{public}s",
+                    getenv("WINEDLLDIR") ? getenv("WINEDLLDIR") : "",
+                    getenv("WINEDEBUG") ? getenv("WINEDEBUG") : "");
+    }
 
     // 覆盖 per-process fd 变量 (__env__ 中的是父进程 fd 号, 本进程无效)
     if (wsSockFd >= 0) {
@@ -527,6 +708,18 @@ extern "C" void Main(NativeChildProcess_Args args)
         OH_LOG_INFO(LOG_APP, "[WineChild] WINESERVERSOCKET=%{public}d (own fd)", wsSockFd);
     }
     if (audioFd >= 0) {
+        /* 保护 bootstrap fd: dup 到高位, 避免 wine ntdll 启动时复用低 fd */
+        int saved = fcntl(audioFd, F_DUPFD, 512);
+        if (saved >= 0)
+        {
+            OH_LOG_INFO(LOG_APP, "[WineChild] audio bootstrap fd dup %{public}d -> %{public}d (guard high)",
+                        audioFd, saved);
+            audioFd = saved;
+        }
+        else
+        {
+            OH_LOG_WARN(LOG_APP, "[WineChild] audio bootstrap fd dup failed errno=%{public}d", errno);
+        }
         char buf[32];
         snprintf(buf, sizeof(buf), "%d", audioFd);
         setenv("WINE_OHOS_AUDIO_ENABLE", "1", 1);
