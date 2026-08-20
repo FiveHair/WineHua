@@ -306,7 +306,7 @@ static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
     /* Product sessions retain warnings and errors without formatting DXVK's
      * informational startup stream. Smoke and explicit diagnostics override
      * this through runWineProgram's per-process environment. */
-    UpsertEnvLine(env, "DXVK_LOG_LEVEL=warn");
+    UpsertEnvLine(env, "DXVK_LOG_LEVEL=info");
     UpsertEnvLine(env, "DXVK_LOG_PATH=C:\\windows\\temp");
     UpsertEnvLine(env, "WINEHUA_PERF_PROFILE=" + selectedProfile);
     UpsertEnvLine(env, "DXVK_WINEHUA_PRECISE_SHADOW=1");

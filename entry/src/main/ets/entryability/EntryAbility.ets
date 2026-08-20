@@ -30,7 +30,17 @@ export default class EntryAbility extends UIAbility {
     const requestedD3d = explicitD3d ? value('winehua.d3d_backend', 'wined3d') :
       (mode === '' ? persistedD3d : 'wined3d');
     const d3dBackend = requestedD3d === 'dxvk_legacy' ? 'dxvk_legacy' : 'wined3d';
-    const gamePath = value('winehua.game_path', '');
+    const rawGamePath = value('winehua.game_path', '');
+    let gamePath = rawGamePath;
+    if (rawGamePath.indexOf('%') >= 0) {
+      try {
+        gamePath = decodeURIComponent(rawGamePath);
+      } catch (_err) {
+        gamePath = rawGamePath;
+      }
+    }
+    hilog.info(DOMAIN, 'GameTest', 'want game_path raw=%{public}s decoded=%{public}s',
+      rawGamePath, gamePath);
     const requestedGameArgCount = Number(value('winehua.game_argc', '0'));
     const gameArgCount = Math.max(0, Math.min(64, Math.floor(requestedGameArgCount)));
     const gameArguments: string[] = [];

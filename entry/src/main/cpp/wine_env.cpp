@@ -87,9 +87,21 @@ std::vector<std::string> BuildWineEnv(const std::string& sockDir,
         guestReceiverLibDir = graphicsState.guestReceiverRuntimeDir + "/lib";
         if (access(guestReceiverLibDir.c_str(), F_OK) == 0) {
             libPathBase = guestReceiverLibDir + ":" + libPathBase;
+        } else {
+            guestReceiverLibDir.clear();
         }
     }
+#if defined(__aarch64__) && !defined(WINEHUA_WINE_ARCH_IS_X86_64)
+    /* Harmony musl may reject the entire LD_LIBRARY_PATH when it contains
+     * el2 data-area dirs (check ns accessible failed). el2 libvulkan.so.1
+     * can also open() then fail mmap, which skips later el1 entries.
+     * Guest GL/Vulkan .so are already copied to HAP native libs; keep
+     * native dlopen on that el1 directory only. WINEDLLPATH still lists
+     * el2 Wine PE/unix dirs because ntdll opens those by full path. */
+    const std::string runtimeLibPath = BundleNativeLibsDir();
+#else
     std::string runtimeLibPath = libPathBase + ":/data/storage/el1/bundle/libs/" + native_lib_dir;
+#endif
 
     std::string dllPath = binDir + "/" WINE_PE_SUBDIR ":" + binDir + "/i386-windows:" + binDir;
 #if defined(__aarch64__) && defined(WINEHUA_WINE_ARCH_IS_X86_64)

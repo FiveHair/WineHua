@@ -307,9 +307,14 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
     setenv("BOX64_LD_LIBRARY_PATH", libDir.c_str(), 1);
     SetBox64PerfEnv();
     setenv("USE_LIBBOX64", "1", 1);  // 供 wine process.c 识别 in-process box64
+#elif defined(__aarch64__)
+    // 方案③ arm64 原生 wine: Harmony musl 会因 el2 目录拒绝整条
+    // LD_LIBRARY_PATH 或跳过后续 el1 项。guest GL/Vulkan 已复制到 HAP
+    // native libs, 只保留 el1 供系统 dlopen。
+    setenv("LD_LIBRARY_PATH",
+           (std::string("/data/storage/el1/bundle/libs/") + native_lib_dir).c_str(), 1);
 #else
-    // 方案①③ (Wine 与设备同架构): 系统 linker 直接加载, Wine .so 打包在
-    // bundle libs (el1, 系统 dlopen 允许), 依赖也从该目录解析
+    // 方案① x86_64 原生 wine
     setenv("LD_LIBRARY_PATH",
            (libDir + ":/data/storage/el1/bundle/libs/" + native_lib_dir).c_str(), 1);
 #endif
@@ -465,6 +470,13 @@ static void reassert_arch_wine_runtime_env(const char* binDir)
     append_path_component(dllPath, bundleDir);
     setenv("WINEDLLPATH", dllPath.c_str(), 1);
 
+#if defined(__aarch64__) && !defined(WINEHUA_WINE_ARCH_IS_X86_64)
+    /* Parent __env still serializes el2 guest_gfx/wine/bin first. That
+     * poisons musl ICD/loader scans on 方案③; force the el1-only path.
+     * 方案② keeps the box64 host LD_LIBRARY_PATH from setup_wine_env. */
+    setenv("LD_LIBRARY_PATH", bundleDir.c_str(), 1);
+#endif
+
     const char* path = getenv("PATH");
     if (path && strstr(path, "x86_64-windows"))
     {
@@ -474,10 +486,12 @@ static void reassert_arch_wine_runtime_env(const char* binDir)
     }
 
     OH_LOG_INFO(LOG_APP,
-                "[WineChild] reassert WINEDLLDIR=%{public}s WINEDLLDIR0=%{public}s WINEDLLPATH=%{public}s",
+                "[WineChild] reassert WINEDLLDIR=%{public}s WINEDLLDIR0=%{public}s "
+                "WINEDLLPATH=%{public}s LD_LIBRARY_PATH=%{public}s",
                 unixDir.c_str(),
                 getenv("WINEDLLDIR0") ? getenv("WINEDLLDIR0") : "",
-                dllPath.c_str());
+                dllPath.c_str(),
+                getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "");
 }
 
 static void log_d3d_environment_summary()
@@ -528,6 +542,35 @@ static void log_d3d_environment_summary()
                 mesaLogLevel ? mesaLogLevel : "",
                 batchMappedFlush ? batchMappedFlush : "",
                 rgba8SnormRt ? rgba8SnormRt : "");
+    const char* ldPath = getenv("LD_LIBRARY_PATH");
+    const char* icd = getenv("VK_ICD_FILENAMES");
+    const char* drivers = getenv("VK_DRIVER_FILES");
+    OH_LOG_INFO(LOG_APP,
+                "[WineChild] vulkan scan LD_LIBRARY_PATH=%{public}s "
+                "VK_ICD_FILENAMES=%{public}s VK_DRIVER_FILES=%{public}s",
+                ldPath ? ldPath : "",
+                icd ? icd : "",
+                drivers ? drivers : "");
+#ifdef __aarch64__
+    void* vulkan = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!vulkan)
+    {
+        const char* err = dlerror();
+        OH_LOG_ERROR(LOG_APP, "[WineChild] dlopen libvulkan.so.1 failed: %{public}s",
+                     err ? err : "(null)");
+    }
+    else
+    {
+        Dl_info info;
+        void* sym = dlsym(vulkan, "vkCreateInstance");
+        if (sym && dladdr(sym, &info) && info.dli_fname)
+            OH_LOG_INFO(LOG_APP, "[WineChild] libvulkan.so.1 loaded from %{public}s",
+                        info.dli_fname);
+        else
+            OH_LOG_INFO(LOG_APP, "[WineChild] libvulkan.so.1 loaded, path unknown");
+        dlclose(vulkan);
+    }
+#endif
 }
 
 static void prepare_host_elf_environment(const char *homeDir)

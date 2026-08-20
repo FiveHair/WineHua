@@ -110,9 +110,9 @@ struct Index {
   private d3dLaunchEnvironment(): Record<string, string> {
     if (this.d3dBackend !== 'dxvk_legacy') return {};
     const environment: Record<string, string> = {
-      'DXVK_LOG_LEVEL': 'warn',
-      'DXVK_LOG_PATH': 'C:\\smoke\\results\\desktop-dxvk',
-      'WINEDEBUG': '-all',
+      'DXVK_LOG_LEVEL': 'info',
+      'DXVK_LOG_PATH': 'C:\\windows\\temp',
+      'WINEDEBUG': '-all,+err,+vulkan,+winediag',
       /* Venus uses a shared-memory command ring between the x86_64 guest and
        * the ARM64 renderer.  Box64's aggressive weak-barrier mode can violate
        * the x86 ordering expected by the ring and eventually corrupt a random

@@ -854,7 +854,7 @@ export class WineEnvService {
       this.setInitStatus('解压数据...', !this.bgStart);
       hilog.warn(DOMAIN, 'wine', 'auto-init: extracting wine data (missing)...');
       await this.extractWineData();
-    } else if (this.upgradeNeedsAttention() && !this.isAutomation()) {
+    } else if (this.upgradeNeedsAttention() && !this.automationMode && !this.gameTestMode) {
       hilog.warn(DOMAIN, 'wine', 'auto-init: runtime outdated, NOT auto-extracting (user-initiated)');
       // 中止初始化: 引擎保持未启动, 弹卡等用户决定 (应用=doReset 引擎静止
       // 无竞态; 稍后=dismiss 记跳过 sha 后补拉起, 同版本不再拦截)。
@@ -869,7 +869,7 @@ export class WineEnvService {
       this.upgradePending = true;
       this.notify();
       return;
-    } else if (this.runtimeNeedsRefresh() && this.isAutomation()) {
+    } else if (this.runtimeNeedsRefresh() && (this.automationMode || this.gameTestMode)) {
       // 自动化/游戏测试模式 (无人值守): 升级不弹卡 — 没有用户可点,
       // 中止会让 smoke/game 等 ready 永久挂起; 保持旧行为自动解压自愈。
       // 注意必须带 isAutomation 条件: 普通模式"已跳过的升级"
@@ -1199,11 +1199,11 @@ export class WineEnvService {
   // perf profile 对应的一组 VN_/VKR_/DXVK_ 开关, 最后叠加 want 携带的显式覆盖项
   private d3dLaunchEnvironment(): Record<string, string> {
     if (this.d3dBackend !== 'dxvk_legacy') return {};
-    ensureDirectory(`${this.driveC}/smoke/results/desktop-dxvk`);
+    ensureDirectory(`${this.driveC}/windows/temp`);
     const environment: Record<string, string> = {
-      'DXVK_LOG_LEVEL': 'warn',
-      'DXVK_LOG_PATH': 'C:\\smoke\\results\\desktop-dxvk',
-      'WINEDEBUG': '-all',
+      'DXVK_LOG_LEVEL': 'info',
+      'DXVK_LOG_PATH': 'C:\\windows\\temp',
+      'WINEDEBUG': '-all,+err,+vulkan,+winediag',
       /* Venus 在 x86_64 guest 与 ARM64 renderer 之间用共享内存命令环。
        * Box64 激进的弱屏障模式可能破坏 ring 期望的 x86 定序, 最终损坏随机
        * Vulkan 命令。该约束只作用于 DXVK/Venus 进程。 */
