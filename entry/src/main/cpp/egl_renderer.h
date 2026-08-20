@@ -83,6 +83,9 @@ private:
     uint64_t zeroCopyFailures_ = 0;
     uint64_t zeroCopyFallbackShmSerial_ = 0;
     uint64_t zeroCopyTimestampRegressions_ = 0;
+    uint64_t zeroCopyLastConsumeVsync_ = 0;
+    uint64_t displayHoldEvents_ = 0;
+    uint32_t displayHoldHist_[8] = {};
     int64_t zeroCopyLastTimestamp_ = 0;
     uint64_t zeroCopySurfaceKey_ = 0;
     uint64_t zeroCopyLastQueryUs_ = 0;

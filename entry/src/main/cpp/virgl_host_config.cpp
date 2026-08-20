@@ -150,6 +150,11 @@ bool BuildVirglHostLaunchConfig(const VirglHostConfig& config,
     AppendEnv(params, "VTEST_USE_EGL_SURFACELESS", "1");
     AppendEnv(params, "WINEHUA_DIRECT_NATIVEWINDOW",
               DirectNativeWindowEnabled() ? "1" : "0");
+    AppendEnv(params, "WINEHUA_FBTRACE", "1");
+    AppendEnv(params, "WINEHUA_SCANOUT_BACKING", "1");
+    /* Venus skip-copy is opt-in. Default copy-every-frame: wrapping the
+     * DXVK swapchain image blacks out games that sample the backbuffer. */
+    AppendEnv(params, "WINEHUA_VENUS_SCANOUT_BACKING", "0");
     AppendEnv(params, "VTEST_SYNC_GL_FINISH",
               DirectNativeWindowEnabled() ? "0" : "1");
     AppendEnv(params, "WINEHUA_VIRGL_SYNC_MODE", config.syncMode);

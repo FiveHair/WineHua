@@ -38,13 +38,21 @@ using WinehuaVtestMain = int (*)(int argc, char** argv);
 using WinehuaVtestResetStopRequest = void (*)();
 using WinehuaVtestRequestStop = int (*)();
 using WinehuaVtestPresentCallback = int (*)(
-    uint32_t texId, uint32_t width, uint32_t height, uint32_t format,
+    uint32_t texId, uint32_t resHandle, uint32_t width, uint32_t height, uint32_t format,
     uint32_t resourceFlags, uint64_t drawable, uint32_t serial,
     uint32_t clientPid, uint32_t surfaceId, uint32_t presentFlags,
     uint64_t* nextPresentDeadlineNs, void* userData);
 using WinehuaVtestSetPresentCallback = void (*)(
     WinehuaVtestPresentCallback callback, void* userData);
 using WinehuaVtestSetColorRemap = void (*)(uint32_t srcTex, uint32_t dstTex);
+using WinehuaVtestSetScanoutBacking = int (*)(uint32_t resHandle, uint32_t glId, void* image);
+using WinehuaVtestClearScanoutBacking = int (*)(uint32_t resHandle);
+using WinehuaVtestScanoutLastWrite = int (*)(uint32_t resHandle, uint32_t* dstGl,
+                                             uint32_t* fullCover, const char** op);
+using WinehuaVtestScanoutGeneration = int (*)(uint32_t resHandle, uint64_t* requested,
+                                              uint64_t* applied, uint32_t* drawGl);
+using WinehuaVtestSetVkScanoutBacking = int (*)(uint32_t ctxId, uint64_t scanoutImage);
+using WinehuaVtestClearVkScanoutBacking = int (*)(uint32_t ctxId);
 using WinehuaVtestReleaseQueueCallback = void (*)(void* queueSyncData);
 using WinehuaVtestVulkanPresentCallback = int (*)(
     uint32_t contextId, uintptr_t instance, uintptr_t physicalDevice,
@@ -311,6 +319,11 @@ bool IsAllowedHostEnv(const std::string& key)
            key == "WINEHUA_VENUS_PRESENT_MODE" ||
            key == "WINEHUA_VKR_FREEZE_BOOL_SPEC" ||
            key == "WINEHUA_DIRECT_NATIVEWINDOW" ||
+           key == "WINEHUA_FBTRACE" ||
+           key == "WINEHUA_SCANOUT_BACKING" ||
+           key == "WINEHUA_VENUS_SCANOUT_BACKING" ||
+           key == "WINEHUA_SCANOUT_GLFINISH" ||
+           key == "WINEHUA_PRESENT_UNCAP" ||
            key == "EGL_PLATFORM";
 }
 
@@ -352,7 +365,7 @@ void ApplyHostEnv(const char* token)
     setenv(key.c_str(), equals + 1, 1);
 }
 
-int OnVtestPresent(uint32_t texId, uint32_t width, uint32_t height,
+int OnVtestPresent(uint32_t texId, uint32_t resHandle, uint32_t width, uint32_t height,
                    uint32_t format, uint32_t resourceFlags,
                    uint64_t drawable, uint32_t serial,
                    uint32_t clientPid, uint32_t surfaceId,
@@ -367,7 +380,7 @@ int OnVtestPresent(uint32_t texId, uint32_t width, uint32_t height,
     if (nextPresentDeadlineNs) *nextPresentDeadlineNs = 0;
     const int presentResult = textureVisible
         ? winehua::PresentVirglSurface(
-              clientPid, surfaceId, texId, width, height, drawable, serial,
+              clientPid, surfaceId, resHandle, texId, width, height, drawable, serial,
               nextPresentDeadlineNs)
         : -1;
 
@@ -716,6 +729,25 @@ extern "C" __attribute__((visibility("default"))) void Main(NativeChildProcess_A
     auto setColorRemap = reinterpret_cast<WinehuaVtestSetColorRemap>(
         dlsym(handle, "winehua_vtest_set_color_remap"));
     winehua::SetVirglColorRemapFn(setColorRemap);
+    auto setScanoutBacking = reinterpret_cast<WinehuaVtestSetScanoutBacking>(
+        dlsym(handle, "winehua_vtest_set_scanout_backing"));
+    auto clearScanoutBacking = reinterpret_cast<WinehuaVtestClearScanoutBacking>(
+        dlsym(handle, "winehua_vtest_clear_scanout_backing"));
+    auto scanoutLastWrite = reinterpret_cast<WinehuaVtestScanoutLastWrite>(
+        dlsym(handle, "winehua_vtest_scanout_last_write"));
+    auto scanoutGeneration = reinterpret_cast<WinehuaVtestScanoutGeneration>(
+        dlsym(handle, "winehua_vtest_scanout_generation"));
+    winehua::SetVirglScanoutBackingFn(setScanoutBacking, clearScanoutBacking,
+                                      scanoutLastWrite, scanoutGeneration);
+    if (!setScanoutBacking)
+        OH_LOG_WARN(LOG_APP, "[virgl-child] scanout backing export missing");
+    auto setVkScanoutBacking = reinterpret_cast<WinehuaVtestSetVkScanoutBacking>(
+        dlsym(handle, "winehua_vtest_set_vk_scanout_backing"));
+    auto clearVkScanoutBacking = reinterpret_cast<WinehuaVtestClearVkScanoutBacking>(
+        dlsym(handle, "winehua_vtest_clear_vk_scanout_backing"));
+    winehua::SetVenusScanoutBackingFn(setVkScanoutBacking, clearVkScanoutBacking);
+    if (!setVkScanoutBacking)
+        OH_LOG_WARN(LOG_APP, "[virgl-child] vk scanout backing export missing");
 
     setVulkanPresentCallback = reinterpret_cast<WinehuaVtestSetVulkanPresentCallback>(
         dlsym(handle, "winehua_vtest_set_vulkan_present_callback"));

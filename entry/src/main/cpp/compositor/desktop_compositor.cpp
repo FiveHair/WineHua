@@ -490,6 +490,13 @@ void DesktopCompositor::SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled)
     desktopCompositionSignature_ = 0;
 }
 
+bool DesktopCompositor::IsZeroCopySurface(uint64_t surfaceKey)
+{
+    if (!surfaceKey) return false;
+    auto lk = tmgr_.Lock();
+    return zeroCopySurfaceKeys_.count(surfaceKey) > 0;
+}
+
 int DesktopCompositor::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererToplevelId,
                                             ZeroCopyOccluderRect* out, int maxOut)
 {

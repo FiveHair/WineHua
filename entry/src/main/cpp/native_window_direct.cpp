@@ -15,17 +15,36 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <poll.h>
 #include <unistd.h>
 #include <vector>
 
 #ifndef EGL_NATIVE_BUFFER_OHOS
 #define EGL_NATIVE_BUFFER_OHOS 0x34E1
 #endif
+#ifndef EGL_IMAGE_PRESERVED_KHR
+#define EGL_IMAGE_PRESERVED_KHR 0x30D2
+#endif
+#ifndef EGL_SYNC_NATIVE_FENCE_ANDROID
+#define EGL_SYNC_NATIVE_FENCE_ANDROID 0x3144
+#endif
+#ifndef EGL_SYNC_NATIVE_FENCE_FD_ANDROID
+#define EGL_SYNC_NATIVE_FENCE_FD_ANDROID 0x3145
+#endif
+#ifndef EGL_NO_NATIVE_FENCE_FD_ANDROID
+#define EGL_NO_NATIVE_FENCE_FD_ANDROID (-1)
+#endif
+
+/* RequestBuffer timeout 0 returns immediately and never waits for a free
+ * NativeImage slot. 16 ms was too short to distinguish a timeout from an
+ * immediate producer error. 100 ms covers first-buffer GPU allocation
+ * without stalling vtest for the OHOS 3000 ms default. */
+constexpr int32_t kRequestTimeoutMs = 100;
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
 #define LOG_DOMAIN 0x0000
-#define LOG_TAG "nw-direct"
+#define LOG_TAG "virgl-presenter"
 
 namespace winehua {
 namespace {
@@ -58,30 +77,49 @@ uint64_t PercentileOf(std::array<uint64_t, 120> values, size_t count,
 PFNEGLCREATEIMAGEKHRPROC gCreateImage;
 PFNEGLDESTROYIMAGEKHRPROC gDestroyImage;
 PFNGLEGLIMAGETARGETTEXTURE2DOESPROC gImageTargetTexture;
+PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC gImageTargetRbo;
 PFNEGLCREATESYNCKHRPROC gCreateSync;
 PFNEGLDESTROYSYNCKHRPROC gDestroySync;
 PFNEGLWAITSYNCKHRPROC gWaitSync;
 PFNEGLDUPNATIVEFENCEFDANDROIDPROC gDupFenceFd;
 bool gEglProcsLoaded;
 
+template <typename T>
+T LoadProc(const char* name)
+{
+    return reinterpret_cast<T>(eglGetProcAddress(name));
+}
+
 void LoadEglProcs()
 {
-    if (gEglProcsLoaded) return;
-    gCreateImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(
-        eglGetProcAddress("eglCreateImageKHR"));
-    gDestroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
-        eglGetProcAddress("eglDestroyImageKHR"));
-    gImageTargetTexture = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(
-        eglGetProcAddress("glEGLImageTargetTexture2DOES"));
-    gCreateSync = reinterpret_cast<PFNEGLCREATESYNCKHRPROC>(
-        eglGetProcAddress("eglCreateSyncKHR"));
-    gDestroySync = reinterpret_cast<PFNEGLDESTROYSYNCKHRPROC>(
-        eglGetProcAddress("eglDestroySyncKHR"));
-    gWaitSync = reinterpret_cast<PFNEGLWAITSYNCKHRPROC>(
-        eglGetProcAddress("eglWaitSyncKHR"));
-    gDupFenceFd = reinterpret_cast<PFNEGLDUPNATIVEFENCEFDANDROIDPROC>(
-        eglGetProcAddress("eglDupNativeFenceFDANDROID"));
-    gEglProcsLoaded = true;
+    if (!gCreateImage) gCreateImage = LoadProc<PFNEGLCREATEIMAGEKHRPROC>("eglCreateImageKHR");
+    if (!gCreateImage) gCreateImage = LoadProc<PFNEGLCREATEIMAGEKHRPROC>("eglCreateImage");
+    if (!gDestroyImage) gDestroyImage = LoadProc<PFNEGLDESTROYIMAGEKHRPROC>("eglDestroyImageKHR");
+    if (!gDestroyImage) gDestroyImage = LoadProc<PFNEGLDESTROYIMAGEKHRPROC>("eglDestroyImage");
+    if (!gImageTargetTexture)
+        gImageTargetTexture = LoadProc<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(
+            "glEGLImageTargetTexture2DOES");
+    if (!gImageTargetRbo)
+        gImageTargetRbo = LoadProc<PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC>(
+            "glEGLImageTargetRenderbufferStorageOES");
+    if (!gCreateSync) gCreateSync = LoadProc<PFNEGLCREATESYNCKHRPROC>("eglCreateSyncKHR");
+    if (!gCreateSync) gCreateSync = LoadProc<PFNEGLCREATESYNCKHRPROC>("eglCreateSync");
+    if (!gDestroySync) gDestroySync = LoadProc<PFNEGLDESTROYSYNCKHRPROC>("eglDestroySyncKHR");
+    if (!gDestroySync) gDestroySync = LoadProc<PFNEGLDESTROYSYNCKHRPROC>("eglDestroySync");
+    if (!gWaitSync) gWaitSync = LoadProc<PFNEGLWAITSYNCKHRPROC>("eglWaitSyncKHR");
+    if (!gWaitSync) gWaitSync = LoadProc<PFNEGLWAITSYNCKHRPROC>("eglWaitSync");
+    if (!gDupFenceFd)
+        gDupFenceFd = LoadProc<PFNEGLDUPNATIVEFENCEFDANDROIDPROC>("eglDupNativeFenceFDANDROID");
+    gEglProcsLoaded = gCreateImage && gImageTargetTexture;
+}
+
+void StampFlushTimestamp(OHNativeWindow* window)
+{
+    if (!window) return;
+    const uint64_t timestamp = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            Clock::now().time_since_epoch()).count());
+    OH_NativeWindow_NativeWindowHandleOpt(window, SET_UI_TIMESTAMP, timestamp);
 }
 
 uint32_t PickMemoryType(VkPhysicalDevice physical, uint32_t bits)
@@ -99,6 +137,81 @@ uint32_t PickMemoryType(VkPhysicalDevice physical, uint32_t bits)
     return UINT32_MAX;
 }
 
+int32_t NativePixelFormat(VkFormat format)
+{
+    switch (format) {
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_SRGB:
+        return NATIVEBUFFER_PIXEL_FMT_BGRA_8888;
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+    default:
+        return NATIVEBUFFER_PIXEL_FMT_RGBA_8888;
+    }
+}
+
+EGLImageKHR CreateOhosImage(EGLDisplay display, EGLContext context,
+                            EGLClientBuffer client, const EGLint* attribs)
+{
+    eglGetError();
+    if (!gCreateImage || !client) return EGL_NO_IMAGE_KHR;
+    return gCreateImage(display, context, EGL_NATIVE_BUFFER_OHOS, client, attribs);
+}
+
+bool AttachImageToFramebuffer(EGLImageKHR image, GLuint* texture, GLuint* renderbuffer,
+                              GLuint* framebuffer, GLenum* statusOut)
+{
+    *texture = 0;
+    *renderbuffer = 0;
+    *framebuffer = 0;
+    *statusOut = 0;
+    glGenFramebuffers(1, framebuffer);
+
+    if (gImageTargetTexture) {
+        glGenTextures(1, texture);
+        glBindTexture(GL_TEXTURE_2D, *texture);
+        gImageTargetTexture(GL_TEXTURE_2D, image);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindFramebuffer(GL_FRAMEBUFFER, *framebuffer);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                               *texture, 0);
+        *statusOut = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        if (*statusOut == GL_FRAMEBUFFER_COMPLETE) {
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return true;
+        }
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+        glDeleteTextures(1, texture);
+        *texture = 0;
+    }
+
+    if (gImageTargetRbo) {
+        glGenRenderbuffers(1, renderbuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, *renderbuffer);
+        gImageTargetRbo(GL_RENDERBUFFER, image);
+        glBindFramebuffer(GL_FRAMEBUFFER, *framebuffer);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_RENDERBUFFER, *renderbuffer);
+        *statusOut = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        if (*statusOut == GL_FRAMEBUFFER_COMPLETE) {
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return true;
+        }
+        glDeleteRenderbuffers(1, renderbuffer);
+        *renderbuffer = 0;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, framebuffer);
+    *framebuffer = 0;
+    return false;
+}
+
 } // namespace
 
 bool DirectNativeWindowEnabled()
@@ -106,6 +219,47 @@ bool DirectNativeWindowEnabled()
     const char* value = std::getenv("WINEHUA_DIRECT_NATIVEWINDOW");
     if (!value || !value[0]) return true;
     return value[0] != '0';
+}
+
+bool ScanoutForceBlitRequested()
+{
+    return access("/data/storage/el2/base/temp/winehua_scanout_force_blit", F_OK) == 0;
+}
+
+bool ScanoutBackingEnabled()
+{
+    if (!DirectNativeWindowEnabled()) return false;
+    if (ScanoutForceBlitRequested()) return false;
+    const char* value = std::getenv("WINEHUA_SCANOUT_BACKING");
+    if (value && value[0] == '0') return false;
+    return true;
+}
+
+bool VenusScanoutBackingEnabled()
+{
+    if (!DirectNativeWindowEnabled()) return false;
+    const char* value = std::getenv("WINEHUA_VENUS_SCANOUT_BACKING");
+    return value && value[0] == '1' && !value[1];
+}
+
+bool ScanoutGlFinishEnabled()
+{
+    const char* value = std::getenv("WINEHUA_SCANOUT_GLFINISH");
+    return value && value[0] == '1';
+}
+
+bool NativeImageDropUnreadRequested()
+{
+    const char* value = std::getenv("WINEHUA_NATIVEIMAGE_DROP");
+    return value && value[0] == '1' && !value[1];
+}
+
+bool PresentUncapRequested()
+{
+    const char* value = std::getenv("WINEHUA_PRESENT_UNCAP");
+    if (value && value[0] == '1' && !value[1])
+        return true;
+    return access("/data/storage/el2/base/temp/winehua_present_uncap", F_OK) == 0;
 }
 
 void FrameTimeline::Add(uint64_t totalUs, uint64_t, uint64_t, uint64_t, uint64_t)
@@ -138,7 +292,7 @@ std::string FrameTimeline::Format(const char* tag, uint32_t serial) const
         line, sizeof(line),
         "[%s] serial=%u frames=%llu cache_hit=%llu cache_miss=%llu "
         "gpu_copy=%llu skipped_copy=%llu cpu_fence_wait=%llu glFinish=%llu "
-        "p50=%llu p90=%llu p99=%llu max=%llu us",
+        "render_fence=%llu p50=%llu p90=%llu p99=%llu max=%llu us",
         tag ? tag : "DIRECT", serial,
         static_cast<unsigned long long>(p.count),
         static_cast<unsigned long long>(cacheHits_),
@@ -147,6 +301,7 @@ std::string FrameTimeline::Format(const char* tag, uint32_t serial) const
         static_cast<unsigned long long>(skippedCopies_),
         static_cast<unsigned long long>(cpuFenceWaits_),
         static_cast<unsigned long long>(glFinishCount_),
+        static_cast<unsigned long long>(renderFenceCount_),
         static_cast<unsigned long long>(p.p50),
         static_cast<unsigned long long>(p.p90),
         static_cast<unsigned long long>(p.p99),
@@ -157,23 +312,28 @@ std::string FrameTimeline::Format(const char* tag, uint32_t serial) const
 bool NativeWindowGlesTarget::EnsureContext()
 {
     LoadEglProcs();
-    if (!gCreateImage || !gImageTargetTexture || !gCreateSync || !gDupFenceFd)
+    if (!gEglProcsLoaded) {
+        static bool logged;
+        if (!logged) {
+            logged = true;
+            OH_LOG_ERROR(LOG_APP,
+                         "[NW-DIRECT] missing EGLImage procs image=%{public}d target=%{public}d "
+                         "rbo=%{public}d sync=%{public}d wait=%{public}d dup=%{public}d",
+                         gCreateImage ? 1 : 0, gImageTargetTexture ? 1 : 0,
+                         gImageTargetRbo ? 1 : 0,
+                         gCreateSync ? 1 : 0, gWaitSync ? 1 : 0, gDupFenceFd ? 1 : 0);
+        }
         return false;
+    }
     if (display_ && context_) return true;
 
-    EGLDisplay currentDisplay = eglGetCurrentDisplay();
-    EGLContext currentContext = eglGetCurrentContext();
-    EGLSurface currentDraw = eglGetCurrentSurface(EGL_DRAW);
-    if (currentDisplay != EGL_NO_DISPLAY && currentContext != EGL_NO_CONTEXT) {
-        display_ = currentDisplay;
-        context_ = currentContext;
-        pbuffer_ = currentDraw;
-        borrowedContext_ = true;
-        return true;
-    }
-
-    EGLDisplay display = eglGetCurrentDisplay();
-    if (display == EGL_NO_DISPLAY) display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    /* NativeBuffer EGLImage is a Harmony EGL extension. Do not borrow the
+     * virgl context: that display may not implement EGL_NATIVE_BUFFER_OHOS.
+     * Share with the current virgl context so its textures stay visible. */
+    const EGLDisplay currentDisplay = eglGetCurrentDisplay();
+    const EGLContext share = eglGetCurrentContext();
+    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (display == EGL_NO_DISPLAY) display = currentDisplay;
     if (display == EGL_NO_DISPLAY) return false;
     EGLint major = 0, minor = 0;
     if (!eglInitialize(display, &major, &minor)) return false;
@@ -192,17 +352,30 @@ bool NativeWindowGlesTarget::EnsureContext()
     EGLSurface pbuffer = eglCreatePbufferSurface(display, config, pbufferAttrs);
     if (pbuffer == EGL_NO_SURFACE) return false;
     const EGLint ctxAttrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-    EGLContext share = eglGetCurrentContext();
-    EGLContext context = eglCreateContext(
-        display, config, share != EGL_NO_CONTEXT ? share : EGL_NO_CONTEXT, ctxAttrs);
+    const EGLContext shareContext =
+        (share != EGL_NO_CONTEXT && currentDisplay == display) ? share : EGL_NO_CONTEXT;
+    EGLContext context = eglCreateContext(display, config, shareContext, ctxAttrs);
     if (context == EGL_NO_CONTEXT) {
+        eglDestroySurface(display, pbuffer);
+        return false;
+    }
+    if (eglMakeCurrent(display, pbuffer, pbuffer, context) != EGL_TRUE) {
+        eglDestroyContext(display, context);
         eglDestroySurface(display, pbuffer);
         return false;
     }
     display_ = display;
     context_ = context;
     pbuffer_ = pbuffer;
-    return true;
+    borrowedContext_ = false;
+    sharedWithVrend_ = shareContext != EGL_NO_CONTEXT;
+    LoadEglProcs();
+    OH_LOG_INFO(LOG_APP,
+                "[NW-DIRECT] GLES context ready shared=%{public}d "
+                "direct_dpy=%{public}p vrend_dpy=%{public}p same_dpy=%{public}d",
+                sharedWithVrend_ ? 1 : 0, display, currentDisplay,
+                display == currentDisplay ? 1 : 0);
+    return gEglProcsLoaded;
 }
 
 bool NativeWindowGlesTarget::Configure(OHNativeWindow* window, uint32_t width,
@@ -224,7 +397,19 @@ bool NativeWindowGlesTarget::Configure(OHNativeWindow* window, uint32_t width,
         window_, SET_USAGE,
         static_cast<uint64_t>(NATIVEBUFFER_USAGE_HW_RENDER |
                               NATIVEBUFFER_USAGE_HW_TEXTURE));
-    OH_NativeWindow_NativeWindowHandleOpt(window_, SET_TIMEOUT, 0);
+    OH_NativeWindow_NativeWindowHandleOpt(window_, SET_TIMEOUT, kRequestTimeoutMs);
+    int32_t timeoutMs = -1;
+    OH_NativeWindow_NativeWindowHandleOpt(window_, GET_TIMEOUT, &timeoutMs);
+    static bool loggedConfig;
+    if (!loggedConfig) {
+        loggedConfig = true;
+        int32_t queueSize = 0;
+        OH_NativeWindow_NativeWindowHandleOpt(window_, GET_BUFFERQUEUE_SIZE, &queueSize);
+        OH_LOG_INFO(LOG_APP,
+                    "[NW-DIRECT] GLES configure size=%{public}ux%{public}u "
+                    "timeout_ms=%{public}d queue=%{public}d",
+                    width, height, timeoutMs, queueSize);
+    }
     return EnsureContext();
 }
 
@@ -232,6 +417,8 @@ void NativeWindowGlesTarget::DestroySlot(GlesDirectSlot& slot)
 {
     EGLDisplay display = static_cast<EGLDisplay>(display_);
     if (slot.framebuffer) glDeleteFramebuffers(1, &slot.framebuffer);
+    if (slot.renderbuffer) glDeleteRenderbuffers(1, &slot.renderbuffer);
+    if (slot.scanoutTexture) glDeleteTextures(1, &slot.scanoutTexture);
     if (slot.texture) glDeleteTextures(1, &slot.texture);
     if (slot.eglImage && gDestroyImage && display)
         gDestroyImage(display, static_cast<EGLImageKHR>(slot.eglImage));
@@ -240,6 +427,8 @@ void NativeWindowGlesTarget::DestroySlot(GlesDirectSlot& slot)
 
 void NativeWindowGlesTarget::Reset()
 {
+    AbortFrame();
+    CloseFd(&pendingAcquireFd_);
     if (display_ && context_) {
         const EGLDisplay display = static_cast<EGLDisplay>(display_);
         const EGLContext previous = eglGetCurrentContext();
@@ -260,6 +449,7 @@ void NativeWindowGlesTarget::Reset()
     context_ = nullptr;
     pbuffer_ = nullptr;
     borrowedContext_ = false;
+    sharedWithVrend_ = false;
     window_ = nullptr;
     current_ = nullptr;
     width_ = 0;
@@ -269,11 +459,13 @@ void NativeWindowGlesTarget::Reset()
 GlesDirectSlot* NativeWindowGlesTarget::ImportLocked(OHNativeWindowBuffer* windowBuffer)
 {
     OH_NativeBuffer* native = nullptr;
-    if (OH_NativeBuffer_FromNativeWindowBuffer(windowBuffer, &native) != 0 || !native)
-        return nullptr;
-    const uint32_t seq = OH_NativeBuffer_GetSeqNum(native);
+    const int32_t fromRet =
+        OH_NativeBuffer_FromNativeWindowBuffer(windowBuffer, &native);
+    const uint32_t seq = (fromRet == 0 && native)
+        ? OH_NativeBuffer_GetSeqNum(native)
+        : static_cast<uint32_t>(reinterpret_cast<uintptr_t>(windowBuffer));
     for (GlesDirectSlot& slot : cache_) {
-        if (slot.seq == seq && slot.texture) {
+        if (slot.seq == seq && slot.framebuffer) {
             slot.windowBuffer = windowBuffer;
             slot.nativeBuffer = native;
             timeline_.AddCacheHit();
@@ -292,30 +484,56 @@ GlesDirectSlot* NativeWindowGlesTarget::ImportLocked(OHNativeWindowBuffer* windo
     if (empty->seq) DestroySlot(*empty);
 
     const EGLDisplay display = static_cast<EGLDisplay>(display_);
-    EGLImageKHR image = gCreateImage(
-        display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_OHOS,
-        static_cast<EGLClientBuffer>(native), nullptr);
-    if (image == EGL_NO_IMAGE_KHR) return nullptr;
+    const EGLContext current = eglGetCurrentContext();
+    const EGLint preserved[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+    EGLClientBuffer clients[2] = {
+        static_cast<EGLClientBuffer>(windowBuffer),
+        static_cast<EGLClientBuffer>(native),
+    };
+    const EGLContext contexts[2] = {EGL_NO_CONTEXT, current};
+    const EGLint* attribSets[2] = {nullptr, preserved};
+
+    EGLImageKHR image = EGL_NO_IMAGE_KHR;
+    EGLint imageError = EGL_SUCCESS;
+    for (EGLClientBuffer client : clients) {
+        if (!client) continue;
+        for (EGLContext context : contexts) {
+            for (const EGLint* attribs : attribSets) {
+                image = CreateOhosImage(display, context, client, attribs);
+                if (image != EGL_NO_IMAGE_KHR) break;
+                imageError = eglGetError();
+            }
+            if (image != EGL_NO_IMAGE_KHR) break;
+        }
+        if (image != EGL_NO_IMAGE_KHR) break;
+    }
+    if (image == EGL_NO_IMAGE_KHR) {
+        lastRequestResult_ = static_cast<int32_t>(imageError);
+        lastBeginReason_ = "egl-image";
+        static int logged;
+        if (logged < 3 || (logged % 120) == 0)
+            OH_LOG_ERROR(LOG_APP,
+                         "[NW-DIRECT] eglCreateImage failed from_nb=%{public}d "
+                         "egl=0x%{public}x native=%{public}d",
+                         fromRet, imageError, native ? 1 : 0);
+        ++logged;
+        return nullptr;
+    }
+
     GLuint texture = 0;
+    GLuint renderbuffer = 0;
     GLuint framebuffer = 0;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    gImageTargetTexture(GL_TEXTURE_2D, image);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glGenFramebuffers(1, &framebuffer);
-    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           texture, 0);
-    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    if (status != GL_FRAMEBUFFER_COMPLETE) {
-        glDeleteFramebuffers(1, &framebuffer);
-        glDeleteTextures(1, &texture);
-        gDestroyImage(display, image);
+    GLenum status = 0;
+    if (!AttachImageToFramebuffer(image, &texture, &renderbuffer, &framebuffer, &status)) {
+        lastRequestResult_ = static_cast<int32_t>(status);
+        lastBeginReason_ = "fbo";
+        static int logged;
+        if (logged < 3 || (logged % 120) == 0)
+            OH_LOG_ERROR(LOG_APP,
+                         "[NW-DIRECT] FBO incomplete status=0x%{public}x rbo_proc=%{public}d",
+                         status, gImageTargetRbo ? 1 : 0);
+        ++logged;
+        if (gDestroyImage) gDestroyImage(display, image);
         return nullptr;
     }
     empty->seq = seq;
@@ -323,41 +541,68 @@ GlesDirectSlot* NativeWindowGlesTarget::ImportLocked(OHNativeWindowBuffer* windo
     empty->nativeBuffer = native;
     empty->eglImage = image;
     empty->texture = texture;
+    empty->renderbuffer = renderbuffer;
     empty->framebuffer = framebuffer;
     OH_LOG_INFO(LOG_APP,
-                "[NW-DIRECT] GLES import seq=%{public}u tex=%{public}u fbo=%{public}u",
-                seq, texture, framebuffer);
+                "[NW-DIRECT] GLES import seq=%{public}u tex=%{public}u rbo=%{public}u "
+                "fbo=%{public}u from_nb=%{public}d",
+                seq, texture, renderbuffer, framebuffer, fromRet);
     return empty;
 }
 
 bool NativeWindowGlesTarget::GpuWaitAcquireFd(int fenceFd)
 {
     if (fenceFd < 0) return true;
-    if (!gCreateSync || !gWaitSync) {
-        CloseFd(&fenceFd);
-        return false;
+    EGLDisplay display = eglGetCurrentDisplay();
+    if (display == EGL_NO_DISPLAY)
+        display = static_cast<EGLDisplay>(display_);
+    if (display != EGL_NO_DISPLAY && gCreateSync && gWaitSync && gDestroySync) {
+        const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fenceFd, EGL_NONE};
+        EGLSyncKHR sync = gCreateSync(display, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+        if (sync != EGL_NO_SYNC_KHR) {
+            gWaitSync(display, sync, 0);
+            gDestroySync(display, sync);
+            return true;
+        }
     }
+    pollfd wait{fenceFd, POLLIN, 0};
+    poll(&wait, 1, kRequestTimeoutMs);
+    timeline_.AddCpuFenceWait();
+    CloseFd(&fenceFd);
+    return true;
+}
+
+bool NativeWindowGlesTarget::MakeCurrent()
+{
+    if (!EnsureContext()) return false;
     const EGLDisplay display = static_cast<EGLDisplay>(display_);
-    const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fenceFd, EGL_NONE};
-    EGLSyncKHR sync = gCreateSync(display, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
-    if (sync == EGL_NO_SYNC_KHR) {
-        CloseFd(&fenceFd);
+    if (eglMakeCurrent(display, static_cast<EGLSurface>(pbuffer_),
+                       static_cast<EGLSurface>(pbuffer_),
+                       static_cast<EGLContext>(context_)) != EGL_TRUE) {
+        lastBeginReason_ = "make-current";
+        lastRequestResult_ = static_cast<int32_t>(eglGetError());
         return false;
     }
-    gWaitSync(display, sync, 0);
-    gDestroySync(display, sync);
     return true;
 }
 
 bool NativeWindowGlesTarget::BeginFrame()
 {
-    if (!EnsureContext() || !window_) return false;
+    lastBeginReason_ = "ok";
+    lastRequestResult_ = 0;
+    if (!EnsureContext() || !window_) {
+        lastBeginReason_ = !window_ ? "no-window" : "no-context";
+        return false;
+    }
     if (!borrowedContext_) {
         const EGLDisplay display = static_cast<EGLDisplay>(display_);
         if (eglMakeCurrent(display, static_cast<EGLSurface>(pbuffer_),
                            static_cast<EGLSurface>(pbuffer_),
-                           static_cast<EGLContext>(context_)) != EGL_TRUE)
+                           static_cast<EGLContext>(context_)) != EGL_TRUE) {
+            lastBeginReason_ = "make-current";
+            lastRequestResult_ = static_cast<int32_t>(eglGetError());
             return false;
+        }
     }
     OHNativeWindowBuffer* buffer = nullptr;
     int fenceFd = -1;
@@ -365,32 +610,122 @@ bool NativeWindowGlesTarget::BeginFrame()
     const int32_t result =
         OH_NativeWindow_NativeWindowRequestBuffer(window_, &buffer, &fenceFd);
     requestUs_ = NowUs() - started;
+    lastRequestResult_ = result;
     if (result != 0 || !buffer) {
         CloseFd(&fenceFd);
+        lastBeginReason_ = "request-buffer";
+        OH_LOG_ERROR(LOG_APP,
+                     "[NW-DIRECT] GLES RequestBuffer failed ret=%{public}d "
+                     "wait_us=%{public}llu",
+                     result, static_cast<unsigned long long>(requestUs_));
         return false;
     }
     current_ = ImportLocked(buffer);
     if (!current_) {
         OH_NativeWindow_NativeWindowAbortBuffer(window_, buffer);
         CloseFd(&fenceFd);
+        if (!lastBeginReason_ || lastBeginReason_ == "ok" || lastBeginReason_[0] == '\0')
+            lastBeginReason_ = "import";
         return false;
     }
-    GpuWaitAcquireFd(fenceFd);
+    CloseFd(&pendingAcquireFd_);
+    pendingAcquireFd_ = fenceFd;
     glBindFramebuffer(GL_FRAMEBUFFER, current_->framebuffer);
     glViewport(0, 0, static_cast<GLsizei>(width_), static_cast<GLsizei>(height_));
     return true;
 }
 
+bool NativeWindowGlesTarget::WaitAcquireOnCurrent()
+{
+    const int fd = pendingAcquireFd_;
+    pendingAcquireFd_ = -1;
+    return GpuWaitAcquireFd(fd);
+}
+
+void NativeWindowGlesTarget::PrepareBlitFramebuffer()
+{
+    if (!current_ || !current_->framebuffer || !current_->texture) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, current_->framebuffer);
+    if (current_->colorDetached) {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                               current_->texture, 0);
+        current_->colorDetached = false;
+    }
+    glViewport(0, 0, static_cast<GLsizei>(width_), static_cast<GLsizei>(height_));
+}
+
+void NativeWindowGlesTarget::DetachColorForScanout()
+{
+    if (!current_ || !current_->framebuffer) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, current_->framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    current_->colorDetached = true;
+}
+
+unsigned NativeWindowGlesTarget::ScanoutTextureOnCurrent()
+{
+    if (!current_ || !current_->eglImage || !gImageTargetTexture) return 0;
+    if (current_->scanoutTexture) return current_->scanoutTexture;
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    gImageTargetTexture(GL_TEXTURE_2D, static_cast<EGLImageKHR>(current_->eglImage));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    current_->scanoutTexture = tex;
+    return tex;
+}
+
+bool NativeWindowGlesTarget::IsScanoutTexture(unsigned gl) const
+{
+    if (!gl) return false;
+    for (const auto& slot : cache_) {
+        if (slot.scanoutTexture == gl) return true;
+    }
+    return false;
+}
+
 int NativeWindowGlesTarget::CreateNativeFenceFd()
 {
-    if (!gCreateSync || !gDupFenceFd) return -1;
-    const EGLDisplay display = static_cast<EGLDisplay>(display_);
+    if (!gCreateSync || !gDupFenceFd || !gDestroySync) return -1;
+    EGLDisplay display = eglGetCurrentDisplay();
+    if (display == EGL_NO_DISPLAY)
+        display = static_cast<EGLDisplay>(display_);
+    if (!display || display == EGL_NO_DISPLAY) return -1;
     glFlush();
     EGLSyncKHR sync = gCreateSync(display, EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr);
     if (sync == EGL_NO_SYNC_KHR) return -1;
     const int fd = gDupFenceFd(display, sync);
     gDestroySync(display, sync);
+    if (fd == EGL_NO_NATIVE_FENCE_FD_ANDROID) return -1;
     return fd;
+}
+
+bool NativeWindowGlesTarget::EndFrameWithRenderFence()
+{
+    int fenceFd = -1;
+    if (!ScanoutGlFinishEnabled())
+        fenceFd = CreateNativeFenceFd();
+    if (fenceFd >= 0) {
+        timeline_.AddRenderFence();
+    } else {
+        static int logged;
+        if (logged < 4) {
+            OH_LOG_WARN(LOG_APP,
+                        "[NW-DIRECT] render fence unavailable, glFinish fallback "
+                        "force=%{public}d",
+                        ScanoutGlFinishEnabled() ? 1 : 0);
+            ++logged;
+        }
+        glFinish();
+        timeline_.AddGlFinish();
+        fenceFd = -1;
+    }
+    return EndFrame(fenceFd);
 }
 
 bool NativeWindowGlesTarget::EndFrame(int renderFenceFd)
@@ -402,6 +737,7 @@ bool NativeWindowGlesTarget::EndFrame(int renderFenceFd)
     Region region{};
     region.rects = nullptr;
     region.rectNumber = 0;
+    StampFlushTimestamp(window_);
     const uint64_t started = NowUs();
     const int32_t result = OH_NativeWindow_NativeWindowFlushBuffer(
         window_, current_->windowBuffer, renderFenceFd, region);
@@ -419,6 +755,7 @@ bool NativeWindowGlesTarget::EndFrame(int renderFenceFd)
 
 void NativeWindowGlesTarget::AbortFrame()
 {
+    CloseFd(&pendingAcquireFd_);
     if (window_ && current_ && current_->windowBuffer)
         OH_NativeWindow_NativeWindowAbortBuffer(window_, current_->windowBuffer);
     current_ = nullptr;
@@ -426,16 +763,18 @@ void NativeWindowGlesTarget::AbortFrame()
 
 bool NativeWindowVkTarget::Configure(OHNativeWindow* window, uint32_t width,
                                      uint32_t height, VkPhysicalDevice physical,
-                                     VkDevice device)
+                                     VkDevice device, VkFormat sourceFormat)
 {
     if (!window || !width || !height || !physical || !device) return false;
+    const int32_t nativeFormat = NativePixelFormat(sourceFormat);
     if (window_ == window && width_ == width && height_ == height &&
-        device_ == device)
+        device_ == device && nativeFormat_ == nativeFormat)
         return true;
     Reset();
     window_ = window;
     width_ = width;
     height_ = height;
+    nativeFormat_ = nativeFormat;
     physical_ = physical;
     device_ = device;
     getProps_ = reinterpret_cast<PFN_vkGetNativeBufferPropertiesOHOS>(
@@ -452,7 +791,12 @@ bool NativeWindowVkTarget::Configure(OHNativeWindow* window, uint32_t width,
         window_, SET_USAGE,
         static_cast<uint64_t>(NATIVEBUFFER_USAGE_HW_RENDER |
                               NATIVEBUFFER_USAGE_HW_TEXTURE));
-    OH_NativeWindow_NativeWindowHandleOpt(window_, SET_TIMEOUT, 0);
+    OH_NativeWindow_NativeWindowHandleOpt(window_, SET_FORMAT, nativeFormat_);
+    OH_NativeWindow_NativeWindowHandleOpt(window_, SET_TIMEOUT, kRequestTimeoutMs);
+    OH_LOG_INFO(LOG_APP,
+                "[NW-DIRECT] VK configure size=%{public}ux%{public}u "
+                "vk_format=%{public}u native_format=%{public}d",
+                width, height, static_cast<uint32_t>(sourceFormat), nativeFormat_);
     return true;
 }
 
@@ -472,6 +816,7 @@ void NativeWindowVkTarget::Reset()
     current_ = nullptr;
     device_ = VK_NULL_HANDLE;
     physical_ = VK_NULL_HANDLE;
+    nativeFormat_ = 0;
 }
 
 VkDirectSlot* NativeWindowVkTarget::ImportLocked(OHNativeWindowBuffer* windowBuffer)
@@ -521,8 +866,10 @@ VkDirectSlot* NativeWindowVkTarget::ImportLocked(OHNativeWindowBuffer* windowBuf
     imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImage image = VK_NULL_HANDLE;
@@ -556,7 +903,10 @@ VkDirectSlot* NativeWindowVkTarget::ImportLocked(OHNativeWindowBuffer* windowBuf
     empty->image = image;
     empty->memory = memory;
     empty->format = imageFormat;
-    OH_LOG_INFO(LOG_APP, "[NW-DIRECT] VK import seq=%{public}u", seq);
+    OH_LOG_INFO(LOG_APP,
+                "[NW-DIRECT] VK import seq=%{public}u vk_format=%{public}u "
+                "native_format=%{public}d",
+                seq, static_cast<uint32_t>(imageFormat), nativeFormat_);
     return empty;
 }
 
@@ -569,16 +919,33 @@ bool NativeWindowVkTarget::BeginFrame()
     const int32_t result =
         OH_NativeWindow_NativeWindowRequestBuffer(window_, &buffer, &fenceFd);
     requestUs_ = NowUs() - started;
+    lastRequestResult_ = result;
     if (result != 0 || !buffer) {
+        lastBeginReason_ = "request";
         CloseFd(&fenceFd);
+        static bool logged;
+        if (!logged) {
+            logged = true;
+            OH_LOG_ERROR(LOG_APP,
+                         "[NW-DIRECT] VK RequestBuffer failed ret=%{public}d",
+                         result);
+        }
         return false;
     }
     current_ = ImportLocked(buffer);
     if (!current_) {
+        lastBeginReason_ = "import";
+        lastRequestResult_ = -1;
         OH_NativeWindow_NativeWindowAbortBuffer(window_, buffer);
         CloseFd(&fenceFd);
+        static bool logged;
+        if (!logged) {
+            logged = true;
+            OH_LOG_ERROR(LOG_APP, "[NW-DIRECT] VK import NativeBuffer failed");
+        }
         return false;
     }
+    lastBeginReason_ = "ok";
     pendingAcquireFd_ = fenceFd;
     return true;
 }
@@ -616,6 +983,7 @@ bool NativeWindowVkTarget::EndFrame(int renderFenceFd)
     Region region{};
     region.rects = nullptr;
     region.rectNumber = 0;
+    StampFlushTimestamp(window_);
     const uint64_t started = NowUs();
     const int32_t result = OH_NativeWindow_NativeWindowFlushBuffer(
         window_, current_->windowBuffer, renderFenceFd, region);

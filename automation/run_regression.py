@@ -51,7 +51,7 @@ PRODUCT_PERF_PROFILE = "shadow-precise-dirty-ring-inline-upload-coverage-sort"
 DIAGNOSTIC_PERF_PROFILES = ("shadow-precise-dirty-ring-frame-timeline",)
 
 SUITES = (
-    "core", "audio", "opengl", "d3d8", "d3d9",
+    "core", "audio", "opengl", "opengl-blit", "opengl-uncap", "d3d8", "d3d9",
     "wine-vulkan", "wine-vulkan-present",
     "venus", "venus-sampled", "venus-depth-cube-array-2d-golden",
     "dxvk", "dxvk-long", "dxvk-dynamic",
@@ -105,6 +105,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gate", action="store_true",
                         help="Phase-2 entry gate: three reuse-prefix core runs and one clean-prefix core run")
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--skip-install", action="store_true",
+                        help="reuse the HAP already on the device; skip hdc install -r")
     parser.add_argument("--device-id", default="",
                         help="hdc target; auto-selected (physical preferred) when empty")
     parser.add_argument("--archive-root", default="",
@@ -940,7 +942,15 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
     # HDC shell cannot remove application-owned sandbox files. EntryAbility
     # performs and verifies the clean-prefix reset under the App UID before
     # starting Wayland, wineserver or Wine.
-    run_hdc(hdc, device_id, "shell", "power-shell", "wakeup")
+    run_hdc_windows(hdc, device_id, "shell", "power-shell", "wakeup")
+    # Overwrite install often returns to the lock screen. Swipe up from the
+    # lower third; a right-edge swipe does not dismiss the lock.
+    run_hdc_windows(hdc, device_id, "shell",
+                    "uitest uiInput swipe 640 2200 640 200 600")
+    time.sleep(0.6)
+    run_hdc_windows(hdc, device_id, "shell",
+                    "uitest uiInput swipe 640 2200 640 200 600")
+    time.sleep(0.5)
     run_hdc(hdc, device_id, "shell", "hilog", "-x")
     start_args = (
         "shell", "aa", "start", "-a", ABILITY, "-b", BUNDLE,
@@ -955,8 +965,9 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
     if "10106102" in start_output:
         # Devices without a credential can be dismissed with one deterministic
         # swipe.  A credential-protected lock remains an infrastructure error.
-        run_hdc(hdc, device_id, "shell",
-                "uitest uiInput swipe 1280 1350 1280 300 1200")
+        run_hdc_windows(hdc, device_id, "shell",
+                        "uitest uiInput swipe 640 2200 640 200 600")
+        time.sleep(0.6)
         code, start_output = run_hdc_windows(hdc, device_id, *start_args)
     (run_directory / "start.log").write_text(start_output, encoding="utf-8")
     if code != 0 or "start ability successfully" not in start_output:
@@ -969,7 +980,7 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
     captured: dict[str, bool] = {}
     summary_text = ""
     while time.monotonic() < deadline:
-        if capture_visuals and run_suite in ("core", "opengl", "all", "long"):
+        if capture_visuals and run_suite in ("core", "opengl", "opengl-blit", "opengl-uncap", "all", "long"):
             for test_id in ("opengl-x64", "opengl-x86"):
                 if test_id in captured:
                     continue
@@ -1002,7 +1013,7 @@ def invoke_one_run(hdc: str, device_id: str, run_suite: str, run_prefix: str,
     summary_path.write_text(summary_text + "\n", encoding="utf-8")
     summary = json.loads(summary_text)
 
-    if capture_visuals and run_suite in ("core", "opengl", "all", "long"):
+    if capture_visuals and run_suite in ("core", "opengl", "opengl-blit", "opengl-uncap", "all", "long"):
         for test_id in ("opengl-x64", "opengl-x86"):
             captured.setdefault(test_id, False)
     if capture_visuals and run_suite in ("d3d9", "dxvk", "dxvk-long", "dxvk-dynamic", "all",
@@ -1102,10 +1113,21 @@ def main() -> int:
     if not args.skip_build:
         invoke_build(session_directory / "build.log")
     artifact = get_artifact_metadata(session_directory)
-    code, install_output = run_hdc_install(hdc, device_id, HAP_PATH)
-    (session_directory / "install.log").write_text(install_output, encoding="utf-8")
-    if code != 0 or "install bundle successfully" not in install_output:
-        raise RuntimeError("HAP overwrite install did not report install bundle successfully")
+    if args.skip_install:
+        (session_directory / "install.log").write_text(
+            "skip-install: reusing device HAP\n", encoding="utf-8")
+    else:
+        code, install_output = run_hdc_install(hdc, device_id, HAP_PATH)
+        (session_directory / "install.log").write_text(install_output, encoding="utf-8")
+        if code != 0 or "install bundle successfully" not in install_output:
+            raise RuntimeError("HAP overwrite install did not report install bundle successfully")
+    run_hdc_windows(hdc, device_id, "shell", "power-shell", "wakeup")
+    run_hdc_windows(hdc, device_id, "shell",
+                    "uitest uiInput swipe 640 2200 640 200 600")
+    time.sleep(0.6)
+    run_hdc_windows(hdc, device_id, "shell",
+                    "uitest uiInput swipe 640 2200 640 200 600")
+    time.sleep(0.5)
 
     matrix: list[tuple[str, str]] = []
     if args.gate:

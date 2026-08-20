@@ -1,5 +1,6 @@
 #include "egl_renderer.h"
 #include "graphics_broker.h"
+#include "native_window_direct.h"
 #include "perf_utils.h"
 #include "shader_utils.h"
 #include "wayland_server.h"
@@ -10,6 +11,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <vector>
 #include <mutex>
 #include <fcntl.h>
@@ -218,7 +220,13 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
             static_cast<int32_t>(surface.height));
         const int32_t usageResult = OH_ConsumerSurface_SetDefaultUsage(
             zeroCopyImage_, NATIVEBUFFER_USAGE_HW_RENDER | NATIVEBUFFER_USAGE_HW_TEXTURE);
-        const int32_t dropResult = OH_NativeImage_SetDropBufferMode(zeroCopyImage_, true);
+        /* GL skip-copy keeps mailbox drop: drop=0 stalled RequestBuffer at
+         * ~10 FPS. Vulkan/DX copy-every-frame must not drop — recycling a
+         * still-displayed NativeBuffer re-shows an older image (rewind). */
+        const bool dropUnread = !surface.vulkan ||
+            winehua::NativeImageDropUnreadRequested();
+        const int32_t dropResult = OH_NativeImage_SetDropBufferMode(
+            zeroCopyImage_, dropUnread);
         OH_OnFrameAvailableListener listener = {};
         listener.context = this;
         listener.onFrameAvailable = &EglRenderer::OnZeroCopyFrameAvailable;
@@ -269,13 +277,15 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
                     "[VIRGL-ZC][MAIN] consumer attached tl=%{public}u key=%{public}llu "
                     "pid=%{public}u surface=%{public}u source=%{public}dx%{public}d "
                     "layer=%{public}dx%{public}d+%{public}d,%{public}d queue=%{public}d "
-                    "size_ret=%{public}d usage_ret=%{public}d drop_ret=%{public}d",
+                    "size_ret=%{public}d usage_ret=%{public}d drop_ret=%{public}d "
+                    "drop=%{public}d mailbox=%{public}d",
                     rendererToplevelId,
                     static_cast<unsigned long long>(zeroCopySurfaceKey_),
                     zeroCopyClientPid_, zeroCopySurfaceId_,
                     zeroCopySourceW_, zeroCopySourceH_, zeroCopyLayerW_, zeroCopyLayerH_,
                     zeroCopyLayerX_, zeroCopyLayerY_, queueSize,
-                    sizeResult, usageResult, dropResult);
+                    sizeResult, usageResult, dropResult,
+                    dropUnread ? 1 : 0, dropUnread ? 1 : 0);
         return true;
     }
     return false;
@@ -332,8 +342,10 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
     }
 
     zeroCopyConsecutiveFailures_ = 0;
-    ComposeZeroCopySamplingTransform(zeroCopyTransform_, zeroCopyVulkanSource_,
-                                      zeroCopySamplingTransform_);
+    ComposeZeroCopySamplingTransform(
+        zeroCopyTransform_,
+        zeroCopyVulkanSource_,
+        zeroCopySamplingTransform_);
     const int64_t imageTimestamp = OH_NativeImage_GetTimestamp(zeroCopyImage_);
     const int64_t previousTimestamp = zeroCopyLastTimestamp_;
     int64_t timestampDeltaUs = 0;
@@ -411,6 +423,43 @@ bool EglRenderer::UpdateZeroCopyFrame(int& width, int& height)
                     zeroCopyLayerW_, zeroCopyLayerH_, zeroCopyLayerX_, zeroCopyLayerY_,
                     static_cast<unsigned long long>(zeroCopyFrameSignals_.load()),
                     static_cast<unsigned long long>(zeroCopyFailures_));
+    const uint64_t vsyncId = vsyncSequence_;
+    uint64_t displayHold = 1;
+    if (zeroCopyLastConsumeVsync_ && vsyncId >= zeroCopyLastConsumeVsync_)
+        displayHold = vsyncId - zeroCopyLastConsumeVsync_;
+    if (displayHold == 0)
+        displayHold = 1;
+    zeroCopyLastConsumeVsync_ = vsyncId;
+    const size_t holdBucket = displayHold >= 8 ? 7 : static_cast<size_t>(displayHold - 1);
+    ++displayHoldHist_[holdBucket];
+    const bool holdClass = displayHold >= 4;
+    if (holdClass)
+        ++displayHoldEvents_;
+    if (zeroCopyFrames_ <= 8 || zeroCopyFrames_ % 120 == 0 ||
+        (holdClass && (displayHoldEvents_ <= 8 || displayHoldEvents_ % 30 == 0)))
+        OH_LOG_INFO(LOG_APP,
+                    "[DX11-PROVENANCE] CLASS=%{public}s vsync_id=%{public}llu "
+                    "display_hold=%{public}llu frame=%{public}llu "
+                    "timestamp_delta_us=%{public}lld coalesced=%{public}llu",
+                    holdClass ? "DISPLAY_HOLD" : "OK",
+                    static_cast<unsigned long long>(vsyncId),
+                    static_cast<unsigned long long>(displayHold),
+                    static_cast<unsigned long long>(zeroCopyFrames_),
+                    static_cast<long long>(timestampDeltaUs),
+                    static_cast<unsigned long long>(zeroCopyCoalescedSignals_));
+    if (zeroCopyFrames_ % 120 == 0) {
+        OH_LOG_INFO(LOG_APP,
+                    "[DX11-PROVENANCE] hold_hist h1=%{public}u h2=%{public}u h3=%{public}u "
+                    "h4=%{public}u h5=%{public}u h6=%{public}u h7=%{public}u h8plus=%{public}u "
+                    "hold_events=%{public}llu frames=%{public}llu",
+                    displayHoldHist_[0], displayHoldHist_[1], displayHoldHist_[2],
+                    displayHoldHist_[3], displayHoldHist_[4], displayHoldHist_[5],
+                    displayHoldHist_[6], displayHoldHist_[7],
+                    static_cast<unsigned long long>(displayHoldEvents_),
+                    static_cast<unsigned long long>(zeroCopyFrames_));
+        std::fill(std::begin(displayHoldHist_), std::end(displayHoldHist_), 0u);
+        displayHoldEvents_ = 0;
+    }
     return width > 0 && height > 0;
 }
 

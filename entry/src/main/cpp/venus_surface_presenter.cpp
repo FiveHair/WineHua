@@ -49,6 +49,71 @@ uint64_t PacingPeriodNs(uint64_t displayPeriodNs)
                                              : displayPeriodNs;
 }
 
+uint64_t PercentileOfWindow(std::array<uint64_t, 120> values, size_t count,
+                            unsigned percentile)
+{
+    if (!count) return 0;
+    std::sort(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(count));
+    const size_t index = std::min(count - 1, (count * percentile + 99) / 100 - 1);
+    return values[index];
+}
+
+struct Dx11StageWindow {
+    static constexpr size_t kN = 120;
+    std::array<uint64_t, kN> slotWait{};
+    std::array<uint64_t, kN> request{};
+    std::array<uint64_t, kN> interval{};
+    std::array<uint64_t, kN> total{};
+    size_t index = 0;
+    uint64_t count = 0;
+    uint64_t stallSlot = 0;
+    uint64_t stallRequest = 0;
+    uint64_t stallInterval = 0;
+    uint64_t fakePresent = 0;
+
+    void Add(uint64_t slotUs, uint64_t requestUs, uint64_t intervalUs, uint64_t totalUs)
+    {
+        slotWait[index % kN] = slotUs;
+        request[index % kN] = requestUs;
+        interval[index % kN] = intervalUs;
+        total[index % kN] = totalUs;
+        ++index;
+        ++count;
+        if (slotUs >= 15000) ++stallSlot;
+        if (requestUs >= 15000) ++stallRequest;
+        if (intervalUs >= 40000) ++stallInterval;
+    }
+
+    void LogSummary(uint32_t serial) const
+    {
+        const size_t n = static_cast<size_t>(std::min(count, static_cast<uint64_t>(kN)));
+        OH_LOG_INFO(LOG_APP,
+                    "[DX11-PROVENANCE] summary serial=%{public}u frames=%{public}llu "
+                    "slot_wait_p50=%{public}llu p95=%{public}llu p99=%{public}llu "
+                    "request_p50=%{public}llu p95=%{public}llu p99=%{public}llu "
+                    "interval_p50=%{public}llu p95=%{public}llu p99=%{public}llu "
+                    "total_p50=%{public}llu p99=%{public}llu "
+                    "stall_slot=%{public}llu stall_request=%{public}llu "
+                    "stall_interval=%{public}llu fake_present=%{public}llu",
+                    serial, static_cast<unsigned long long>(count),
+                    static_cast<unsigned long long>(PercentileOfWindow(slotWait, n, 50)),
+                    static_cast<unsigned long long>(PercentileOfWindow(slotWait, n, 95)),
+                    static_cast<unsigned long long>(PercentileOfWindow(slotWait, n, 99)),
+                    static_cast<unsigned long long>(PercentileOfWindow(request, n, 50)),
+                    static_cast<unsigned long long>(PercentileOfWindow(request, n, 95)),
+                    static_cast<unsigned long long>(PercentileOfWindow(request, n, 99)),
+                    static_cast<unsigned long long>(PercentileOfWindow(interval, n, 50)),
+                    static_cast<unsigned long long>(PercentileOfWindow(interval, n, 95)),
+                    static_cast<unsigned long long>(PercentileOfWindow(interval, n, 99)),
+                    static_cast<unsigned long long>(PercentileOfWindow(total, n, 50)),
+                    static_cast<unsigned long long>(PercentileOfWindow(total, n, 99)),
+                    static_cast<unsigned long long>(stallSlot),
+                    static_cast<unsigned long long>(stallRequest),
+                    static_cast<unsigned long long>(stallInterval),
+                    static_cast<unsigned long long>(fakePresent));
+    }
+};
+
 VkPresentModeKHR RequestedPresentMode()
 {
     const char* mode = std::getenv("WINEHUA_VENUS_PRESENT_MODE");
@@ -120,6 +185,9 @@ bool TraceFrameOrder()
     const char* trace = std::getenv("WINEHUA_VKR_TRACE_PRESENT_IMAGE");
     return trace && trace[0] == '1' && !trace[1];
 }
+
+int (*gSetVkScanoutBacking)(uint32_t, uint64_t) = nullptr;
+int (*gClearVkScanoutBacking)(uint32_t) = nullptr;
 
 void TracePresentStage(const char* stage, uint32_t serial, uint64_t sourceImage)
 {
@@ -286,6 +354,10 @@ struct VenusSurfaceQueueTarget::Impl {
                     "ctx=%{public}u device=%{public}p wait_result=%{public}d",
                     static_cast<unsigned long long>(surfaceKey_), contextId,
                     device_, waitResult);
+        if (gClearVkScanoutBacking && contextId_)
+            gClearVkScanoutBacking(contextId_);
+        holdingScanout_ = false;
+        scanoutImage_ = 0;
         DestroyVulkanLocked();
         deviceReleasing_ = false;
         if (!surfaceAttached_) {
@@ -322,10 +394,51 @@ struct VenusSurfaceQueueTarget::Impl {
         if (deviceReleasing_) return -ENODEV;
 
         const uint64_t nowNs = NowNs();
-        if (lastPresentNs_ && nowNs - lastPresentNs_ < framePeriodNs_) {
+        /* Direct copy-every-frame: after MAIN attach, do not discard a
+         * finished present just because the display period has not elapsed.
+         * return 1 tells the guest Present succeeded while no new buffer is
+         * queued; the compositor then holds an older image and the camera
+         * looks like it reversed. Do not sleep to the next vsync either —
+         * that hitch shows up as a stutter when frame time jumps (Heaven
+         * walking start). After warmup, backpressure is RequestBuffer on a
+         * full queue and the guest deadline is 0. WSI and the first warmup
+         * frames still clock-pace with return 1. */
+        const bool directQueuePace = DirectNativeWindowEnabled() &&
+            framesPresented_ >= kDirectPresentWarmupFrames;
+        if (directQueuePace) {
+            static bool loggedQueuePace;
+            if (!loggedQueuePace) {
+                loggedQueuePace = true;
+                OH_LOG_INFO(LOG_APP,
+                            "[VENUS-DIRECT] queue_pace=1 clock_drop=0 vsync_sleep=0 "
+                            "warmup=%{public}llu",
+                            static_cast<unsigned long long>(framesPresented_));
+            }
+        }
+        auto logFakePresent = [&](const char* klass, const char* reason, uint64_t extraUs) {
+            ++dx11Stages_.fakePresent;
+            const uint64_t intervalUs =
+                lastPresentNs_ ? (NowNs() - lastPresentNs_) / 1000 : 0;
+            OH_LOG_WARN(LOG_APP,
+                        "[DX11-PROVENANCE] CLASS=%{public}s serial=%{public}u "
+                        "reason=%{public}s extra_us=%{public}llu interval_us=%{public}llu "
+                        "request_us=%{public}llu request_ret=%{public}d begin=%{public}s "
+                        "throttled=%{public}llu",
+                        klass, serial, reason,
+                        static_cast<unsigned long long>(extraUs),
+                        static_cast<unsigned long long>(intervalUs),
+                        static_cast<unsigned long long>(vkDirect_.LastRequestUs()),
+                        vkDirect_.LastRequestResult(),
+                        vkDirect_.LastBeginReason(),
+                        static_cast<unsigned long long>(throttled_ + 1));
+        };
+        if (!directQueuePace && lastPresentNs_ &&
+            nowNs - lastPresentNs_ < framePeriodNs_) {
             if (nextPresentDeadlineNs)
                 *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
             ++throttled_;
+            logFakePresent("CLOCK_DROP", "warmup-period",
+                           (nowNs - lastPresentNs_) / 1000);
             return 1;
         }
 
@@ -355,138 +468,332 @@ struct VenusSurfaceQueueTarget::Impl {
             device_, 1, &frame.complete, VK_TRUE,
             asyncRelease ? kReleaseFenceWatchdogNs : displayPeriodNs_ * 4);
         const uint64_t waitFenceUs = (NowNs() - stageStartNs) / 1000;
-        if (result == VK_TIMEOUT) return 1;
+        if (result == VK_TIMEOUT) {
+            ++throttled_;
+            logFakePresent("PRODUCER_STALL", "copy-slot-fence-timeout", waitFenceUs);
+            return 1;
+        }
         if (result != VK_SUCCESS) return FailLocked("wait fence", result, serial);
         TracePresentStage("source-fence-ready", serial, image);
 
         if (DirectNativeWindowEnabled()) {
-            if (!vkDirect_.BeginFrame()) {
-                ++throttled_;
-                return 1;
-            }
-            if (!vkDirect_.AcquireGpu(frame.acquired, VK_NULL_HANDLE)) {
-                ++throttled_;
-                return 1;
-            }
-            const VkImage targetImage = vkDirect_.ColorImage();
-            const VkFormat targetFormat = vkDirect_.ColorFormat();
-            const bool blit = sourceFormat != targetFormat ||
-                width != vkDirect_.Width() || height != vkDirect_.Height();
-            vkResetFences(device_, 1, &frame.complete);
-            vkResetCommandBuffer(frame.command, 0);
-            VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            result = vkBeginCommandBuffer(frame.command, &begin);
-            if (result != VK_SUCCESS) {
-                vkDirect_.AbortFrame();
-                return FailLocked("begin command", result, serial);
+            const bool scanoutOk = VenusScanoutBackingEnabled() &&
+                gSetVkScanoutBacking && contextId_;
+            const VkImage targetHeld = vkDirect_.ColorImage();
+            const bool formatMatch = sourceFormat == vkDirect_.ColorFormat() ||
+                !targetHeld;
+            const bool sizeMatch = width == vkDirect_.Width() &&
+                height == vkDirect_.Height();
+            const bool guestWroteScanout = scanoutOk && holdingScanout_ &&
+                targetHeld && sourceImage == targetHeld && sizeMatch &&
+                (sourceFormat == vkDirect_.ColorFormat());
+            (void)formatMatch;
+
+            auto waitFence = [&](VkFence fence) -> VkResult {
+                return vkWaitForFences(device_, 1, &fence, VK_TRUE,
+                                       displayPeriodNs_ * 4);
+            };
+            auto beginDestIfNeeded = [&]() -> bool {
+                if (vkDirect_.HasCurrent())
+                    return true;
+                if (!vkDirect_.BeginFrame())
+                    return false;
+                vkResetFences(device_, 1, &frame.complete);
+                if (!vkDirect_.AcquireGpu(frame.acquired, frame.complete))
+                    return false;
+                return waitFence(frame.complete) == VK_SUCCESS;
+            };
+            auto completeDirect = [&](uint64_t slotWaitUs, uint64_t requestUs,
+                                      uint64_t copySubmitUs, bool skip,
+                                      uint32_t slotSeq) -> int {
+                const uint64_t flushUs = vkDirect_.LastFlushUs();
+                const uint64_t doneNs = NowNs();
+                const uint64_t totalUs = (doneNs - presentStartNs) / 1000;
+                const uint64_t intervalUs =
+                    lastPresentNs_ ? (doneNs - lastPresentNs_) / 1000 : 0;
+                lastPresentNs_ = doneNs;
+                ++framesPresented_;
+                const char* klass = "OK";
+                if (requestUs >= 15000)
+                    klass = "BUFFERQUEUE_STALL";
+                else if (slotWaitUs >= 15000)
+                    klass = "PRODUCER_STALL";
+                else if (intervalUs >= 40000)
+                    klass = "PRODUCER_STALL";
+                dx11Stages_.Add(slotWaitUs, requestUs, intervalUs, totalUs);
+                const bool outlier = std::strcmp(klass, "OK") != 0;
+                if (framesPresented_ <= 8 || framesPresented_ % 120 == 0 || outlier)
+                    OH_LOG_INFO(LOG_APP,
+                                "[DX11-PROVENANCE] serial=%{public}u skip=%{public}d "
+                                "slot_seq=%{public}u src=0x%{public}llx "
+                                "slot_wait_us=%{public}llu request_us=%{public}llu "
+                                "copy_submit_us=%{public}llu flush_us=%{public}llu "
+                                "total_us=%{public}llu interval_us=%{public}llu "
+                                "CLASS=%{public}s",
+                                serial, skip ? 1 : 0, slotSeq,
+                                static_cast<unsigned long long>(image),
+                                static_cast<unsigned long long>(slotWaitUs),
+                                static_cast<unsigned long long>(requestUs),
+                                static_cast<unsigned long long>(copySubmitUs),
+                                static_cast<unsigned long long>(flushUs),
+                                static_cast<unsigned long long>(totalUs),
+                                static_cast<unsigned long long>(intervalUs),
+                                klass);
+                if (framesPresented_ == 1 || framesPresented_ % 120 == 0) {
+                    dx11Stages_.LogSummary(serial);
+                    OH_LOG_INFO(LOG_APP, "%{public}s scanout_backing=%{public}d",
+                                vkDirect_.Timeline().Format("VENUS-DIRECT", serial).c_str(),
+                                scanoutOk ? 1 : 0);
+                }
+                if (nextPresentDeadlineNs)
+                    *nextPresentDeadlineNs =
+                        framesPresented_ >= kDirectPresentWarmupFrames
+                            ? 0 : lastPresentNs_ + framePeriodNs_;
+                return 0;
+            };
+            auto recordCopyOrBarrier = [&](bool skip) -> VkResult {
+                const VkImage targetImage = vkDirect_.ColorImage();
+                if (!targetImage)
+                    return VK_ERROR_UNKNOWN;
+                vkResetFences(device_, 1, &frame.complete);
+                vkResetCommandBuffer(frame.command, 0);
+                VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                VkResult rec = vkBeginCommandBuffer(frame.command, &begin);
+                if (rec != VK_SUCCESS)
+                    return rec;
+                if (skip) {
+                    VkImageMemoryBarrier release{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                    release.srcAccessMask = SourceAccess(sourceLayout);
+                    release.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+                    release.oldLayout = sourceLayout;
+                    release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    release.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    release.image = targetImage;
+                    release.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                    release.subresourceRange.levelCount = 1;
+                    release.subresourceRange.layerCount = 1;
+                    vkCmdPipelineBarrier(frame.command, SourceStage(sourceLayout),
+                                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
+                                         nullptr, 0, nullptr, 1, &release);
+                } else {
+                    const bool blit = sourceFormat != vkDirect_.ColorFormat() ||
+                        width != vkDirect_.Width() || height != vkDirect_.Height();
+                    VkImageMemoryBarrier sourceToTransfer{
+                        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                    sourceToTransfer.srcAccessMask = SourceAccess(sourceLayout);
+                    sourceToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    sourceToTransfer.oldLayout = sourceLayout;
+                    sourceToTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    sourceToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    sourceToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    sourceToTransfer.image = sourceImage;
+                    sourceToTransfer.subresourceRange.aspectMask =
+                        VK_IMAGE_ASPECT_COLOR_BIT;
+                    sourceToTransfer.subresourceRange.levelCount = 1;
+                    sourceToTransfer.subresourceRange.layerCount = 1;
+                    VkImageMemoryBarrier targetToTransfer{
+                        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                    targetToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    targetToTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    targetToTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    targetToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    targetToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    targetToTransfer.image = targetImage;
+                    targetToTransfer.subresourceRange = sourceToTransfer.subresourceRange;
+                    const std::array<VkImageMemoryBarrier, 2> before = {
+                        sourceToTransfer, targetToTransfer};
+                    vkCmdPipelineBarrier(frame.command,
+                                         SourceStage(sourceLayout) |
+                                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                                         0, nullptr, 2, before.data());
+                    if (blit) {
+                        VkImageBlit blitRegion{};
+                        blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                        blitRegion.srcSubresource.layerCount = 1;
+                        blitRegion.srcOffsets[1] = {
+                            static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
+                        blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                        blitRegion.dstSubresource.layerCount = 1;
+                        blitRegion.dstOffsets[1] = {
+                            static_cast<int32_t>(vkDirect_.Width()),
+                            static_cast<int32_t>(vkDirect_.Height()), 1};
+                        vkCmdBlitImage(frame.command, sourceImage,
+                                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, targetImage,
+                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                       &blitRegion, VK_FILTER_NEAREST);
+                    } else {
+                        VkImageCopy copy{};
+                        copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                        copy.srcSubresource.layerCount = 1;
+                        copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                        copy.dstSubresource.layerCount = 1;
+                        copy.extent = {width, height, 1};
+                        vkCmdCopyImage(frame.command, sourceImage,
+                                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, targetImage,
+                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+                    }
+                    vkDirect_.Timeline().AddGpuCopy();
+                    VkImageMemoryBarrier sourceRestore{
+                        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                    sourceRestore.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    sourceRestore.dstAccessMask = SourceAccess(sourceLayout);
+                    sourceRestore.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    sourceRestore.newLayout = sourceLayout;
+                    sourceRestore.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    sourceRestore.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    sourceRestore.image = sourceImage;
+                    sourceRestore.subresourceRange = sourceToTransfer.subresourceRange;
+                    VkImageMemoryBarrier targetToScanout{
+                        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                    targetToScanout.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    targetToScanout.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+                    targetToScanout.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    targetToScanout.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    targetToScanout.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    targetToScanout.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    targetToScanout.image = targetImage;
+                    targetToScanout.subresourceRange = targetToTransfer.subresourceRange;
+                    const std::array<VkImageMemoryBarrier, 2> after = {
+                        sourceRestore, targetToScanout};
+                    vkCmdPipelineBarrier(frame.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
+                                         nullptr, 0, nullptr, 2, after.data());
+                }
+                rec = vkEndCommandBuffer(frame.command);
+                if (rec != VK_SUCCESS)
+                    return rec;
+                VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                submit.commandBufferCount = 1;
+                submit.pCommandBuffers = &frame.command;
+                submit.signalSemaphoreCount = 1;
+                submit.pSignalSemaphores = &renderFinished_[0];
+                return vkQueueSubmit(queue_, 1, &submit, frame.complete);
+            };
+            auto rotate = [&]() -> int {
+                const int fenceFd =
+                    vkDirect_.SignalRelease(queue_, 1, &renderFinished_[0]);
+                if (releaseQueue)
+                    releaseQueue(queueSyncData);
+                if (!vkDirect_.EndFrame(fenceFd)) {
+                    holdingScanout_ = false;
+                    scanoutImage_ = 0;
+                    return FailLocked("flush buffer", VK_ERROR_UNKNOWN, serial);
+                }
+                holdingScanout_ = false;
+                scanoutImage_ = 0;
+                if (!scanoutOk || scanoutInstallFailed_)
+                    return 0;
+                if (!vkDirect_.BeginFrame()) {
+                    scanoutInstallFailed_ = true;
+                    OH_LOG_WARN(LOG_APP,
+                                "[VENUS-SCANOUT] request next failed serial=%{public}u; "
+                                "keeping copy fallback",
+                                serial);
+                    return 0;
+                }
+                result = waitFence(frame.complete);
+                if (result != VK_SUCCESS) {
+                    vkDirect_.AbortFrame();
+                    scanoutInstallFailed_ = true;
+                    OH_LOG_WARN(LOG_APP,
+                                "[VENUS-SCANOUT] wait copy fence failed result=%{public}d "
+                                "serial=%{public}u; keeping copy fallback",
+                                static_cast<int32_t>(result), serial);
+                    return 0;
+                }
+                vkResetFences(device_, 1, &frame.complete);
+                if (!vkDirect_.AcquireGpu(frame.acquired, frame.complete)) {
+                    scanoutInstallFailed_ = true;
+                    OH_LOG_WARN(LOG_APP,
+                                "[VENUS-SCANOUT] acquire next failed serial=%{public}u; "
+                                "keeping copy fallback",
+                                serial);
+                    return 0;
+                }
+                result = waitFence(frame.complete);
+                if (result != VK_SUCCESS) {
+                    vkDirect_.AbortFrame();
+                    scanoutInstallFailed_ = true;
+                    OH_LOG_WARN(LOG_APP,
+                                "[VENUS-SCANOUT] wait acquire failed result=%{public}d "
+                                "serial=%{public}u; keeping copy fallback",
+                                static_cast<int32_t>(result), serial);
+                    return 0;
+                }
+                const VkImage next = vkDirect_.ColorImage();
+                const int installed = gSetVkScanoutBacking(
+                    contextId_,
+                    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(next)));
+                if (installed != 0) {
+                    vkDirect_.AbortFrame();
+                    holdingScanout_ = false;
+                    scanoutImage_ = 0;
+                    scanoutInstallFailed_ = true;
+                    OH_LOG_WARN(LOG_APP,
+                                "[VENUS-SCANOUT] install failed serial=%{public}u "
+                                "installed=%{public}d; keeping copy fallback",
+                                serial, installed);
+                    return 0;
+                }
+                holdingScanout_ = true;
+                scanoutImage_ =
+                    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(next));
+                if (framesPresented_ < 8 || framesPresented_ % 120 == 0)
+                    OH_LOG_INFO(LOG_APP,
+                                "[VENUS-SCANOUT] frame=%{public}llu event=FLUSH+REQUEST "
+                                "serial=%{public}u skip=%{public}d installed=0 "
+                                "next=0x%{public}llx source=0x%{public}llx "
+                                "held=1",
+                                static_cast<unsigned long long>(framesPresented_ + 1),
+                                serial, guestWroteScanout ? 1 : 0,
+                                static_cast<unsigned long long>(
+                                    reinterpret_cast<uintptr_t>(next)),
+                                static_cast<unsigned long long>(image));
+                return 0;
+            };
+
+            if (guestWroteScanout) {
+                const uint64_t copyStartNs = NowNs();
+                result = recordCopyOrBarrier(true);
+                const uint64_t copySubmitUs = (NowNs() - copyStartNs) / 1000;
+                if (result != VK_SUCCESS)
+                    return FailLocked("skip barrier", result, serial);
+                vkDirect_.Timeline().AddSkippedCopy();
+                const uint32_t slotSeq = vkDirect_.SeqNum();
+                const int rotateRet = rotate();
+                if (rotateRet)
+                    return rotateRet;
+                return completeDirect(waitFenceUs, vkDirect_.LastRequestUs(),
+                                      copySubmitUs, true, slotSeq);
             }
 
-            VkImageMemoryBarrier sourceToTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-            sourceToTransfer.srcAccessMask = SourceAccess(sourceLayout);
-            sourceToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            sourceToTransfer.oldLayout = sourceLayout;
-            sourceToTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            sourceToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            sourceToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            sourceToTransfer.image = sourceImage;
-            sourceToTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            sourceToTransfer.subresourceRange.levelCount = 1;
-            sourceToTransfer.subresourceRange.layerCount = 1;
-            VkImageMemoryBarrier targetToTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-            targetToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            targetToTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            targetToTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            targetToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            targetToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            targetToTransfer.image = targetImage;
-            targetToTransfer.subresourceRange = sourceToTransfer.subresourceRange;
-            const std::array<VkImageMemoryBarrier, 2> before = {
-                sourceToTransfer, targetToTransfer};
-            vkCmdPipelineBarrier(frame.command, SourceStage(sourceLayout) |
-                                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
-                                 2, before.data());
-            if (blit) {
-                VkImageBlit blitRegion{};
-                blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                blitRegion.srcSubresource.layerCount = 1;
-                blitRegion.srcOffsets[1] = {
-                    static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
-                blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                blitRegion.dstSubresource.layerCount = 1;
-                blitRegion.dstOffsets[1] = {
-                    static_cast<int32_t>(vkDirect_.Width()),
-                    static_cast<int32_t>(vkDirect_.Height()), 1};
-                vkCmdBlitImage(frame.command, sourceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               targetImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                               1, &blitRegion, VK_FILTER_NEAREST);
-            } else {
-                VkImageCopy copy{};
-                copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                copy.srcSubresource.layerCount = 1;
-                copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                copy.dstSubresource.layerCount = 1;
-                copy.extent = {width, height, 1};
-                vkCmdCopyImage(frame.command, sourceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               targetImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            if (!beginDestIfNeeded()) {
+                ++throttled_;
+                const char* reason = vkDirect_.LastBeginReason();
+                if (!reason || !reason[0] || !std::strcmp(reason, "request"))
+                    logFakePresent("BUFFERQUEUE_STALL", "RequestBuffer",
+                                   vkDirect_.LastRequestUs());
+                else
+                    logFakePresent("PRODUCER_STALL", reason,
+                                   vkDirect_.LastRequestUs());
+                return 1;
             }
-            vkDirect_.Timeline().AddGpuCopy();
-            VkImageMemoryBarrier sourceRestore{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-            sourceRestore.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            sourceRestore.dstAccessMask = SourceAccess(sourceLayout);
-            sourceRestore.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            sourceRestore.newLayout = sourceLayout;
-            sourceRestore.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            sourceRestore.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            sourceRestore.image = sourceImage;
-            sourceRestore.subresourceRange = sourceToTransfer.subresourceRange;
-            VkImageMemoryBarrier targetToScanout{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-            targetToScanout.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            targetToScanout.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-            targetToScanout.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            targetToScanout.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            targetToScanout.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            targetToScanout.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            targetToScanout.image = targetImage;
-            targetToScanout.subresourceRange = targetToTransfer.subresourceRange;
-            const std::array<VkImageMemoryBarrier, 2> after = {
-                sourceRestore, targetToScanout};
-            vkCmdPipelineBarrier(frame.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                                 nullptr, 2, after.data());
-            result = vkEndCommandBuffer(frame.command);
-            if (result != VK_SUCCESS) {
-                vkDirect_.AbortFrame();
-                return FailLocked("end command", result, serial);
-            }
-            VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            submit.waitSemaphoreCount = 1;
-            submit.pWaitSemaphores = &frame.acquired;
-            submit.pWaitDstStageMask = &waitStage;
-            submit.commandBufferCount = 1;
-            submit.pCommandBuffers = &frame.command;
-            submit.signalSemaphoreCount = 1;
-            submit.pSignalSemaphores = &renderFinished_[0];
-            result = vkQueueSubmit(queue_, 1, &submit, frame.complete);
+            const uint64_t requestUs = vkDirect_.LastRequestUs();
+            const uint64_t copyStartNs = NowNs();
+            result = recordCopyOrBarrier(false);
+            const uint64_t copySubmitUs = (NowNs() - copyStartNs) / 1000;
             if (result != VK_SUCCESS) {
                 vkDirect_.AbortFrame();
                 return FailLocked("queue submit", result, serial);
             }
-            if (releaseQueue) releaseQueue(queueSyncData);
-            const int fenceFd = vkDirect_.SignalRelease(queue_, 1, &renderFinished_[0]);
-            if (!vkDirect_.EndFrame(fenceFd)) {
-                return FailLocked("flush buffer", VK_ERROR_UNKNOWN, serial);
-            }
-            lastPresentNs_ = NowNs();
-            ++framesPresented_;
-            if (framesPresented_ == 1 || framesPresented_ % 120 == 0)
-                OH_LOG_INFO(LOG_APP, "%{public}s",
-                            vkDirect_.Timeline().Format("VENUS-DIRECT", serial).c_str());
-            if (nextPresentDeadlineNs)
-                *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
-            return 0;
+            const uint32_t slotSeq = vkDirect_.SeqNum();
+            const int rotateRet = rotate();
+            if (rotateRet)
+                return rotateRet;
+            return completeDirect(waitFenceUs, requestUs, copySubmitUs, false, slotSeq);
         }
 
         uint32_t imageIndex = 0;
@@ -496,6 +803,7 @@ struct VenusSurfaceQueueTarget::Impl {
         const uint64_t acquireUs = (NowNs() - stageStartNs) / 1000;
         if (result == VK_TIMEOUT || result == VK_NOT_READY) {
             ++throttled_;
+            logFakePresent("BUFFERQUEUE_STALL", "AcquireNextImage", acquireUs);
             return 1;
         }
         /*
@@ -953,7 +1261,7 @@ private:
             windowLease_.Get(), SET_USAGE,
             static_cast<uint64_t>(NATIVEBUFFER_USAGE_HW_RENDER |
                                   NATIVEBUFFER_USAGE_HW_TEXTURE));
-        OH_NativeWindow_NativeWindowHandleOpt(windowLease_.Get(), SET_TIMEOUT, 0);
+        OH_NativeWindow_NativeWindowHandleOpt(windowLease_.Get(), SET_TIMEOUT, 100);
 
         if (DirectNativeWindowEnabled()) {
             VkResult result = VK_SUCCESS;
@@ -962,7 +1270,7 @@ private:
             useBlit_ = false;
             canBlit_ = true;
             if (!vkDirect_.Configure(windowLease_.Get(), width, height,
-                                     physicalDevice_, device_)) {
+                                     physicalDevice_, device_, sourceFormat_)) {
                 error = -ENOTSUP;
                 return false;
             }
@@ -1334,6 +1642,9 @@ private:
         gpuTimingEnabled_ = false;
         timestampPeriodNs_ = 0.0f;
         swapchainDirty_ = false;
+        holdingScanout_ = false;
+        scanoutImage_ = 0;
+        scanoutInstallFailed_ = false;
     }
 
     void ReleaseWindowLocked()
@@ -1410,6 +1721,10 @@ private:
     bool gpuTimingRequested_ = false;
     bool gpuTimingEnabled_ = false;
     float timestampPeriodNs_ = 0.0f;
+    bool holdingScanout_ = false;
+    uint64_t scanoutImage_ = 0;
+    bool scanoutInstallFailed_ = false;
+    Dx11StageWindow dx11Stages_;
 };
 
 VenusSurfaceQueueTarget::VenusSurfaceQueueTarget()
@@ -1474,6 +1789,13 @@ int VenusSurfaceQueueTarget::Present(uint32_t contextId,
                           image, queueFamily, width, height, format, layout,
                           serial, nextPresentDeadlineNs, releaseQueue,
                           queueSyncData);
+}
+
+void SetVenusScanoutBackingFn(int (*setBacking)(uint32_t, uint64_t),
+                              int (*clearBacking)(uint32_t))
+{
+    gSetVkScanoutBacking = setBacking;
+    gClearVkScanoutBacking = clearBacking;
 }
 
 } // namespace winehua

@@ -131,6 +131,28 @@ function writeAtomic(path: string, text: string): void {
   fs.renameSync(temporary, path);
 }
 
+function setPresentUncap(enabled: boolean): void {
+  const path = `${TEMP_BASE}/winehua_present_uncap`;
+  try {
+    if (enabled) writeAtomic(path, '1\n');
+    else if (pathExists(path)) fs.unlinkSync(path);
+  } catch (error) {
+    hilog.warn(DOMAIN, 'SmokeRunner', 'present uncap marker failed enabled=%{public}s error=%{public}s',
+      enabled ? '1' : '0', JSON.stringify(error));
+  }
+}
+
+function setForceScanoutBlit(enabled: boolean): void {
+  const path = `${TEMP_BASE}/winehua_scanout_force_blit`;
+  try {
+    if (enabled) writeAtomic(path, '1\n');
+    else if (pathExists(path)) fs.unlinkSync(path);
+  } catch (error) {
+    hilog.warn(DOMAIN, 'SmokeRunner', 'force blit marker failed enabled=%{public}s error=%{public}s',
+      enabled ? '1' : '0', JSON.stringify(error));
+  }
+}
+
 function resetAutomationLogs(): void {
   const now = new Date();
   const twoDigits = (value: number): string => value < 10 ? `0${value}` : `${value}`;
@@ -362,6 +384,7 @@ export class SmokeRunner {
     const includeAudio = this.request.suite === 'core' || this.request.suite === 'audio' ||
       this.request.suite === 'all' || this.request.suite === 'long';
     const includeOpenGl = this.request.suite === 'core' || this.request.suite === 'opengl' ||
+      this.request.suite === 'opengl-blit' || this.request.suite === 'opengl-uncap' ||
       this.request.suite === 'all' || this.request.suite === 'long';
     const includeD3d8 = this.request.suite === 'd3d8' || this.request.suite === 'all';
     const includeD3d9 = this.request.suite === 'd3d9' || this.request.suite === 'all';
@@ -1535,6 +1558,10 @@ export class SmokeRunner {
         automationMode: true
       }) as ProcessInfo;
     } else {
+      if (spec.executable === 'winehua_graphics_smoke.exe') {
+        setPresentUncap(this.request.suite === 'opengl-uncap');
+        setForceScanoutBlit(this.request.suite === 'opengl-blit');
+      }
       process = testNapi.runWineProgram({
         windowsExePath: `C:\\smoke\\${spec.architecture}\\${spec.executable}`,
         argv: ['--automation', '--run-id', this.request.runId, '--test-id', spec.id,
@@ -1555,9 +1582,21 @@ export class SmokeRunner {
         automationMode: true
       }) as ProcessInfo;
     }
-    if (!process.found || process.pid <= 0)
+    if (!process.found || process.pid <= 0) {
+      if (spec.executable === 'winehua_graphics_smoke.exe') {
+        setPresentUncap(false);
+        setForceScanoutBlit(false);
+      }
       return this.failureResult(spec, 'startup', 'runWineProgram failed to return a PID', process);
-    return this.waitForFinal(spec, resultPath, process);
+    }
+    try {
+      return await this.waitForFinal(spec, resultPath, process);
+    } finally {
+      if (spec.executable === 'winehua_graphics_smoke.exe') {
+        setPresentUncap(false);
+        setForceScanoutBlit(false);
+      }
+    }
   }
 
   async run(): Promise<void> {

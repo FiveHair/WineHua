@@ -888,6 +888,27 @@ export class WineEnvService {
       this.setInitStatus('解压数据...', !this.bgStart);
       hilog.warn(DOMAIN, 'wine', 'auto-init: extracting wine data (missing)...');
       await this.extractWineData();
+    } else if (this.upgradeNeedsAttention() && this.gameTestMode) {
+      /* Game Want is unattended. Overwrite-install changes the packaged
+       * wine-data hash; aborting here leaves Heaven sitting on the launcher
+       * with no engine. Keep the extracted runtime and record the skip so a
+       * later explorer session does not re-block on the same HAP. */
+      hilog.warn(DOMAIN, 'wine',
+        'auto-init: game mode keeps existing runtime (skip upgrade gate)');
+      this.upgradePending = false;
+      const sha = this.packagedRuntimeSha();
+      if (sha !== '') {
+        this.skippedUpgradeSha = sha;
+        if (this.settingsStore) {
+          try {
+            this.settingsStore.putSync('skipped_upgrade_sha', sha);
+            this.settingsStore.flush();
+          } catch (e) {
+            hilog.warn(DOMAIN, 'wine',
+              'game skip upgrade sha persist fail: %{public}s', JSON.stringify(e));
+          }
+        }
+      }
     } else if (this.upgradeNeedsAttention() && !this.isAutomation()) {
       hilog.warn(DOMAIN, 'wine', 'auto-init: runtime outdated, NOT auto-extracting (user-initiated)');
       // 中止初始化: 引擎保持未启动, 弹卡等用户决定 (应用=doReset 引擎静止

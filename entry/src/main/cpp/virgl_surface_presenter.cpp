@@ -11,11 +11,13 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <unistd.h>
 #include <unordered_map>
 
 #undef LOG_DOMAIN
@@ -63,7 +65,27 @@ bool PresentPerfSummaryEnabled()
     return summary && summary[0] == '1' && !summary[1];
 }
 
+/* First presents keep the original deadline so MAIN can attach NativeImage.
+ * After that, deadline is 0: the producer waits on RequestBuffer when the
+ * queue is full instead of sleeping until the next vsync timestamp. */
+constexpr uint64_t kPresentUncapWarmupFrames = 24;
+
+bool PresentUncapArmed(uint64_t frames)
+{
+    return winehua::PresentUncapRequested() && frames >= kPresentUncapWarmupFrames;
+}
+
+uint64_t NextPresentDeadlineNs(uint64_t lastPresentNs, uint64_t framePeriodNs,
+                               uint64_t frames)
+{
+    return PresentUncapArmed(frames) ? 0 : lastPresentNs + framePeriodNs;
+}
+
 void (*gColorRemapFn)(uint32_t, uint32_t) = nullptr;
+int (*gSetScanoutBacking)(uint32_t, uint32_t, void*) = nullptr;
+int (*gClearScanoutBacking)(uint32_t) = nullptr;
+int (*gScanoutLastWrite)(uint32_t, uint32_t*, uint32_t*, const char**) = nullptr;
+int (*gScanoutGeneration)(uint32_t, uint64_t*, uint64_t*, uint32_t*) = nullptr;
 
 GLuint CompilePresentShader(GLenum type, const char* source)
 {
@@ -110,6 +132,11 @@ public:
                     static_cast<unsigned long long>(surfaceKey_), windowLease_.Get(),
                     static_cast<unsigned long long>(displayPeriodNs_ / 1000),
                     static_cast<unsigned long long>(framePeriodNs_ / 1000));
+        if (winehua::PresentUncapRequested())
+            OH_LOG_INFO(LOG_APP,
+                        "[VIRGL-ZC][NCP] present uncap enabled surface_key=%{public}llu "
+                        "(queue backpressure, no vsync sleep)",
+                        static_cast<unsigned long long>(surfaceKey_));
         return 0;
     }
 
@@ -139,7 +166,7 @@ public:
         return 0;
     }
 
-    int Present(GLuint texture, uint32_t width, uint32_t height,
+    int Present(uint32_t resHandle, GLuint texture, uint32_t width, uint32_t height,
                 uint64_t drawable, uint32_t serial,
                 uint64_t* nextPresentDeadlineNs)
     {
@@ -157,7 +184,8 @@ public:
         if (!windowLease_) return -2;
         if (!sourceVisible) return -3;
         const uint64_t nowNs = NowNs();
-        if (width_ == width && height_ == height && lastPresentNs_ &&
+        if (!PresentUncapArmed(frames_) &&
+            width_ == width && height_ == height && lastPresentNs_ &&
             nowNs - lastPresentNs_ < framePeriodNs_)
         {
             if (nextPresentDeadlineNs)
@@ -165,12 +193,12 @@ public:
             ++throttled_;
             return 1;
         }
-        lastPresentNs_ = nowNs;
         if (winehua::DirectNativeWindowEnabled())
-            return PresentDirectLocked(texture, width, height, serial,
+            return PresentDirectLocked(resHandle, texture, width, height, serial,
                                        sourceDisplay, sourceContext,
                                        sourceDraw, sourceRead,
                                        nextPresentDeadlineNs);
+        lastPresentNs_ = nowNs;
         sourceReady = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         if (!sourceReady) return -7;
         glFlush();
@@ -236,7 +264,8 @@ public:
 
         ++frames_;
         if (nextPresentDeadlineNs)
-            *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
+            *nextPresentDeadlineNs = NextPresentDeadlineNs(
+                lastPresentNs_, framePeriodNs_, frames_);
         if (PresentPerfSummaryEnabled() &&
             (frames_ == 1 || frames_ % 120 == 0))
         {
@@ -389,95 +418,299 @@ void main() { outColor = texture(uTexture, vTexCoord); }
         return true;
     }
 
-    int PresentDirectLocked(GLuint texture, uint32_t width, uint32_t height,
-                            uint32_t serial, EGLDisplay sourceDisplay,
-                            EGLContext sourceContext, EGLSurface sourceDraw,
-                            EGLSurface sourceRead, uint64_t* nextPresentDeadlineNs)
+    bool InstallScanoutBackingLocked(uint32_t resHandle,
+                                     EGLDisplay sourceDisplay, EGLContext sourceContext,
+                                     EGLSurface sourceDraw, EGLSurface sourceRead)
     {
-        if (!direct_.Configure(windowLease_.Get(), width, height)) {
-            ++failures_;
-            return -4;
-        }
-        const bool skipBlit = holdingScanout_ && scanoutSrcTex_ == texture;
-        GLsync sourceReady = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-        if (!sourceReady) return -7;
-        glFlush();
-        if (skipBlit) {
-            glDeleteSync(sourceReady);
-            const int fenceFd = direct_.CreateNativeFenceFd();
-            if (!direct_.EndFrame(fenceFd)) {
-                ++failures_;
-                holdingScanout_ = false;
-                if (gColorRemapFn) gColorRemapFn(0, 0);
-                return -6;
-            }
-            direct_.Timeline().AddSkippedCopy();
-            holdingScanout_ = false;
-        } else {
-            if (!direct_.BeginFrame()) {
-                glDeleteSync(sourceReady);
-                ++failures_;
-                return -4;
-            }
-            glWaitSync(sourceReady, 0, GL_TIMEOUT_IGNORED);
-            glDeleteSync(sourceReady);
-            if (!EnsureBlitProgramLocked(width, height)) {
-                direct_.AbortFrame();
-                ++failures_;
-                return -4;
-            }
-            glBindFramebuffer(GL_FRAMEBUFFER, direct_.Framebuffer());
-            glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
-            glDisable(GL_BLEND);
-            glDisable(GL_DEPTH_TEST);
-            glUseProgram(program_);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, texture);
-            glBindSampler(0, sampler_);
-            glUniform1i(textureLocation_, 0);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
-            direct_.Timeline().AddGpuCopy();
-            const int fenceFd = direct_.CreateNativeFenceFd();
-            if (!direct_.EndFrame(fenceFd)) {
-                ++failures_;
-                return -6;
-            }
-        }
-
-        if (direct_.BeginFrame()) {
-            scanoutSrcTex_ = texture;
-            holdingScanout_ = true;
-            if (gColorRemapFn)
-                gColorRemapFn(texture, direct_.ColorTexture());
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        } else {
-            holdingScanout_ = false;
-            scanoutSrcTex_ = 0;
-            if (gColorRemapFn) gColorRemapFn(0, 0);
-        }
-
+        if (!gSetScanoutBacking || !resHandle || !direct_.Current())
+            return false;
         eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+        const GLuint gl = direct_.ScanoutTextureOnCurrent();
+        void* image = direct_.CurrentEglImage();
+        if (!gl || !image)
+            return false;
+        const int ret = gSetScanoutBacking(resHandle, gl, image);
+        /* FBOs are not shared across the Direct/vrend share group. Detach the
+         * Direct COLOR0 only while the Direct context is current; doing it on
+         * vrend unbinds guest COLOR0 when both FBOs happen to be named 1. */
+        const EGLDisplay directDisplay = static_cast<EGLDisplay>(direct_.Display());
+        const EGLSurface directSurface = static_cast<EGLSurface>(direct_.Pbuffer());
+        const EGLContext directContext = static_cast<EGLContext>(direct_.Context());
+        if (directDisplay && directContext && directSurface) {
+            eglMakeCurrent(directDisplay, directSurface, directSurface, directContext);
+            direct_.DetachColorForScanout();
+        }
+        eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+        scanoutRes_ = resHandle;
+        scanoutGl_ = gl;
+        holdingScanout_ = ret == 0;
+        return ret == 0;
+    }
+
+    void FinishPresentLocked(uint32_t width, uint32_t height, uint32_t serial,
+                             uint64_t* nextPresentDeadlineNs)
+    {
         ++frames_;
         width_ = width;
         height_ = height;
+        lastPresentNs_ = NowNs();
         if (nextPresentDeadlineNs)
-            *nextPresentDeadlineNs = lastPresentNs_ + framePeriodNs_;
+            *nextPresentDeadlineNs = NextPresentDeadlineNs(
+                lastPresentNs_, framePeriodNs_, frames_);
+        if (frames_ == kPresentUncapWarmupFrames && winehua::PresentUncapRequested())
+            OH_LOG_INFO(LOG_APP,
+                        "[VIRGL-ZC][NCP] present uncap armed surface_key=%{public}llu "
+                        "frames=%{public}llu",
+                        static_cast<unsigned long long>(surfaceKey_),
+                        static_cast<unsigned long long>(frames_));
         if (frames_ == 1 || frames_ % 120 == 0)
-            OH_LOG_INFO(LOG_APP, "%{public}s",
-                        direct_.Timeline().Format("VIRGL-DIRECT", serial).c_str());
+            OH_LOG_INFO(LOG_APP,
+                        "%{public}s scanout_backing=%{public}d force_blit=%{public}d",
+                        direct_.Timeline().Format("VIRGL-DIRECT", serial).c_str(),
+                        winehua::ScanoutBackingEnabled() ? 1 : 0,
+                        winehua::ScanoutForceBlitRequested() ? 1 : 0);
+    }
+
+    int PresentDirectLocked(uint32_t resHandle, GLuint texture, uint32_t width,
+                            uint32_t height, uint32_t serial,
+                            EGLDisplay sourceDisplay, EGLContext sourceContext,
+                            EGLSurface sourceDraw, EGLSurface sourceRead,
+                            uint64_t* nextPresentDeadlineNs)
+    {
+        if (!direct_.Configure(windowLease_.Get(), width, height)) {
+            ++failures_;
+            if (failures_ == 1 || failures_ % 120 == 0)
+                OH_LOG_ERROR(LOG_APP,
+                             "[VIRGL-DIRECT] configure failed serial=%{public}u "
+                             "size=%{public}ux%{public}u drops=%{public}llu",
+                             serial, width, height,
+                             static_cast<unsigned long long>(failures_));
+            return -4;
+        }
+        eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+        const bool scanoutOk = winehua::ScanoutBackingEnabled() &&
+            direct_.SharedWithVrend() && resHandle && gSetScanoutBacking;
+        if (!scanoutOk && gColorRemapFn) gColorRemapFn(0, 0);
+
+        uint32_t writeGl = 0;
+        uint32_t fullCover = 0;
+        const char* writer = "NONE";
+        if (gScanoutLastWrite && resHandle)
+            gScanoutLastWrite(resHandle, &writeGl, &fullCover, &writer);
+        GLint liveFb = 0;
+        GLint liveColor0 = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &liveFb);
+        if (liveFb) {
+            glGetFramebufferAttachmentParameteriv(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &liveColor0);
+        }
+        const bool writerOk = writer &&
+            (std::strcmp(writer, "DRAW") == 0 ||
+             std::strcmp(writer, "CLEAR") == 0 ||
+             std::strcmp(writer, "BLIT") == 0 ||
+             std::strcmp(writer, "COPY") == 0);
+        const bool guestWroteScanout = scanoutOk && holdingScanout_ &&
+            direct_.Current() && scanoutGl_ != 0 && writerOk &&
+            writeGl == scanoutGl_ &&
+            (liveColor0 <= 0 || liveColor0 == static_cast<GLint>(scanoutGl_));
+
+        uint32_t requestCount = 0;
+        uint64_t destRequestUs = 0;
+        uint64_t nextRequestUs = 0;
+        const auto beginDestIfNeeded = [&]() -> bool {
+            if (direct_.Current())
+                return true;
+            if (!direct_.BeginFrame())
+                return false;
+            ++requestCount;
+            destRequestUs = direct_.LastRequestUs();
+            eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+            direct_.WaitAcquireOnCurrent();
+            return true;
+        };
+        const auto flushAndAcquireNext = [&](const uint32_t flushSeq,
+                                             bool* installedOut) -> int {
+            if (!direct_.EndFrameWithRenderFence()) {
+                holdingScanout_ = false;
+                scanoutGl_ = 0;
+                ++failures_;
+                eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+                return -6;
+            }
+            if (!scanoutOk) {
+                holdingScanout_ = false;
+                scanoutGl_ = 0;
+                if (installedOut) *installedOut = false;
+                return 0;
+            }
+            if (!direct_.BeginFrame()) {
+                holdingScanout_ = false;
+                scanoutGl_ = 0;
+                ++failures_;
+                eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+                if (installedOut) *installedOut = false;
+                return -4;
+            }
+            ++requestCount;
+            nextRequestUs = direct_.LastRequestUs();
+            eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+            direct_.WaitAcquireOnCurrent();
+            const bool installed = InstallScanoutBackingLocked(
+                resHandle, sourceDisplay, sourceContext, sourceDraw, sourceRead);
+            if (installedOut) *installedOut = installed;
+            (void)flushSeq;
+            return 0;
+        };
+
+        if (guestWroteScanout) {
+            eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+            const uint32_t flushSeq = direct_.SeqNum();
+            bool installed = false;
+            const int rotate = flushAndAcquireNext(flushSeq, &installed);
+            if (rotate < 0) return rotate;
+            if (installed)
+                direct_.Timeline().AddSkippedCopy();
+            eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+            uint64_t genReq = 0, genApp = 0;
+            uint32_t drawGl = 0;
+            if (gScanoutGeneration && resHandle)
+                gScanoutGeneration(resHandle, &genReq, &genApp, &drawGl);
+            if (frames_ < 8 || frames_ % 120 == 0)
+                OH_LOG_INFO(LOG_APP,
+                            "[SCANOUT] frame=%{public}llu event=FLUSH+REQUEST "
+                            "res=%{public}u writer=%{public}s full_cover=%{public}u "
+                            "write_gl=%{public}u live_fb=%{public}d live_color0=%{public}d "
+                            "flush_seq=%{public}u next_seq=%{public}u gl=%{public}u "
+                            "installed=%{public}d requests=%{public}u next_req_us=%{public}llu "
+                            "gen_req=%{public}llu gen_app=%{public}llu draw_gl=%{public}u",
+                            static_cast<unsigned long long>(frames_ + 1), resHandle,
+                            writer, fullCover, writeGl, liveFb, liveColor0,
+                            flushSeq, direct_.SeqNum(), scanoutGl_,
+                            installed ? 1 : 0, requestCount,
+                            static_cast<unsigned long long>(nextRequestUs),
+                            static_cast<unsigned long long>(genReq),
+                            static_cast<unsigned long long>(genApp), drawGl);
+            FinishPresentLocked(width, height, serial, nextPresentDeadlineNs);
+            return 0;
+        }
+
+        /* Fallback / bootstrap: blit writeGl into the already-acquired dest,
+         * then the same Flush + Request next as skip. One extra RequestBuffer
+         * only when Current() is null (frame 0). */
+        if (!beginDestIfNeeded()) {
+            ++failures_;
+            eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+            OH_LOG_ERROR(LOG_APP,
+                         "[VIRGL-DIRECT] BeginFrame failed serial=%{public}u "
+                         "reason=%{public}s request_ret=%{public}d "
+                         "wait_us=%{public}llu drops=%{public}llu",
+                         serial, direct_.LastBeginReason(),
+                         direct_.LastRequestResult(),
+                         static_cast<unsigned long long>(direct_.LastRequestUs()),
+                         static_cast<unsigned long long>(failures_));
+            return -4;
+        }
+
+        const GLuint destGl = scanoutGl_ ? scanoutGl_ : direct_.ScanoutTextureOnCurrent();
+        GLsync sourceReady = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (!sourceReady) return -7;
+        glFlush();
+        if (!direct_.MakeCurrent()) {
+            glDeleteSync(sourceReady);
+            ++failures_;
+            eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+            return -4;
+        }
+        direct_.WaitAcquireOnCurrent();
+        glWaitSync(sourceReady, 0, GL_TIMEOUT_IGNORED);
+        glDeleteSync(sourceReady);
+        if (!EnsureBlitProgramLocked(width, height)) {
+            direct_.AbortFrame();
+            holdingScanout_ = false;
+            ++failures_;
+            eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+            OH_LOG_ERROR(LOG_APP,
+                         "[VIRGL-DIRECT] blit program failed serial=%{public}u",
+                         serial);
+            return -4;
+        }
+        direct_.PrepareBlitFramebuffer();
+        glBindFramebuffer(GL_FRAMEBUFFER, direct_.Framebuffer());
+        glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+        glDisable(GL_BLEND);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (!scanoutPrivateGl_ && texture)
+            scanoutPrivateGl_ = texture;
+        GLuint blitSrc = scanoutPrivateGl_ ? scanoutPrivateGl_ : texture;
+        if (writeGl && scanoutPrivateGl_ && writeGl != scanoutPrivateGl_ &&
+            writeGl != scanoutGl_)
+            blitSrc = writeGl;
+        /* Canonical NativeBuffer is skip-path compositor-upright. Flip only
+         * when the blit source is still logical GL Y-up (private tex). */
+        const bool flipY = blitSrc && !direct_.IsScanoutTexture(blitSrc);
+        glUseProgram(program_);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, blitSrc);
+        glBindSampler(0, sampler_);
+        glUniform1i(textureLocation_, 0);
+        if (flipYLocation_ >= 0)
+            glUniform1f(flipYLocation_, flipY ? 1.f : 0.f);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        direct_.Timeline().AddGpuCopy();
+        const uint32_t flushSeq = direct_.SeqNum();
+        bool installed = false;
+        const int rotate = flushAndAcquireNext(flushSeq, &installed);
+        if (rotate < 0) return rotate;
+        eglMakeCurrent(sourceDisplay, sourceDraw, sourceRead, sourceContext);
+        uint64_t genReq = 0, genApp = 0;
+        uint32_t drawGl = 0;
+        if (gScanoutGeneration && resHandle)
+            gScanoutGeneration(resHandle, &genReq, &genApp, &drawGl);
+        /* Intentional force-blit A/B logs like skip (first 8 + every 120).
+         * Unexpected fallback while skip is on still logs every frame. */
+        if (scanoutOk || frames_ < 8 || frames_ % 120 == 0)
+            OH_LOG_INFO(LOG_APP,
+                        "[SCANOUT] frame=%{public}llu event=BLIT-FALLBACK "
+                        "res=%{public}u writer=%{public}s write_gl=%{public}u "
+                        "dest_gl=%{public}u blit_src=%{public}u flip_y=%{public}d "
+                        "live_fb=%{public}d live_color0=%{public}d current=%{public}d "
+                        "requests=%{public}u dest_req_us=%{public}llu next_req_us=%{public}llu "
+                        "next_seq=%{public}u next_gl=%{public}u installed=%{public}d "
+                        "gen_req=%{public}llu gen_app=%{public}llu draw_gl=%{public}u "
+                        "single_dest=1 scanout_ok=%{public}d",
+                        static_cast<unsigned long long>(frames_ + 1), resHandle,
+                        writer, writeGl, destGl, blitSrc, flipY ? 1 : 0,
+                        liveFb, liveColor0, direct_.Current() ? 1 : 0, requestCount,
+                        static_cast<unsigned long long>(destRequestUs),
+                        static_cast<unsigned long long>(nextRequestUs),
+                        direct_.SeqNum(), scanoutGl_, installed ? 1 : 0,
+                        static_cast<unsigned long long>(genReq),
+                        static_cast<unsigned long long>(genApp), drawGl,
+                        scanoutOk ? 1 : 0);
+        if (!scanoutOk && gColorRemapFn) gColorRemapFn(0, 0);
+        FinishPresentLocked(width, height, serial, nextPresentDeadlineNs);
         return 0;
     }
 
     bool EnsureBlitProgramLocked(uint32_t width, uint32_t height)
     {
-        if (program_ && sampler_ && width_ == width && height_ == height) return true;
+        if (program_ && sampler_ && width_ == width && height_ == height &&
+            flipYLocation_ >= 0)
+            return true;
         static constexpr const char* vertexSource = R"(#version 300 es
+uniform float uFlipY;
 out vec2 vTexCoord;
 void main() {
     vec2 positions[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
     vec2 texcoords[3] = vec2[3](vec2(0.0, 0.0), vec2(2.0, 0.0), vec2(0.0, 2.0));
     gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
-    vTexCoord = texcoords[gl_VertexID];
+    float y = texcoords[gl_VertexID].y;
+    vTexCoord = vec2(texcoords[gl_VertexID].x, mix(y, 1.0 - y, uFlipY));
 })";
         static constexpr const char* fragmentSource = R"(#version 300 es
 precision mediump float;
@@ -513,6 +746,7 @@ void main() { outColor = texture(uTexture, vTexCoord); }
         glSamplerParameteri(sampler_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glSamplerParameteri(sampler_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         textureLocation_ = glGetUniformLocation(program_, "uTexture");
+        flipYLocation_ = glGetUniformLocation(program_, "uFlipY");
         width_ = width;
         height_ = height;
         return true;
@@ -521,14 +755,20 @@ void main() { outColor = texture(uTexture, vTexCoord); }
     void ResetGlLocked()
     {
         if (gColorRemapFn) gColorRemapFn(0, 0);
+        if (gClearScanoutBacking && scanoutRes_)
+            gClearScanoutBacking(scanoutRes_);
         holdingScanout_ = false;
         scanoutSrcTex_ = 0;
+        scanoutGl_ = 0;
+        scanoutRes_ = 0;
+        scanoutPrivateGl_ = 0;
         if (program_ || sampler_) {
             if (sampler_) glDeleteSamplers(1, &sampler_);
             if (program_) glDeleteProgram(program_);
             program_ = 0;
             sampler_ = 0;
             textureLocation_ = -1;
+            flipYLocation_ = -1;
         }
         direct_.Reset();
         if (display_ != EGL_NO_DISPLAY)
@@ -558,6 +798,7 @@ void main() { outColor = texture(uTexture, vTexCoord); }
         program_ = 0;
         sampler_ = 0;
         textureLocation_ = -1;
+        flipYLocation_ = -1;
         width_ = 0;
         height_ = 0;
     }
@@ -579,6 +820,9 @@ void main() { outColor = texture(uTexture, vTexCoord); }
     winehua::NativeWindowGlesTarget direct_;
     bool holdingScanout_ = false;
     GLuint scanoutSrcTex_ = 0;
+    GLuint scanoutGl_ = 0;
+    GLuint scanoutPrivateGl_ = 0;
+    uint32_t scanoutRes_ = 0;
     uint64_t surfaceKey_ = 0;
     EGLDisplay display_ = EGL_NO_DISPLAY;
     EGLContext context_ = EGL_NO_CONTEXT;
@@ -586,6 +830,7 @@ void main() { outColor = texture(uTexture, vTexCoord); }
     GLuint program_ = 0;
     GLuint sampler_ = 0;
     GLint textureLocation_ = -1;
+    GLint flipYLocation_ = -1;
     uint32_t width_ = 0;
     uint32_t height_ = 0;
     uint64_t frames_ = 0;
@@ -717,8 +962,8 @@ public:
             ? it->second.virglTarget->SetFramePeriod(framePeriodNs) : -2;
     }
 
-    int Present(uint32_t clientPid, uint32_t surfaceId, GLuint texture,
-                uint32_t width, uint32_t height,
+    int Present(uint32_t clientPid, uint32_t surfaceId, uint32_t resHandle,
+                GLuint texture, uint32_t width, uint32_t height,
                 uint64_t drawable, uint32_t serial,
                 uint64_t* nextPresentDeadlineNs)
     {
@@ -737,7 +982,7 @@ public:
         entry.lastPresentUs = NowUs();
         if (!entry.virglTarget) return -2;
         return entry.virglTarget->Present(
-            texture, width, height, drawable, serial, nextPresentDeadlineNs);
+            resHandle, texture, width, height, drawable, serial, nextPresentDeadlineNs);
     }
 
     int PresentVenus(uint32_t contextId,
@@ -926,12 +1171,12 @@ int SetVirglSurfaceFramePeriod(uint64_t surfaceKey, uint64_t framePeriodNs)
 }
 
 int PresentVirglSurface(uint32_t clientPid, uint32_t surfaceId,
-                        uint32_t texture, uint32_t width, uint32_t height,
+                        uint32_t resHandle, uint32_t texture, uint32_t width, uint32_t height,
                         uint64_t drawable, uint32_t serial,
                         uint64_t* nextPresentDeadlineNs)
 {
     return g_presenters.Present(
-        clientPid, surfaceId, texture, width, height, drawable, serial,
+        clientPid, surfaceId, resHandle, texture, width, height, drawable, serial,
         nextPresentDeadlineNs);
 }
 
@@ -984,6 +1229,17 @@ void ResetVirglSurfaces()
 void SetVirglColorRemapFn(void (*fn)(uint32_t, uint32_t))
 {
     gColorRemapFn = fn;
+}
+
+void SetVirglScanoutBackingFn(int (*setBacking)(uint32_t, uint32_t, void*),
+                              int (*clearBacking)(uint32_t),
+                              int (*lastWrite)(uint32_t, uint32_t*, uint32_t*, const char**),
+                              int (*generation)(uint32_t, uint64_t*, uint64_t*, uint32_t*))
+{
+    gSetScanoutBacking = setBacking;
+    gClearScanoutBacking = clearBacking;
+    gScanoutLastWrite = lastWrite;
+    gScanoutGeneration = generation;
 }
 
 } // namespace winehua

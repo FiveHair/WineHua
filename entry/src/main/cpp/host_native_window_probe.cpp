@@ -92,6 +92,7 @@ public:
              << ",\"gpuCopies\":" << target_.Timeline().GpuCopies()
              << ",\"cpuFenceWaits\":" << target_.Timeline().CpuFenceWaits()
              << ",\"glFinish\":" << target_.Timeline().GlFinishCount()
+             << ",\"renderFence\":" << target_.Timeline().RenderFenceCount()
              << ",\"p50_us\":" << p.p50
              << ",\"p90_us\":" << p.p90
              << ",\"p99_us\":" << p.p99
@@ -155,6 +156,10 @@ private:
             const auto frameStart = Clock::now();
             if (!target_.BeginFrame()) {
                 *error = "RequestBuffer failed";
+                break;
+            }
+            if (!target_.WaitAcquireOnCurrent()) {
+                *error = "acquire wait failed";
                 break;
             }
             const uint32_t seq = target_.SeqNum();

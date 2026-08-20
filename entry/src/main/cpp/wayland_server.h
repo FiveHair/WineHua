@@ -57,9 +57,7 @@ public:
         return desktopCompositor_.GetZeroCopyLayerInfo(
             surfaceKey, rendererToplevelId, fallbackWidth, fallbackHeight, info);
     }
-    void SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled) {
-        desktopCompositor_.SetSurfaceZeroCopy(surfaceKey, enabled);
-    }
+    void SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled);
     int GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererToplevelId,
                              ZeroCopyOccluderRect* out, int maxOut) {
         return desktopCompositor_.GetZeroCopyOccluders(surfaceKey, rendererToplevelId, out, maxOut);

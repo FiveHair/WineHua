@@ -219,6 +219,32 @@ bool WaylandServer::ProcessMoveGrabMotion(wl_fixed_t wx, wl_fixed_t wy) {
     return true;
 }
 
+void WaylandServer::SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled)
+{
+    desktopCompositor_.SetSurfaceZeroCopy(surfaceKey, enabled);
+    if (!enabled || !Policy().OhosWindowPerToplevel() || !surfaceKey) return;
+    uint32_t popupId = 0;
+    uint32_t parentId = 0;
+    {
+        auto lk = toplevelMgr_.Lock();
+        popupId = toplevelMgr_.FindPopupBySurfaceKey(surfaceKey);
+        if (popupId) {
+            if (const auto* rec = toplevelMgr_.FindPopup(popupId))
+                parentId = rec->parentToplevel;
+            uint32_t removed = 0;
+            toplevelMgr_.RemovePopupBySurfaceKeyLocked(surfaceKey, removed);
+        }
+    }
+    if (popupId && parentId) {
+        char json[64];
+        snprintf(json, sizeof(json), "{\"popupId\":%u}", popupId);
+        OH_LOG_INFO(LOG_APP,
+                    "[MW-POPUP] hide client popup=#%{public}u parent=#%{public}u (zero-copy on parent)",
+                    popupId, parentId);
+        FireToplevelEvent(parentId, "popup_hide", json);
+    }
+}
+
 void WaylandServer::FireToplevelEvent(uint32_t id, const char* event, const char* jsonData) {
     /* 首启 wineboot 抑制窗口创建事件 (PC 窗口模式): 抑制 created/argb_created
      * 后 ArkTS 不启动 WineWindowAbility, wineboot 等待窗不出现在系统桌面。

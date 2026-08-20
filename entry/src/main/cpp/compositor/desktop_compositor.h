@@ -156,6 +156,7 @@ public:
                               int fallbackWidth, int fallbackHeight,
                               ZeroCopyLayerInfo& info);
     void SetSurfaceZeroCopy(uint64_t surfaceKey, bool enabled);
+    bool IsZeroCopySurface(uint64_t surfaceKey);
     int GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t rendererToplevelId,
                              ZeroCopyOccluderRect* out, int maxOut);
 

@@ -831,7 +831,7 @@ void WaylandServer::UpdateSubsurfaceOnCommit(SurfaceData* sd, wl_resource* surfR
     if (!parentSd || !parentSd->hasToplevel) return;
     if (Policy().SubsurfaceAsLayer()) {
         UpdateSubsurfaceLayerOnCommit(sd, surfRes, parentSd->toplevelId, fi);
-    } else {
+    } else if (!desktopCompositor_.IsZeroCopySurface(sd->surfaceKey)) {
         UpdatePopupOnCommit(sd, surfRes, parentSd, fi);
     }
 }
@@ -970,6 +970,33 @@ void WaylandServer::UpdatePopupOnCommit(SurfaceData* sd, wl_resource* surfRes,
         return;
     }
     if (dispW <= 0 || dispH <= 0) return;
+    /*
+     * Wine GL/VK 客户区是覆盖标题栏以下几乎整窗的 child HWND, 协议上是
+     * subsurface. PC 模式若把它做成 Harmony popup, 子窗按父 Ability 窗口
+     * 原点 (常是屏幕顶) 定位, 和父 XComponent 里 letterbox 后的 Wine 窗
+     * 对不齐 — Direct 把 NativeImage 画到这个 popup 上就会「GL 窗跑到最
+     * 上面」。客户区 GPU 层已经画在父窗口 +off 处, 这种 subsurface 不再
+     * 开 popup; 菜单/tooltip 远小于父窗, 仍走 popup 以免被父边裁剪。
+     */
+    {
+        int parentW = 0, parentH = 0;
+        auto lk = toplevelMgr_.Lock();
+        if (const auto* pst = toplevelMgr_.FindToplevelLocked(parentId)) {
+            parentW = pst->Width();
+            parentH = pst->Height();
+        }
+        const bool coversClient = parentW > 0 && parentH > 0 &&
+            offX >= 0 && offY >= 0 &&
+            offX + dispW <= parentW && offY + dispH <= parentH &&
+            dispW >= parentW - 16 && dispH >= parentH - 48;
+        if (coversClient) {
+            OH_LOG_INFO(LOG_APP,
+                        "[MW-POPUP] skip client subsurface parent=#%{public}u "
+                        "off=(%{public}d,%{public}d) %{public}dx%{public}d in %{public}dx%{public}d",
+                        parentId, offX, offY, dispW, dispH, parentW, parentH);
+            return;
+        }
+    }
     uint32_t popupId = 0;
     bool isNew = false;
     bool sizeChanged = false;

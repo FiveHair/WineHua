@@ -13,7 +13,7 @@ int AttachVirglSurfaceTarget(uint64_t surfaceKey, uint64_t framePeriodNs,
 int DetachVirglSurfaceTarget(uint64_t surfaceKey);
 int SetVirglSurfaceFramePeriod(uint64_t surfaceKey, uint64_t framePeriodNs);
 int PresentVirglSurface(uint32_t clientPid, uint32_t surfaceId,
-                        uint32_t texture, uint32_t width, uint32_t height,
+                        uint32_t resHandle, uint32_t texture, uint32_t width, uint32_t height,
                         uint64_t drawable, uint32_t serial,
                         uint64_t* nextPresentDeadlineNs);
 int PresentVenusSurface(uint32_t contextId,
@@ -39,5 +39,11 @@ int FinishVenusDeviceRelease(uint32_t contextId, uintptr_t device,
 virgl_ipc::SurfaceQueryReply QueryVirglSurfaces();
 void ResetVirglSurfaces();
 void SetVirglColorRemapFn(void (*fn)(uint32_t, uint32_t));
+void SetVirglScanoutBackingFn(int (*setBacking)(uint32_t, uint32_t, void*),
+                              int (*clearBacking)(uint32_t),
+                              int (*lastWrite)(uint32_t, uint32_t*, uint32_t*, const char**),
+                              int (*generation)(uint32_t, uint64_t*, uint64_t*, uint32_t*));
+void SetVenusScanoutBackingFn(int (*setBacking)(uint32_t, uint64_t),
+                              int (*clearBacking)(uint32_t));
 
 } // namespace winehua

@@ -143,6 +143,17 @@ static bool DirectNativeWindowEnvEnabled()
     return value[0] != '0';
 }
 
+static bool EnvHasKey(const std::vector<std::string>& env, const char* key)
+{
+    if (!key || !key[0]) return false;
+    const size_t n = std::strlen(key);
+    for (const std::string& line : env) {
+        if (line.compare(0, n, key) == 0 && line.size() > n && line[n] == '=')
+            return true;
+    }
+    return false;
+}
+
 void UpsertEnvLine(std::vector<std::string>& env, const std::string& line)
 {
     const size_t sep = line.find('=');
@@ -261,9 +272,12 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         };
         for (const std::string& line : managed) UpsertEnvLine(env, line);
         /* DX12 present reuses the Venus NativeBuffer+fence target.
-         * Upload stays Guest Push Dirty / shadow-precise. Skip wait_all only
-         * when host Present no longer CPU-drains the WSI release fence. */
-        if (DirectNativeWindowEnvEnabled())
+         * Upload stays Guest Push Dirty / shadow-precise. ROUNDTRIP_ONLY
+         * skips wait_all of unrelated ring commands. Guest present still
+         * waits the exact writer QueueSubmit seqno so the copy cannot
+         * publish the previous swapchain pose. */
+        if (DirectNativeWindowEnvEnabled() &&
+            !EnvHasKey(env, "VN_WINEHUA_PRESENT_ROUNDTRIP_ONLY"))
             UpsertEnvLine(env, "VN_WINEHUA_PRESENT_ROUNDTRIP_ONLY=1");
         if (!modern26)
         {
@@ -371,7 +385,10 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
         "WINEDLLDIR4=" + binDir,
     };
     for (const std::string& line : managed) UpsertEnvLine(env, line);
-    if (DirectNativeWindowEnvEnabled())
+    /* ROUNDTRIP_ONLY skips wait_all. Writer-submit seqno wait stays on in
+     * guest Venus so Direct copy cannot flash the previous camera pose. */
+    if (DirectNativeWindowEnvEnabled() &&
+        !EnvHasKey(env, "VN_WINEHUA_PRESENT_ROUNDTRIP_ONLY"))
         UpsertEnvLine(env, "VN_WINEHUA_PRESENT_ROUNDTRIP_ONLY=1");
     if (!legacy) return;
 
