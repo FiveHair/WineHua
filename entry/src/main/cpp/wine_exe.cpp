@@ -731,6 +731,8 @@ napi_value RunWineExe(napi_env env, napi_callback_info info)
         // NOTE: RunWineExe 不调 AppendD3dBackendEnv —— 此路径从 ArkTS Index.ets
         // 手动启动 Wine exe（如 explorer 文件管理器），D3D 后端由调用者通过
         // d3dLaunchEnvironment 单独指定；explorer 本身不需要 DXVK overlay。
+        // DirectDraw overlay is default-on and independent of the D3D backend.
+        AppendDdrawBackendEnv(wineEnv);
         // env 序列化由 SpawnViaBroker 内部完成（区别于旧代码在本函数内手动拼接）。
         OH_LOG_INFO(LOG_APP, "[Wine] runWineExe via broker: %{public}s|__env=...", entryParams.c_str());
 

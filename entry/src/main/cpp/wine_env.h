@@ -91,9 +91,8 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
                          const std::string& dxvkBackend,
                          const std::string& binDir);
 
-// DirectDraw compatibility overlay (cnc-ddraw). Activated by
-// WINEHUA_DDRAW_BACKEND=cnc in the already-merged per-run environment or in
-// the App process environment (desktop sessions). See wine_env.cpp.
+// DirectDraw compatibility overlay (cnc-ddraw). Default-on when the
+// packaged x86 ddraw.dll exists. Opt out with WINEHUA_DDRAW_BACKEND=wine.
 void AppendDdrawBackendEnv(std::vector<std::string>& env);
 
 // -- 环境变量辅助 --

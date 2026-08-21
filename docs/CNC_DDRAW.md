@@ -2,9 +2,11 @@
 
 WineHua ships [cnc-ddraw](https://github.com/FunkyFr3sh/cnc-ddraw) v7.1.0.0 as a
 **PE overlay**, not as a Wine fork change. Classic DirectDraw games (C&C, StarCraft,
-Age of Empires) keep using `ddraw.dll`; when `WINEHUA_DDRAW_BACKEND=cnc` is set,
-WineHua prepends the overlay directory to `WINEDLLDIR` and sets
-`WINEDLLOVERRIDES=ddraw=n`.
+Age of Empires) keep using `ddraw.dll`. After `make assemble`, the overlay is
+**on by default**: WineHua prepends `wine-data/cnc-ddraw/x86` to `WINEDLLDIR`
+and sets `WINEDLLOVERRIDES=ddraw=n`. No game-profile setting is required.
+
+Opt out (Wine builtin ddraw) with `WINEHUA_DDRAW_BACKEND=wine`.
 
 This is the same family of path injection used for DXVK, but it does **not** go
 through `ntdll` `search_winehua_dxvk_overlay` (that hook only remaps
@@ -22,17 +24,17 @@ wine-data/cnc-ddraw/
 `AppendDdrawBackendEnv` also sets `CNC_DDRAW_CONFIG_FILE` to the overlay
 `ddraw.ini` so the game working directory does not need a local copy.
 
-## Enable per game
+## Default vs opt-out
 
-Pass in the launch environment (game profile `d3d_env` or smoke `environment`):
+Default: `WINEHUA_DDRAW_BACKEND=cnc` (implicit) whenever
+`/data/storage/el2/base/files/wine/cnc-ddraw/x86/ddraw.dll` exists.
 
 ```
-WINEHUA_DDRAW_BACKEND=cnc
+WINEHUA_DDRAW_BACKEND=wine    # use Wine builtin ddraw instead
 ```
 
 Smoke suite: `ddraw` (x86 probe `winehua_ddraw_smoke.exe`). The probe requires
-`DDGetProcAddress` when the overlay is requested, proving cnc-ddraw loaded
-instead of Wine's builtin `ddraw`.
+`DDGetProcAddress`, proving cnc-ddraw loaded instead of Wine's builtin `ddraw`.
 
 ## Build
 

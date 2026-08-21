@@ -184,12 +184,11 @@ void PrependEnvValue(std::vector<std::string>& env, const std::string& key,
     env.push_back(key + "=" + value);
 }
 
-/* DirectDraw compatibility overlay: with WINEHUA_DDRAW_BACKEND=cnc (from the
- * per-run environment or the App process environment for desktop sessions),
- * cnc-ddraw's ddraw.dll replaces Wine's builtin ddraw in this process.  This
- * uses the generic WINEDLLDIR/WINEDLLOVERRIDES mechanism, not the
- * DXVK-specific ntdll hook (which only covers d3d11/dxgi/d3d12).  Must be
- * called after any per-run environment lines have been merged into env. */
+/* DirectDraw compatibility overlay.  Default-on whenever the packaged
+ * cnc-ddraw DLL exists: classic DDraw games then load it with no user
+ * setting.  Opt out with WINEHUA_DDRAW_BACKEND=wine (or off/builtin/0).
+ * Uses WINEDLLDIR/WINEDLLOVERRIDES, not the DXVK ntdll hook.  Must run
+ * after per-run environment lines are merged. */
 void AppendDdrawBackendEnv(std::vector<std::string>& env)
 {
     std::string backend;
@@ -202,11 +201,15 @@ void AppendDdrawBackendEnv(std::vector<std::string>& env)
         const char* fromHost = getenv("WINEHUA_DDRAW_BACKEND");
         if (fromHost) backend = fromHost;
     }
-    if (backend != "cnc") return;
+    if (backend == "wine" || backend == "off" || backend == "builtin" ||
+        backend == "0")
+        return;
 
     const std::string cncRoot = std::string(WINE_RUNTIME_ROOT) + "/cnc-ddraw";
     const std::string cnc86 = cncRoot + "/x86";
     const std::string cnc64 = cncRoot + "/x64";
+    if (access((cnc86 + "/ddraw.dll").c_str(), R_OK) != 0)
+        return;
 
     UpsertEnvLine(env, "WINEHUA_DDRAW_BACKEND=cnc");
     /* cnc-ddraw reads this before falling back to ddraw.ini next to the DLL. */

@@ -1584,7 +1584,6 @@ export class SmokeRunner {
           'WINEHUA_SMOKE_TEST_ID': spec.id,
           'WINEDEBUG': isDdraw ? '+loaddll,+ddraw' :
             (isD3d8 ? '+loaddll,+d3d8' : (isD3d9 ? '+loaddll,+d3d9' : '-all')),
-          'WINEHUA_DDRAW_BACKEND': isDdraw ? 'cnc' : '',
           /* Guest and Host map different shadow files. Functional probes use
            * explicit flush/invalidate for their tiny readback allocations. */
           'VN_WINEHUA_REMOTE_MEMORY_SYNC': '1'
