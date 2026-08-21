@@ -39,6 +39,7 @@ add_library(entry SHARED
     phone_adapter/phone_virgl_relay.cpp
     wayland_server.cpp
     wl_core.cpp
+    compositor/compositor_blit.cpp
     compositor/toplevel_manager.cpp
     compositor/move_grab.cpp
     compositor/compositor_utils.cpp
