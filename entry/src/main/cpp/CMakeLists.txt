@@ -66,6 +66,11 @@ add_library(entry SHARED
     text-input-unstable-v3-protocol.c
 )
 
+# BlitScaled (双线性缩放 blit) 是桌面合成热路径: 全屏游戏 800x600→1400x920
+# fit 放大在 -O0 调试构建实测 ~70ms/帧 (440 万输出像素 × 4 采样插值)。
+# 单独 -O2 该源文件 (其余保持 -O0 便于调试), 合成崩溃时该文件仍可栈回溯。
+set_source_files_properties(compositor/compositor_utils.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+
 target_link_libraries(entry PUBLIC
     libace_napi.z.so
     libace_ndk.z.so

@@ -64,6 +64,12 @@ public:
         bool HasFrame() const { return !pixels_.empty(); }  // empty() = 尚无帧
         bool IsDirty() const { return dirty_; }
         const std::vector<uint8_t>& Pixels() const { return pixels_; }
+        // 帧内容序列号: 像素每次 commit 实际重写时 +1 (wl_core 帧路径是唯一
+        // bump 点)。compositor 局部合成 (TakeToplevelFrame damage 裁剪) 以此
+        // 判定"该层像素是否变化" — 变化的可见层矩形构成当帧重绘范围; 几何/
+        // 层序/显隐变化由合成签名 (compositionSignature) 覆盖, 不 bump。
+        uint64_t FrameSerial() const { return frameSerial_; }
+        void BumpFrameSerial() { ++frameSerial_; }
         int Width() const { return w_; }       // content 尺寸 (popup 为显示尺寸)
         int Height() const { return h_; }
         uint32_t ShmFormat() const { return shmFormat_; }  // 0=ARGB8888, 1=XRGB8888
@@ -128,6 +134,7 @@ public:
         std::vector<uint8_t> pixels_;   // empty() = 尚无帧
         int w_ = 0, h_ = 0;             // content 尺寸 (popup 为显示尺寸)
         bool dirty_ = false;
+        uint64_t frameSerial_ = 0;      // 帧内容序列号 (见 FrameSerial 注释)
         uint32_t shmFormat_ = 1;        // wl_shm format (0=ARGB8888, 1=XRGB8888)
         bool hasPosition_ = false;      // 首次 commit 置位 (isFirstCommit 判定 / 移动守卫)
         int x_ = 0, y_ = 0;             // compositor 桌面位置 (含 move grab 偏移)

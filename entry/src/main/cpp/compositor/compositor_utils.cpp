@@ -20,13 +20,18 @@ uint32_t GetWaylandClientPid(wl_client* client)
 
 void BlitScaled(uint8_t* dst, int rootW, int rootH,
                 const uint8_t* src, int srcStride, int srcW, int srcH,
-                int dstX, int dstY, int dstW, int dstH, bool alphaBlend)
+                int dstX, int dstY, int dstW, int dstH, bool alphaBlend,
+                int clipX, int clipY, int clipW, int clipH)
 {
     if (!dst || !src || srcStride <= 0 || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return;
     if (srcW > srcStride) srcW = srcStride;
 
-    const int x0 = std::max(0, dstX), y0 = std::max(0, dstY);
-    const int x1 = std::min(rootW, dstX + dstW), y1 = std::min(rootH, dstY + dstH);
+    int x0 = std::max(0, dstX), y0 = std::max(0, dstY);
+    int x1 = std::min(rootW, dstX + dstW), y1 = std::min(rootH, dstY + dstH);
+    if (clipW > 0 && clipH > 0) {
+        x0 = std::max(x0, clipX); y0 = std::max(y0, clipY);
+        x1 = std::min(x1, clipX + clipW); y1 = std::min(y1, clipY + clipH);
+    }
     if (x1 <= x0 || y1 <= y0) return;
 
     const int64_t stepX = (static_cast<int64_t>(srcW) << 16) / dstW;
