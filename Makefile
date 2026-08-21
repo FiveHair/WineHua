@@ -60,9 +60,13 @@ CNC_DDRAW_ARTIFACTS := \
 	$(BUILD_DIR)/cnc-ddraw/dist/ddraw.ini \
 	$(BUILD_DIR)/cnc-ddraw/dist/manifest.json
 CNC_DDRAW_STAMP := $(STAMPS)/cnc-ddraw-v7.1.0.0
+# Do not `find` the submodule: config/ contains "cnc-ddraw config.cpp" and
+# make splits that into a missing prerequisite named config/cnc-ddraw.
 CNC_DDRAW_SOURCE_INPUTS := $(SCRIPTS)/build_cnc_ddraw.sh \
-	$(shell find $(ROOT)/thirdparty/cnc-ddraw -maxdepth 2 -type f \
-		-not -path '*/.git/*' 2>/dev/null)
+	$(ROOT)/thirdparty/cnc-ddraw/Makefile \
+	$(ROOT)/thirdparty/cnc-ddraw/exports.def \
+	$(wildcard $(ROOT)/thirdparty/cnc-ddraw/src/*.c) \
+	$(wildcard $(ROOT)/thirdparty/cnc-ddraw/src/*/*.c)
 
 # 架构列表 (NATIVE_ARCH=all 时展开为两个)
 ifeq ($(NATIVE_ARCH),all)
