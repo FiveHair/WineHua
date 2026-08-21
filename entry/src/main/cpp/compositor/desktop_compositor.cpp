@@ -731,43 +731,122 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
         auto& composited = out;
         const auto rootCopied = TakeClock::now();
 
+        /*
+         * 快照阶段 (持锁): 把 blit 要读的全部源像素/元数据拷成私有副本,
+         * 随后立即解锁, blit 在锁外进行。动机 (实测): 旧实现持锁完成整帧
+         * CPU blit (1400x920 全屏合成 ~25ms), wl 事件循环线程的 commit 与
+         * 输入派发同抢 tmgr_ 锁 — commit 实测平均被堵 27ms (p95 ~90ms),
+         * 输入注入 NAPI→INJ 中位 8ms; 快照仅 ~1-3ms memcpy, 锁占用 ↓10 倍。
+         * 正确性: 快照后 wl 线程的新 commit 只影响下一帧 (dirty 重新置位),
+         * 与本帧 blit 无共享指针; layer.sub / ToplevelState 指针解锁后失效,
+         * 故所需字段全部拷入 BlitSource。
+         */
+        struct BlitSource {
+            const std::vector<uint8_t>* pixels = nullptr;  // 指向 snapPool_ 条目 (ZC 层为空)
+            int w = 0, h = 0;        // 源像素尺寸 (toplevel: Width/Height; sub: sl.w/h)
+            int x = 0, y = 0;        // toplevel 屏幕位置 (cst->X/Y)
+            uint32_t shmFormat = 1;  // 0=ARGB8888 1=XRGB8888
+            bool opaque = false;     // sub: 不透明标记
+            int vpDstW = 0, vpDstH = 0;           // sub: viewport 目标尺寸
+            int dmgX = 0, dmgY = 0, dmgW = 0, dmgH = 0;  // sub: damage 矩形
+            bool skip = false;       // 持锁时按原条件预算 (见下方赋值注释)
+        };
+        // 快照缓冲池: 跨帧复用容量, 避免每帧新建多 MB vector 的分配+缺页
+        // 开销 (实测每帧全新分配让快照段从预期 ~2ms 涨到 35ms)。本函数仅
+        // 渲染线程调用, 池无需加锁; 层数变化时 resize, 既有条目容量保留。
+        snapPool_.resize(layers.size());
+        std::vector<BlitSource> srcs(layers.size());
+        for (size_t li = 0; li < layers.size(); ++li) {
+            const auto& layer = layers[li];
+            if (layer.type == CompositorLayer::Type::Root) continue;
+            auto& bs = srcs[li];
+            // 跳过条件与原 blit 入口完全一致 (单一实现, 不复制规则):
+            // - ShouldSkipCpu: ZC 层 (GPU 自绘) / 不可见层
+            // - ShouldSkipFullscreenCascade: 只跳过被连带标 fullscreen 的旧窗口
+            //   (notepad/explorer 等, 显示模式切换时 winewayland 批量标记,
+            //   fsPriority 选了游戏但它仍在 z-order 高位, 普通 blit 会盖在游戏
+            //   上面), 非全屏弹窗/对话框保留; 与输入命中同源
+            bs.skip = layer.ShouldSkipCpu() ||
+                      ShouldSkipFullscreenCascade(layer, fullscreenId, hasFullscreen, tmgr_);
+            if (bs.skip) continue;
+            if (layer.type == CompositorLayer::Type::Toplevel) {
+                auto* cst = tmgr_.FindToplevelLocked(layer.toplevelId);
+                if (!cst) { bs.skip = true; continue; }
+                bs.w = cst->Width(); bs.h = cst->Height();
+                bs.x = cst->X(); bs.y = cst->Y();
+                bs.shmFormat = cst->ShmFormat();
+                // ZC 游戏整幅填黑不读像素, 省下全屏拷贝 (pixels 留空)
+                if (!(layer.toplevelId == fullscreenId && hasFullscreen && isZcGame)) {
+                    auto& buf = snapPool_[li];
+                    const auto& src = cst->Pixels();
+                    buf.assign(src.begin(), src.end());
+                    bs.pixels = &buf;
+                }
+            } else {  // Subsurface
+                const auto& sl = *layer.sub;
+                bs.w = sl.w; bs.h = sl.h;
+                bs.shmFormat = sl.shmFormat; bs.opaque = sl.opaque;
+                bs.vpDstW = sl.vpDstW; bs.vpDstH = sl.vpDstH;
+                bs.dmgX = sl.dmgX; bs.dmgY = sl.dmgY; bs.dmgW = sl.dmgW; bs.dmgH = sl.dmgH;
+                auto& buf = snapPool_[li];
+                if (sl.shmFormat == 0) {
+                    // ARGB: opaque 精确判定融合进拷贝 (单次内存遍历; wl 线程
+                    // 不再扫描 — 见 UpdateSubsurfaceLayerOnCommit 注释)。
+                    // 结果写回 layer (fullscreenContentCovered 等下一帧用新值)
+                    uint32_t nw = static_cast<uint32_t>(sl.pixels.size() / 4);
+                    buf.resize(sl.pixels.size());
+                    const uint32_t* s = reinterpret_cast<const uint32_t*>(sl.pixels.data());
+                    uint32_t* d = reinterpret_cast<uint32_t*>(buf.data());
+                    bool allOpaque = true;
+                    for (uint32_t i = 0; i < nw; ++i) {
+                        const uint32_t px = s[i];
+                        d[i] = px;
+                        if ((px & 0xFF000000u) != 0xFF000000u) allOpaque = false;
+                    }
+                    bs.opaque = allOpaque;
+                    const_cast<SubsurfaceLayer*>(layer.sub)->opaque = allOpaque;
+                } else {
+                    buf.assign(sl.pixels.begin(), sl.pixels.end());
+                }
+                bs.pixels = &buf;
+            }
+        }
+        rst->ClearDirty();  // 快照已取走本帧全部内容; 解锁后的新 commit 会重新置位
+        const size_t nZOrder = tmgr_.toplevelZOrder().size();
+        const size_t nSubLayers = subsurfaceLayers_.size();
+        const auto snapshotDone = TakeClock::now();
+        lk.unlock();  // ── 锁到此为止, 以下 blit 不持锁 ──
+
         // 合成单循环 (阶段 1): 按 zIndex 升序遍历 Layer 列表 — 等价旧
         // toplevel 循环 + subsurface 循环的两段顺序 (Layer zIndex 分配保证)。
         // 全屏独占/跳过特判原样保留 (等价形式), 行为不变。
-        auto blitToplevel = [&](const CompositorLayer& layer) {
-            if (layer.ShouldSkipCpu()) return;
-            // 跳过非主全屏的 toplevel: SHM 游戏只跳过被连带标 fullscreen 的
-            // 旧窗口 (notepad/explorer 等, 显示模式切换时 winewayland 批量
-            // 标记, fsPriority 选了游戏但它仍在 z-order 高位, 普通 blit 会
-            // 盖在游戏上面), 非全屏弹窗/对话框保留。规则单一实现:
-            // ShouldSkipFullscreenCascade (与输入命中同源)
-            if (ShouldSkipFullscreenCascade(layer, fullscreenId, hasFullscreen, tmgr_)) return;
-            auto* cst = tmgr_.FindToplevelLocked(layer.toplevelId);
-            if (!cst) return;
-            const auto& childPx = cst->Pixels();
-            int childW = cst->Width();
-            int childH = cst->Height();
-            int posX = cst->X();
-            int posY = cst->Y();
+        // 注: 本 lambda 在锁外执行, 只读 BlitSource 快照, 不碰 tmgr_/layer.sub。
+        auto blitToplevel = [&](const CompositorLayer& layer, const BlitSource& bs) {
+            if (bs.skip) return;
+            if (layer.toplevelId == fullscreenId && hasFullscreen && isZcGame) {
+                // ZC 游戏: 整幅填黑, 跳过 SHM BlitScaled — 其 SHM 内容是
+                // explorer 桌面而非游戏画面, 实际画面由 GL ZC 层渲染
+                // (egl_renderer zeroCopyFullscreen_ 路径)。
+                // 必须填不透明黑 0xFF000000, 不能图省事 memset 0:
+                // 渲染 context 不开 GL_BLEND 时 alpha=0 恰好无害, 但那是
+                // 隐式依赖 — 一旦以后给桌面纹理开混合, 黑边就会变透明
+                std::fill_n(reinterpret_cast<uint32_t*>(composited.data()),
+                            composited.size() / 4, 0xFF000000u);
+                return;
+            }
+            const auto& childPx = *bs.pixels;
+            int childW = bs.w;
+            int childH = bs.h;
+            int posX = bs.x;
+            int posY = bs.y;
             if (layer.toplevelId == fullscreenId && hasFullscreen) {
-                if (isZcGame) {
-                    // ZC 游戏: 整幅填黑, 跳过 SHM BlitScaled — 其 SHM 内容是
-                    // explorer 桌面而非游戏画面, 实际画面由 GL ZC 层渲染
-                    // (egl_renderer zeroCopyFullscreen_ 路径)。
-                    // 必须填不透明黑 0xFF000000, 不能图省事 memset 0:
-                    // 渲染 context 不开 GL_BLEND 时 alpha=0 恰好无害, 但那是
-                    // 隐式依赖 — 一旦以后给桌面纹理开混合, 黑边就会变透明
-                    std::fill_n(reinterpret_cast<uint32_t*>(composited.data()),
-                                composited.size() / 4, 0xFF000000u);
-                    return;
-                }
                 auto fillBlackRect = [&](int fx, int fy, int fw, int fh) {
                     if (fw <= 0 || fh <= 0) return;
                     for (int row = fy; row < fy + fh; ++row)
                         std::fill_n(reinterpret_cast<uint32_t*>(composited.data()) +
                                     static_cast<size_t>(row) * rootW + fx, fw, 0xFF000000u);
                 };
-                const bool contentOpaque = (cst->ShmFormat() != 0) || fullscreenContentCovered;
+                const bool contentOpaque = (bs.shmFormat != 0) || fullscreenContentCovered;
                 if (contentOpaque) {
                     fillBlackRect(0, 0, rootW, transform.offY);
                     fillBlackRect(0, transform.offY + transform.dstH, rootW,
@@ -783,7 +862,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                     BlitScaled(composited.data(), rootW, rootH,
                                childPx.data(), childW, childW, childH,
                                transform.offX, transform.offY, transform.dstW, transform.dstH,
-                               cst->ShmFormat() == 0);
+                               bs.shmFormat == 0);
                 }
                 return;
             }
@@ -796,7 +875,7 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             if (dstX + copyW > rootW) copyW = rootW - dstX;
             if (dstY + copyH > rootH) copyH = rootH - dstY;
             if (copyW <= 0 || copyH <= 0) return;
-            const bool childArgb = (cst->ShmFormat() == 0);
+            const bool childArgb = (bs.shmFormat == 0);
             for (int y = 0; y < copyH; y++) {
                 auto* srcRow = &childPx[(srcY + y) * childW * 4];
                 auto* dstRow = &composited[(dstY + y) * rootW * 4];
@@ -805,56 +884,50 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                               childArgb, PixelBlend::SrcOnly);
             }
         };
-        auto blitSubsurface = [&](const CompositorLayer& layer) {
-            if (layer.ShouldSkipCpu()) return;
+        auto blitSubsurface = [&](const CompositorLayer& layer, const BlitSource& bs) {
+            if (bs.skip) return;
             if (layer.w <= 0 || layer.h <= 0) return;
-            // 只跳过"父 toplevel 也连带 fullscreen"的 subsurface (显示模式
-            // 切换时被 winewayland 批量标记的旧窗口残留菜单, 防盖在游戏上);
-            // 非全屏普通窗口 (如游戏上方新弹出的对话框) 的 subsurface 正常
-            // 渲染。规则单一实现: ShouldSkipFullscreenCascade (与输入命中同源)
-            if (ShouldSkipFullscreenCascade(layer, fullscreenId, hasFullscreen, tmgr_)) return;
-            const auto& sl = *layer.sub;
             int layerX = layer.x;
             int layerY = layer.y;
-            size_t expectSz = (size_t)sl.w * sl.h * 4;
-            if (sl.pixels.size() < expectSz) {
+            size_t expectSz = (size_t)bs.w * bs.h * 4;
+            if (bs.pixels->size() < expectSz) {
                 OH_LOG_WARN(LOG_APP, "[MW-SUBSURF] layer size mismatch: w=%{public}d h=%{public}d px=%{public}zu expected=%{public}zu",
-                            sl.w, sl.h, sl.pixels.size(), expectSz);
+                            bs.w, bs.h, bs.pixels->size(), expectSz);
                 return;
             }
             if (hasFullscreen && layer.toplevelId == fullscreenId) {
-                const int layerDispW = sl.vpDstW > 0 ? std::min(sl.vpDstW, sl.w) : sl.w;
-                const int layerDispH = sl.vpDstH > 0 ? std::min(sl.vpDstH, sl.h) : sl.h;
+                const int layerDispW = bs.vpDstW > 0 ? std::min(bs.vpDstW, bs.w) : bs.w;
+                const int layerDispH = bs.vpDstH > 0 ? std::min(bs.vpDstH, bs.h) : bs.h;
                 // 与输入 FindInputTargetAt 全屏分支同几何 (FitMapLayerRect 唯一实现)
                 int layerDstX, layerDstY, layerDstW, layerDstH;
                 FitMapLayerRect(transform, layerX - fullscreenX, layerY - fullscreenY,
                                 layerDispW, layerDispH,
                                 layerDstX, layerDstY, layerDstW, layerDstH);
                 BlitScaled(composited.data(), rootW, rootH,
-                           sl.pixels.data(), sl.w, layerDispW, layerDispH,
+                           bs.pixels->data(), bs.w, layerDispW, layerDispH,
                            layerDstX, layerDstY, layerDstW, layerDstH,
-                           sl.shmFormat == 0 && !sl.opaque);
+                           bs.shmFormat == 0 && !bs.opaque);
                 return;
             }
             int srcX = (layerX < 0) ? -layerX : 0;
             int srcY = (layerY < 0) ? -layerY : 0;
             int dstX = (layerX > 0) ? layerX : 0;
             int dstY = (layerY > 0) ? layerY : 0;
-            int copyW = sl.w - srcX;
-            int copyH = sl.h - srcY;
+            int copyW = bs.w - srcX;
+            int copyH = bs.h - srcY;
             if (dstX + copyW > rootW) copyW = rootW - dstX;
             if (dstY + copyH > rootH) copyH = rootH - dstY;
             if (copyW <= 0 || copyH <= 0) return;
             int renderW = copyW, renderH = copyH;
             int renderSrcX = srcX, renderSrcY = srcY;
             int renderDstX = dstX, renderDstY = dstY;
-            if (sl.vpDstW > 0 && sl.vpDstW < copyW) renderW = sl.vpDstW;
-            if (sl.vpDstH > 0 && sl.vpDstH < copyH) renderH = sl.vpDstH;
-            if (sl.dmgW > 0 && sl.dmgH > 0) {
-                const int damageLeft = std::max(renderSrcX, sl.dmgX);
-                const int damageTop = std::max(renderSrcY, sl.dmgY);
-                const int damageRight = std::min(renderSrcX + renderW, sl.dmgX + sl.dmgW);
-                const int damageBottom = std::min(renderSrcY + renderH, sl.dmgY + sl.dmgH);
+            if (bs.vpDstW > 0 && bs.vpDstW < copyW) renderW = bs.vpDstW;
+            if (bs.vpDstH > 0 && bs.vpDstH < copyH) renderH = bs.vpDstH;
+            if (bs.dmgW > 0 && bs.dmgH > 0) {
+                const int damageLeft = std::max(renderSrcX, bs.dmgX);
+                const int damageTop = std::max(renderSrcY, bs.dmgY);
+                const int damageRight = std::min(renderSrcX + renderW, bs.dmgX + bs.dmgW);
+                const int damageBottom = std::min(renderSrcY + renderH, bs.dmgY + bs.dmgH);
                 if (damageRight <= damageLeft || damageBottom <= damageTop) return;
                 renderDstX += damageLeft - renderSrcX;
                 renderDstY += damageTop - renderSrcY;
@@ -863,47 +936,46 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                 renderW = damageRight - damageLeft;
                 renderH = damageBottom - damageTop;
             }
-            const bool needsAlphaBlend = sl.shmFormat == 0 && !sl.opaque;
+            const bool needsAlphaBlend = bs.shmFormat == 0 && !bs.opaque;
             for (int y = 0; y < renderH; y++) {
-                const uint8_t* srcRow = sl.pixels.data() +
-                    ((renderSrcY + y) * sl.w + renderSrcX) * 4;
+                const uint8_t* srcRow = bs.pixels->data() +
+                    ((renderSrcY + y) * bs.w + renderSrcX) * 4;
                 uint8_t* dstRow = composited.data() +
                     ((renderDstY + y) * rootW + renderDstX) * 4;
                 BlitClipAlpha(dstRow, srcRow, renderW, needsAlphaBlend, PixelBlend::Normal);
             }
         };
-        for (const auto& layer : layers) {
+        for (size_t li = 0; li < layers.size(); ++li) {
+            const auto& layer = layers[li];
             switch (layer.type) {
                 case CompositorLayer::Type::Root:
                     break;  // 基底已在 rebuildBase 时拷贝
                 case CompositorLayer::Type::Toplevel:
-                    blitToplevel(layer);
+                    blitToplevel(layer, srcs[li]);
                     break;
                 case CompositorLayer::Type::Subsurface:
-                    blitSubsurface(layer);
+                    blitSubsurface(layer, srcs[li]);
                     break;
             }
         }
         const auto childrenComposited = TakeClock::now();
-        // 旧双循环有两个分段时间点; 单循环后合并为一个
-        const auto subsurfacesComposited = childrenComposited;
 
         const auto outputMoved = TakeClock::now();
         auto elapsedUs = [](TakeClock::time_point begin, TakeClock::time_point end) {
             return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                 end - begin).count());
         };
+        // 分段语义 (快照改造后): lockWait / 基底拷贝 / 快照(持锁) / blit(锁外) / 输出 / 总计
         breakdown.Add(elapsedUs(takeStarted, lockAcquired),
                       elapsedUs(lockAcquired, rootCopied),
-                      elapsedUs(rootCopied, childrenComposited),
-                      elapsedUs(childrenComposited, subsurfacesComposited),
-                      elapsedUs(subsurfacesComposited, outputMoved),
+                      elapsedUs(rootCopied, snapshotDone),
+                      elapsedUs(snapshotDone, childrenComposited),
+                      elapsedUs(childrenComposited, outputMoved),
                       elapsedUs(takeStarted, outputMoved));
         w = rootW;
         h = rootH;
-        rst->ClearDirty();
         OH_LOG_INFO(LOG_APP, "[MW-TAKE] root #%{public}u %{public}dx%{public}d children=%{public}zu subsurfaces=%{public}zu",
-                    id, w, h, tmgr_.toplevelZOrder().size(), subsurfaceLayers_.size());
+                    id, w, h, nZOrder, nSubLayers);
         return true;
     }
 

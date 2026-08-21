@@ -215,4 +215,7 @@ private:
     uint64_t desktopOutputRootFrameSerial_ = 0;
     bool desktopOutputInitialized_ = false;
     uint64_t desktopRootFrameSerial_ = 0;
+    // TakeToplevelFrame 快照缓冲池 (仅渲染线程访问): 跨帧复用容量,
+    // 避免每帧新建多 MB vector 的分配+缺页开销 — 见 cpp 快照阶段注释
+    std::vector<std::vector<uint8_t>> snapPool_;
 };
