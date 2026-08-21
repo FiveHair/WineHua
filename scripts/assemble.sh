@@ -344,6 +344,13 @@ assemble_pad() {
     i686-w64-mingw32-gcc -O2 -s -mwindows -o \
         "$smoke_dir/x86/winehua_d3d8_smoke.exe" "$d3d8_source" \
         -luser32 -lgdi32
+    local ddraw_source="$WINEHUA/smoke/winehua_ddraw_smoke.c"
+    x86_64-w64-mingw32-gcc -O2 -s -mwindows -o \
+        "$smoke_dir/x64/winehua_ddraw_smoke.exe" "$ddraw_source" \
+        -luser32 -lgdi32
+    i686-w64-mingw32-gcc -O2 -s -mwindows -o \
+        "$smoke_dir/x86/winehua_ddraw_smoke.exe" "$ddraw_source" \
+        -luser32 -lgdi32
     # This deliberately links Wine's own PE Vulkan import library.  The
     # requirements probe must exercise the same vulkan-1 -> winevulkan ->
     # x86_64 Loader -> Venus transport as a Windows DXVK process, without
@@ -418,6 +425,23 @@ assemble_pad() {
     cp "$vkd3d_root/manifest.json" "$wine_data/vkd3d/manifest.json"
     cp "$vkd3d_root/x64/winehua-d3d12-smoke.exe" \
         "$smoke_dir/x64/winehua_d3d12_smoke.exe"
+    # cnc-ddraw DirectDraw compatibility overlay.  Same runtime-owned overlay
+    # pattern as DXVK: activated per game via WINEHUA_DDRAW_BACKEND=cnc, which
+    # prepends these directories to WINEDLLDIR and sets ddraw=n.
+    local cnc_root="$BUILD_DIR/cnc-ddraw/dist"
+    [ -f "$cnc_root/x86/ddraw.dll" ] || err "cnc-ddraw x86 ddraw.dll missing: $cnc_root/x86/ddraw.dll (run: make cnc-ddraw)"
+    [ -f "$cnc_root/ddraw.ini" ] || err "cnc-ddraw ddraw.ini missing: $cnc_root/ddraw.ini"
+    [ -f "$cnc_root/manifest.json" ] || err "cnc-ddraw manifest missing: $cnc_root/manifest.json"
+    mkdir -p "$wine_data/cnc-ddraw/x86"
+    cp "$cnc_root/x86/ddraw.dll" "$wine_data/cnc-ddraw/x86/ddraw.dll"
+    [ -f "$cnc_root/x86/ddraw.ini" ] && cp "$cnc_root/x86/ddraw.ini" "$wine_data/cnc-ddraw/x86/ddraw.ini"
+    if [ -f "$cnc_root/x64/ddraw.dll" ]; then
+        mkdir -p "$wine_data/cnc-ddraw/x64"
+        cp "$cnc_root/x64/ddraw.dll" "$wine_data/cnc-ddraw/x64/ddraw.dll"
+        [ -f "$cnc_root/x64/ddraw.ini" ] && cp "$cnc_root/x64/ddraw.ini" "$wine_data/cnc-ddraw/x64/ddraw.ini"
+    fi
+    cp "$cnc_root/manifest.json" "$wine_data/cnc-ddraw/manifest.json"
+    cp "$cnc_root/ddraw.ini" "$wine_data/cnc-ddraw/ddraw.ini"
     # The DXVK binaries are runtime-owned overlays.  Do not place them next
     # to the smoke executables: that would make the test layout look like a
     # game distribution and would force real games to carry WineHua-specific
@@ -435,8 +459,8 @@ assemble_pad() {
         cp "$smoke64" "$smoke_dir/x64/$smoke_program.exe"
         cp "$smoke32" "$smoke_dir/x86/$smoke_program.exe"
     done
-    local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha d3d864_sha cube64_sha diagnostics64_sha driver64_sha requirements64_sha
-    local audio32_sha graphics32_sha vulkan32_sha d3d1132_sha d3d832_sha cube32_sha diagnostics32_sha driver32_sha requirements32_sha
+    local audio64_sha graphics64_sha vulkan64_sha d3d1164_sha d3d864_sha ddraw64_sha cube64_sha diagnostics64_sha driver64_sha requirements64_sha
+    local audio32_sha graphics32_sha vulkan32_sha d3d1132_sha d3d832_sha ddraw32_sha cube32_sha diagnostics32_sha driver32_sha requirements32_sha
     local storage_write_sha storage_read_sha image_fetch_sha combined_sample_sha separated_sample_sha
     local vkd3d64_d3d12_sha vkd3d64_smoke_sha
     audio64_sha="$(sha256sum "$smoke_dir/x64/winehua_audio_smoke.exe" | awk '{print $1}')"
@@ -444,6 +468,7 @@ assemble_pad() {
     vulkan64_sha="$(sha256sum "$smoke_dir/x64/winehua_vulkan_smoke.exe" | awk '{print $1}')"
     d3d1164_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d11_smoke.exe" | awk '{print $1}')"
     d3d864_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d8_smoke.exe" | awk '{print $1}')"
+    ddraw64_sha="$(sha256sum "$smoke_dir/x64/winehua_ddraw_smoke.exe" | awk '{print $1}')"
     cube64_sha="$(sha256sum "$smoke_dir/x64/winehua_d3d_switch_cube.exe" | awk '{print $1}')"
     diagnostics64_sha="$(sha256sum "$smoke_dir/x64/winehua_gpu_diagnostics.exe" | awk '{print $1}')"
     driver64_sha="$(sha256sum "$smoke_dir/x64/winehua_win32_driver.exe" | awk '{print $1}')"
@@ -453,6 +478,7 @@ assemble_pad() {
     vulkan32_sha="$(sha256sum "$smoke_dir/x86/winehua_vulkan_smoke.exe" | awk '{print $1}')"
     d3d1132_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d11_smoke.exe" | awk '{print $1}')"
     d3d832_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d8_smoke.exe" | awk '{print $1}')"
+    ddraw32_sha="$(sha256sum "$smoke_dir/x86/winehua_ddraw_smoke.exe" | awk '{print $1}')"
     cube32_sha="$(sha256sum "$smoke_dir/x86/winehua_d3d_switch_cube.exe" | awk '{print $1}')"
     diagnostics32_sha="$(sha256sum "$smoke_dir/x86/winehua_gpu_diagnostics.exe" | awk '{print $1}')"
     driver32_sha="$(sha256sum "$smoke_dir/x86/winehua_win32_driver.exe" | awk '{print $1}')"
@@ -464,7 +490,7 @@ assemble_pad() {
     image_fetch_sha="$(sha256sum "$smoke_dir/assets/venus_image_fetch.spv" | awk '{print $1}')"
     combined_sample_sha="$(sha256sum "$smoke_dir/assets/venus_combined_sample.spv" | awk '{print $1}')"
     separated_sample_sha="$(sha256sum "$smoke_dir/assets/venus_separated_sample.spv" | awk '{print $1}')"
-    local smoke_suite_version="phase2-vulkan-dxvk-v10-vkd3d-default"
+    local smoke_suite_version="phase2-vulkan-dxvk-v10-vkd3d-default-ddraw"
     local dxvk_commit dxvk_modern_commit mesa_commit virglrenderer_commit
     local guest_venus_icd_sha host_virglrenderer_sha venus_runtime_id
     dxvk_commit="$(git -c safe.directory="$DXVK_SRC" -C "$DXVK_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -529,7 +555,7 @@ EOF
 {
   "schemaVersion": 1,
   "suiteVersion": "$smoke_suite_version",
-  "enabledSuites": ["core", "audio", "opengl", "wine-vulkan", "d3d8", "d3d9", "dxvk", "gpu-diagnostics", "dxvk26-requirements", "dxvk-modern-baseline"],
+  "enabledSuites": ["core", "audio", "opengl", "wine-vulkan", "d3d8", "d3d9", "ddraw", "dxvk", "gpu-diagnostics", "dxvk26-requirements", "dxvk-modern-baseline"],
   "managedRoot": "C:\\\\smoke",
   "files": {
     "x64/winehua_audio_smoke.exe": "$audio64_sha",
@@ -537,6 +563,7 @@ EOF
     "x64/winehua_vulkan_smoke.exe": "$vulkan64_sha",
     "x64/winehua_d3d11_smoke.exe": "$d3d1164_sha",
     "x64/winehua_d3d8_smoke.exe": "$d3d864_sha",
+    "x64/winehua_ddraw_smoke.exe": "$ddraw64_sha",
     "x64/winehua_d3d_switch_cube.exe": "$cube64_sha",
     "x64/winehua_gpu_diagnostics.exe": "$diagnostics64_sha",
     "x64/winehua_win32_driver.exe": "$driver64_sha",
@@ -549,6 +576,7 @@ EOF
     "x86/winehua_vulkan_smoke.exe": "$vulkan32_sha",
     "x86/winehua_d3d11_smoke.exe": "$d3d1132_sha",
     "x86/winehua_d3d8_smoke.exe": "$d3d832_sha",
+    "x86/winehua_ddraw_smoke.exe": "$ddraw32_sha",
     "x86/winehua_d3d_switch_cube.exe": "$cube32_sha",
     "x86/winehua_gpu_diagnostics.exe": "$diagnostics32_sha",
     "x86/winehua_win32_driver.exe": "$driver32_sha",

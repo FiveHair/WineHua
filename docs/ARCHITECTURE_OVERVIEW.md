@@ -262,6 +262,7 @@ Windows PE 程序 ──► ntdll.dll (PE 侧, x86_64)
 | 本文 | 总览 + 进程拓扑 + 四域数据流 + 模块索引 | 首次接触项目 |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Wine 内部 PE/Unix 分层、compositor 模块结构、信号/IO 细节 | 改 Wine 或 compositor 前 |
 | [OPENGL_VIRGL_DESIGN.md](OPENGL_VIRGL_DESIGN.md) | VirGL/OpenGL 链路设计 + `WINEHUA_*` 环境变量契约 | 改图形环境变量或 GL 链路 |
+| [CNC_DDRAW.md](CNC_DDRAW.md) | cnc-ddraw DirectDraw PE overlay（`WINEHUA_DDRAW_BACKEND=cnc`） | 移植/启用老 DirectDraw 游戏 |
 | [PHASE2_DXVK_STATUS_MEMO.md](PHASE2_DXVK_STATUS_MEMO.md) | DXVK/Venus 调查活文档（handoff） | 改 DXVK/Venus/present 前必读 |
 | [AUDIO_ARCHITECTURE.md](AUDIO_ARCHITECTURE.md) | 音频架构（控制面/数据面、混音、边界） | 改音频链路前 |
 | [DXVK_MODERN_UPGRADE_READINESS.md](DXVK_MODERN_UPGRADE_READINESS.md) | DXVK 2.x 升级能力矩阵 | 升级 DXVK 前 |

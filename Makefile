@@ -55,6 +55,14 @@ VKD3D_PROTON_ARTIFACTS := \
 VKD3D_PROTON_STAMP := $(STAMPS)/vkd3d-proton-limited-500k
 VKD3D_PROTON_SOURCE_INPUTS := $(shell find $(ROOT)/patches/vkd3d-proton -type f 2>/dev/null; \
 	find $(ROOT)/thirdparty/vkd3d-proton -maxdepth 2 -type f 2>/dev/null)
+CNC_DDRAW_ARTIFACTS := \
+	$(BUILD_DIR)/cnc-ddraw/dist/x86/ddraw.dll \
+	$(BUILD_DIR)/cnc-ddraw/dist/ddraw.ini \
+	$(BUILD_DIR)/cnc-ddraw/dist/manifest.json
+CNC_DDRAW_STAMP := $(STAMPS)/cnc-ddraw-v7.1.0.0
+CNC_DDRAW_SOURCE_INPUTS := $(SCRIPTS)/build_cnc_ddraw.sh \
+	$(shell find $(ROOT)/thirdparty/cnc-ddraw -maxdepth 2 -type f \
+		-not -path '*/.git/*' 2>/dev/null)
 
 # 架构列表 (NATIVE_ARCH=all 时展开为两个)
 ifeq ($(NATIVE_ARCH),all)
@@ -128,6 +136,20 @@ $(VKD3D_PROTON_STAMP): $(SCRIPTS)/build_vkd3d_proton.sh $(VKD3D_PROTON_SOURCE_IN
 
 $(VKD3D_PROTON_ARTIFACTS): $(VKD3D_PROTON_STAMP)
 	@test -s "$@" || { echo "ERROR: VKD3D-Proton artifact missing after build: $@" >&2; exit 1; }
+
+# ============================================================
+# cnc-ddraw — DirectDraw PE overlay (x86 Win32; classic DDraw games)
+# ============================================================
+.PHONY: cnc-ddraw
+cnc-ddraw: $(CNC_DDRAW_STAMP)
+
+$(CNC_DDRAW_STAMP): $(CNC_DDRAW_SOURCE_INPUTS) | $(STAMPS)
+	@echo "=== cnc-ddraw v7.1.0.0 ==="
+	bash $(SCRIPTS)/build_cnc_ddraw.sh
+	touch $@
+
+$(CNC_DDRAW_ARTIFACTS): $(CNC_DDRAW_STAMP)
+	@test -s "$@" || { echo "ERROR: cnc-ddraw artifact missing after build: $@" >&2; exit 1; }
 
 # ============================================================
 # 默认目标
@@ -375,8 +397,9 @@ define assemble_rule
 assemble-$(1): $$(STAMPS)/$(1)/assemble
 
 $$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFACTS) $(DXVK_MODERN_ARTIFACTS) \
-	$(VKD3D_PROTON_ARTIFACTS) \
+	$(VKD3D_PROTON_ARTIFACTS) $(CNC_DDRAW_ARTIFACTS) \
 	$(ROOT)/smoke/winehua_d3d8_smoke.c \
+	$(ROOT)/smoke/winehua_ddraw_smoke.c \
 	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
 	$(ROOT)/smoke/winehua_gpu_diagnostics.c \
 	$(ROOT)/smoke/winehua_dxvk26_requirements.c \

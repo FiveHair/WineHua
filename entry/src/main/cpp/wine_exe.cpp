@@ -247,6 +247,9 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
      * must be able to select their own log directory and diagnostics. */
     AppendD3dBackendEnv(envStrs, options.d3dBackend, options.dxvkBackend, binDir);
     for (const std::string& line : options.environment) UpsertEnvLine(envStrs, line);
+    /* Per-run WINEHUA_DDRAW_BACKEND=cnc is merged above; the overlay rewrite
+     * must observe it, so this runs after the options.environment merge. */
+    AppendDdrawBackendEnv(envStrs);
     UpsertEnvLine(envStrs, "WINEHUA_D3D_BACKEND=" + options.d3dBackend);
     UpsertEnvLine(envStrs, "WINEHUA_PRESENT_BACKEND=" + options.presentBackend);
     UpsertEnvLine(envStrs, std::string("WINEHUA_AUTOMATION=") +

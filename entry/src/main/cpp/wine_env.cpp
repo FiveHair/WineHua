@@ -7,6 +7,7 @@
 
 #include <unistd.h>
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -166,6 +167,77 @@ void UpsertEnvLine(std::vector<std::string>& env, const std::string& line)
                existing.size() > key.size() && existing[key.size()] == '=';
     }), env.end());
     env.push_back(line);
+}
+
+void PrependEnvValue(std::vector<std::string>& env, const std::string& key,
+                     const std::string& value, const std::string& sep)
+{
+    for (auto& line : env) {
+        if (line.compare(0, key.size(), key) == 0 &&
+            line.size() > key.size() && line[key.size()] == '=') {
+            const std::string old_value = line.substr(key.size() + 1);
+            if (old_value.find(value) == std::string::npos)
+                line = key + "=" + value + sep + old_value;
+            return;
+        }
+    }
+    env.push_back(key + "=" + value);
+}
+
+/* DirectDraw compatibility overlay: with WINEHUA_DDRAW_BACKEND=cnc (from the
+ * per-run environment or the App process environment for desktop sessions),
+ * cnc-ddraw's ddraw.dll replaces Wine's builtin ddraw in this process.  This
+ * uses the generic WINEDLLDIR/WINEDLLOVERRIDES mechanism, not the
+ * DXVK-specific ntdll hook (which only covers d3d11/dxgi/d3d12).  Must be
+ * called after any per-run environment lines have been merged into env. */
+void AppendDdrawBackendEnv(std::vector<std::string>& env)
+{
+    std::string backend;
+    for (const auto& line : env) {
+        if (line.rfind("WINEHUA_DDRAW_BACKEND=", 0) == 0) {
+            backend = line.substr(strlen("WINEHUA_DDRAW_BACKEND="));
+        }
+    }
+    if (backend.empty()) {
+        const char* fromHost = getenv("WINEHUA_DDRAW_BACKEND");
+        if (fromHost) backend = fromHost;
+    }
+    if (backend != "cnc") return;
+
+    const std::string cncRoot = std::string(WINE_RUNTIME_ROOT) + "/cnc-ddraw";
+    const std::string cnc86 = cncRoot + "/x86";
+    const std::string cnc64 = cncRoot + "/x64";
+
+    UpsertEnvLine(env, "WINEHUA_DDRAW_BACKEND=cnc");
+    /* cnc-ddraw reads this before falling back to ddraw.ini next to the DLL. */
+    UpsertEnvLine(env, "CNC_DDRAW_CONFIG_FILE=" + cncRoot + "/ddraw.ini");
+    PrependEnvValue(env, "WINEDLLOVERRIDES", "ddraw=n", ";");
+    PrependEnvValue(env, "WINEDLLPATH", cnc86 + ":" + cnc64, ":");
+
+    /* Shift existing WINEDLLDIR<n> entries up by two slots and put the
+     * cnc-ddraw overlay first.  ntdll stops scanning at the first missing
+     * index, so the renumbered sequence must stay contiguous; a nonexistent
+     * directory only misses its own slot without terminating the scan. */
+    std::vector<std::string> dirs;
+    for (unsigned int i = 0; ; ++i) {
+        const std::string prefix = "WINEDLLDIR" + std::to_string(i) + "=";
+        auto it = std::find_if(env.begin(), env.end(), [&](const std::string& line) {
+            return line.rfind(prefix, 0) == 0;
+        });
+        if (it == env.end()) break;
+        dirs.push_back(it->substr(prefix.size()));
+    }
+    env.erase(std::remove_if(env.begin(), env.end(), [](const std::string& line) {
+        if (line.rfind("WINEDLLDIR", 0) != 0) return false;
+        const char* p = line.c_str() + 10;
+        if (!*p || !isdigit((unsigned char)*p)) return false;
+        while (isdigit((unsigned char)*p)) ++p;
+        return *p == '=';
+    }), env.end());
+    UpsertEnvLine(env, "WINEDLLDIR0=" + cnc86);
+    UpsertEnvLine(env, "WINEDLLDIR1=" + cnc64);
+    for (size_t i = 0; i < dirs.size(); ++i)
+        UpsertEnvLine(env, "WINEDLLDIR" + std::to_string(i + 2) + "=" + dirs[i]);
 }
 
 void AppendD3dBackendEnv(std::vector<std::string>& env,

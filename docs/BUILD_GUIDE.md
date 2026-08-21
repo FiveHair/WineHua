@@ -55,12 +55,14 @@ make wine                          # Wine + wineserver
 make box64                         # Box64 ARM64 翻译器 (仅 arm64)
 make native                        # 各架构原生 compositor 依赖
 make dxvk                          # DXVK Legacy fork (x64 + x86 DLL)
+make vkd3d-proton                  # VKD3D-Proton 2.6 limited-500K (x64 d3d12)
+make cnc-ddraw                     # cnc-ddraw DirectDraw overlay (x86 ddraw.dll)
 make host-vulkan                   # Host Vulkan exact replay 诊断模块
 make assemble                      # 组装布局 (wine-data.zip)
 make hap                           # HAP 打包 + 签名
 ```
 
-> `assemble` 依赖 `dxvk`（4 个 DLL 硬校验）和 `host-vulkan`（manifest + replay 模块校验）。改 DXVK 源码后需 `make dxvk` 再 `make hap`。
+> `assemble` 依赖 `dxvk`（4 个 DLL 硬校验）、`vkd3d-proton`、`cnc-ddraw`（x86 `ddraw.dll`）和 `host-vulkan`。改 DXVK / cnc-ddraw 源码后需对应 `make dxvk` / `make cnc-ddraw` 再 `make hap`。
 
 ### 增量构建
 

@@ -78,3 +78,6 @@
 [submodule "thirdparty/gstreamer"]
 	path = thirdparty/gstreamer
 	url = https://gitlab.freedesktop.org/gstreamer/gstreamer.git
+[submodule "thirdparty/cnc-ddraw"]
+	path = thirdparty/cnc-ddraw
+	url = https://github.com/FunkyFr3sh/cnc-ddraw.git

@@ -91,8 +91,15 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
                          const std::string& dxvkBackend,
                          const std::string& binDir);
 
+// DirectDraw compatibility overlay (cnc-ddraw). Activated by
+// WINEHUA_DDRAW_BACKEND=cnc in the already-merged per-run environment or in
+// the App process environment (desktop sessions). See wine_env.cpp.
+void AppendDdrawBackendEnv(std::vector<std::string>& env);
+
 // -- 环境变量辅助 --
 void UpsertEnvLine(std::vector<std::string>& env, const std::string& line);
+void PrependEnvValue(std::vector<std::string>& env, const std::string& key,
+                     const std::string& value, const std::string& sep);
 
 // -- Audio bootstrap --
 int CreateAudioBootstrapFd(const std::string& runtimeDir);

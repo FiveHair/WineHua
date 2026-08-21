@@ -298,6 +298,7 @@ static bool UsesVulkanD3dBackend(const std::string& backend)
            backend == "vkd3d_limited_500k";
 }
 
+
 static bool UsesDxvkOverlay(const std::string& backend)
 {
     return backend.rfind("dxvk_", 0) == 0 ||
@@ -409,6 +410,7 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
     std::vector<std::string> env;
     gb.AppendWineEnv(env);
     AppendD3dBackendEnv(env, params.d3dBackend, params.dxvkBackend, params.winehuaBin);
+    AppendDdrawBackendEnv(env);
     AppendStableDesktopDxvkEnv(env, params);
     /* The broker now receives the finalized environment through the
      * serialized __env entryParams channel. Keep this helper side-effect
@@ -722,6 +724,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
             for (const auto& line : freshGraphics) UpsertEnvLine(explorerEnv, line);
         }
         AppendD3dBackendEnv(explorerEnv, p->d3dBackend, p->dxvkBackend, p->winehuaBin);
+        AppendDdrawBackendEnv(explorerEnv);
         AppendStableDesktopDxvkEnv(explorerEnv, *p);
 
 #ifdef __aarch64__
@@ -785,6 +788,7 @@ void LaunchThreadFunc(LaunchParams* p) {
     p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin,
                                audioBootstrapFd, p->homeDir, p->prefixDir, p->wineLang);
     AppendD3dBackendEnv(p->envStrs, p->d3dBackend, p->dxvkBackend, p->winehuaBin);
+    AppendDdrawBackendEnv(p->envStrs);
     const std::string serializedEnv = SerializeEnvToEntryParams(p->envStrs);
 
     mkdir(p->prefixDir.c_str(), 0755);
