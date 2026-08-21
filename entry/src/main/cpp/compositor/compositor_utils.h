@@ -6,10 +6,13 @@
 
 // 保比例适配 (letterbox) 几何已迁至 geometry.h (FitRect / ComputeFitRect)。
 
-// 双线性缩放 blit (16.16 固定点)
+// 双线性缩放 blit (16.16 固定点)。clipX/Y/W/H: 可选目标裁剪矩形 (root 坐标,
+// 0/0/0/0 = 不裁剪)。裁剪只约束写入范围, 采样相位仍由 dstX/dstY/dstW/dstH
+// 整矩形决定 — 局部合成 (DamageRect) 与整帧合成逐像素一致。
 void BlitScaled(uint8_t* dst, int rootW, int rootH,
                 const uint8_t* src, int srcStride, int srcW, int srcH,
-                int dstX, int dstY, int dstW, int dstH, bool alphaBlend);
+                int dstX, int dstY, int dstW, int dstH, bool alphaBlend,
+                int clipX = 0, int clipY = 0, int clipW = 0, int clipH = 0);
 
 // 像素混合的两种历史语义 (收敛自三份内联行循环, 保留差异 — 见各调用点):
 // SrcOnly: 源不乘 alpha 直接叠加到背景, 结果 clamp 到 255, 目标 alpha

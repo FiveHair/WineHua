@@ -673,6 +673,9 @@ void WaylandServer::UpdateToplevelFrameOnCommit(SurfaceData* sd, wl_resource* su
         }
     }
     st.MarkDirty();
+    // 帧内容序列号: 像素每次 commit 重写时递增 — 桌面局部合成
+    // (TakeToplevelFrame damage 裁剪) 以此判定层内容变化
+    st.BumpFrameSerial();
     // 记录 shm 格式 (ARGB8888=layered/shaped 有意义 alpha), 变化时通知
     // ArkTS 切换窗口背景 (PC 模式透明背景才能透过 per-pixel alpha)
     // 注意: 首帧必发 argb 事件 (即使首帧就是默认的 XRGB), 与旧的
@@ -1002,6 +1005,7 @@ void WaylandServer::UpdatePopupOnCommit(SurfaceData* sd, wl_resource* surfRes,
             }
             pbuf.SetContentSize(dispW, dispH);
             pbuf.MarkDirty();
+            pbuf.BumpFrameSerial();  // 帧序列号语义: 像素轮换重写即递增
             pbuf.SetShmFormat(fi.shmFormat);
         }
     }
