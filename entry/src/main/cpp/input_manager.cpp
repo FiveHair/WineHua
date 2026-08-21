@@ -527,10 +527,14 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
         if (PointerExtras::GetInstance()->HasRelativePointer()) {
             double dx = 0.0, dy = 0.0;
             if (rawDx != 0.0 || rawDy != 0.0) {
-                dx = rawDx * rawScale_;
-                dy = rawDy * rawScale_;
-                // 单事件位移钳制: 标定未收敛/单位异常时防巨型跳变
-                // (125Hz 下合法单事件位移远小于此)
+                // 相对模式视角: 用原始硬件增量 × 校准系数 kSensRel。
+                // rawScale_ 是桌面光标加速增益 (实测收窄到 ~5.28, 太灵敏);
+                // 1:1 又太小 (rawDelta 单位小, ~0.8/事件)。取中间试探值 2.5,
+                // 待实测偏大/偏小再调 (此为唯一校准常数)。
+                constexpr double kSensRel = 2.5;
+                dx = rawDx * kSensRel;
+                dy = rawDy * kSensRel;
+                // 单事件位移钳制: 防异常巨型跳变 (125Hz 合法单事件远小于此)
                 dx = std::clamp(dx, -512.0, 512.0);
                 dy = std::clamp(dy, -512.0, 512.0);
             } else {
