@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstring>
 #include <ctime>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 
@@ -864,17 +865,10 @@ static void CompensateMinimizedSubsurfaceOffset(const ToplevelManager::ToplevelS
 // Desktop 模式: 存 layer, 在 TakeToplevelFrame 中合成 (不进入 per-toplevel 帧缓冲)
 void WaylandServer::UpdateSubsurfaceLayerOnCommit(SurfaceData* sd, wl_resource* surfRes,
                                                   uint32_t parentId, ShmCommitInfo& fi) {
+    // ARGB 的 opaque 精确判定移到合成快照阶段 (desktop_compositor 融合进
+    // 像素拷贝, 单次内存遍历顺带完成) — 曾在此全帧扫描 alpha (800x600
+    // 每帧 ~7ms), 堵 wl 事件循环线程, 输入派发被延迟 (WL-T 实测)
     bool opaque = fi.shmFormat != 0;
-    if (!opaque) {
-        opaque = true;
-        const uint8_t* pixels = sd->pixels.data();
-        for (size_t i = 3; i < sd->pixels.size(); i += 4) {
-            if (pixels[i] != 0xff) {
-                opaque = false;
-                break;
-            }
-        }
-    }
     auto lk = toplevelMgr_.Lock();
     const auto* pst = toplevelMgr_.FindToplevelLocked(parentId);
     SubsurfaceLayer layer;
@@ -1110,6 +1104,9 @@ void WaylandServer::FinishCommit(SurfaceData* sd, wl_resource* surfRes) {
 void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
     auto* sd = static_cast<SurfaceData*>(wl_resource_get_user_data(surfRes));
     auto* self = GetInstance();  // static 回调无 this, 分段均为实例方法
+    // WL-T 临时诊断: commit 在 wl 事件循环线程上的占用 — >2ms 打单行,
+    // 另按 5s 窗口汇总, 与 LAT-NAPI→LAT-INJ 的 8ms/86ms 对时
+    const auto wt0 = std::chrono::steady_clock::now();
     // NULL buffer → surface 无内容 (unmap)
     if (self->HandleNullBufferCommit(sd, surfRes)) return;
 
@@ -1138,6 +1135,22 @@ void WaylandServer::surface_commit(wl_client*, wl_resource* surfRes) {
     }
 
     self->FinishCommit(sd, surfRes);
+
+    // WL-T 临时诊断 (接函数头): commit 占用统计
+    const long long wus = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - wt0).count();
+    static uint64_t sWinN, sWinUs, sWinMax; static time_t sWinT = time(nullptr);
+    sWinN++; sWinUs += wus; if ((uint64_t)wus > sWinMax) sWinMax = wus;
+    if (wus > 2000)
+        OH_LOG_INFO(LOG_APP, "[WL-T] commit dur=%{public}lldus buf=%{public}dx%{public}d content=%{public}dx%{public}d sub=%{public}d",
+                    wus, fi.bufW, fi.bufH, fi.contentW, fi.contentH, sd->isSubsurface ? 1 : 0);
+    if (time(nullptr) - sWinT >= 5) {
+        OH_LOG_INFO(LOG_APP, "[WL-T] commit 5s: n=%{public}llu avg=%{public}lluus max=%{public}lluus",
+                    (unsigned long long)sWinN,
+                    sWinN ? (unsigned long long)(sWinUs / sWinN) : 0ull,
+                    (unsigned long long)sWinMax);
+        sWinN = sWinUs = sWinMax = 0; sWinT = time(nullptr);
+    }
 }
 
 
