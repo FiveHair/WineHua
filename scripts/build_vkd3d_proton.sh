@@ -50,7 +50,12 @@ fi
 mapfile -t patches < <(find "$PATCH_ROOT" -maxdepth 1 -type f -name '*.patch' -print | sort)
 [ "${#patches[@]}" -gt 0 ] || err "VKD3D-Proton patch series is empty"
 patch_series_sha="$(sha256sum "${patches[@]}" | sha256sum | awk '{print $1}')"
+# Mailbox "From <40 hex> ..." is optional: 0019 was authored as a plain
+# patch starting with "From: Name <email>", which is not a commit SHA.
 patch_head="$(sed -n '1s/^From \([0-9a-f]\{40\}\) .*/\1/p' "${patches[${#patches[@]}-1]}")"
+if [ -z "$patch_head" ]; then
+    patch_head="$(sha256sum "${patches[${#patches[@]}-1]}" | awk '{print $1}')"
+fi
 [ -n "$patch_head" ] || err "Cannot read VKD3D-Proton patch-series head"
 source_id="$base_commit-$patch_series_sha"
 
