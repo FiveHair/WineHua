@@ -1,6 +1,7 @@
 #pragma once
 #include <wayland-server-core.h>
 #include <cstdint>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -109,6 +110,15 @@ public:
     // 取指定 toplevel 的最新帧 (桌面模式合成到 root framebuffer)
     bool TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out, int& w, int& h);
 
+    // 本帧重绘矩形 (root 坐标, 局部合成范围)。full=true 走整帧合成路径
+    // (几何/层序/root 帧/全屏变化时, 行为与旧实现一致); 局部时仅 R 内像素
+    // 从快照沿 z 序重建, R 外复用上帧输出内容 (渲染线程帧缓冲跨帧保留)。
+    struct DamageRect {
+        int x = 0, y = 0, w = 0, h = 0;
+        bool full = true;
+        bool empty() const { return !full && (w <= 0 || h <= 0); }
+    };
+
     // -- 层序单一数据源 --
     // 构建按 zIndex 升序的 Layer 列表 (调用方须已持有 tmgr mutex)。
     // 合成 (TakeToplevelFrame) 与输入 (InputResolver) 遍历同一列表;
@@ -215,4 +225,12 @@ private:
     uint64_t desktopOutputRootFrameSerial_ = 0;
     bool desktopOutputInitialized_ = false;
     uint64_t desktopRootFrameSerial_ = 0;
+    // TakeToplevelFrame 快照缓冲池 (仅渲染线程访问): 跨帧复用容量,
+    // 避免每帧新建多 MB vector 的分配+缺页开销 — 见 cpp 快照阶段注释
+    std::vector<std::vector<uint8_t>> snapPool_;
+    // 帧内容 serial 基准 (局部合成, 仅渲染线程访问): 记录上一次合成时各层
+    // 看到的像素序列号 — 下一帧以此判定层内容是否更新 (sub=shmCommitSerial,
+    // toplevel=FrameSerial)。层键: sub 用 surfaceKey, toplevel 用 id。
+    std::unordered_map<uint64_t, uint64_t> lastSubSerial_;
+    std::unordered_map<uint64_t, uint64_t> lastTopSerial_;
 };
