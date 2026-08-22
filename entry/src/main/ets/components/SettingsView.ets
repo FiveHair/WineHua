@@ -24,9 +24,11 @@ export struct SettingsView {
   @State busy: boolean = false;
   @State prefixReady: boolean = false;
   @State statusText: string = '检测中...';
-  // 渲染策略镜像 (dxvk_legacy / wined3d); 切换后提示需重启引擎才生效
+  // 渲染策略镜像 (dxvk_legacy / dxvk_modern_2_6 / vkd3d_limited_500k / wined3d);
+  // 切换后提示需重启引擎才生效
   @State d3dBackend: string = 'dxvk_legacy';
-  // SegmentButton 选中项 (@Link 双向): 0=dxvk_legacy 1=wined3d, 与 d3dBackend 同步
+  // SegmentButton 选中项 (@Link 双向): 0=DXVK1.10 1=DXVK2.6 2=VKD3D 3=WineD3D,
+  // 与 d3dBackend 同步
   @State backendSel: number[] = [0];
   // Wine 语言分段选中项: 0=中文(zh_CN) 1=English(en_US), 与 wineLang 同步
   @State langSel: number[] = [0];
@@ -55,7 +57,9 @@ export struct SettingsView {
     this.statusText = this.env.statusText;
     this.d3dBackend = this.env.getD3dBackend();
     // 派生选中项; 仅在值变化时赋值, 避免 notify 覆盖用户刚点击的 @Link 状态
-    const sel = this.d3dBackend == 'dxvk_legacy' ? 0 : 1;
+    const sel = this.d3dBackend == 'dxvk_legacy' ? 0 :
+      this.d3dBackend == 'dxvk_modern_2_6' ? 1 :
+        this.d3dBackend == 'vkd3d_limited_500k' ? 2 : 3;
     if (this.backendSel[0] != sel) {
       this.backendSel = [sel];
     }
@@ -352,16 +356,18 @@ export struct SettingsView {
             .width('100%')
           SegmentButton({
             options: SegmentButtonOptions.capsule({
-              buttons: [{ text: 'DXVK (推荐)' }, { text: 'WineD3D' }],
+              buttons: [{ text: 'DXVK 1.10' }, { text: 'DXVK 2.6' }, { text: 'VKD3D' }, { text: 'WineD3D' }],
               multiply: false
             }),
             selectedIndexes: $backendSel,
             onItemClicked: (index: number) => {
-              this.selectBackend(index == 0 ? 'dxvk_legacy' : 'wined3d');
+              this.selectBackend(index == 0 ? 'dxvk_legacy' :
+                index == 1 ? 'dxvk_modern_2_6' :
+                  index == 2 ? 'vkd3d_limited_500k' : 'wined3d');
             }
           })
           .width('100%')
-          Text('DXVK 性能更好; 个别程序异常时可试 WineD3D')
+          Text('DXVK 性能好 (1.10 稳定 / 2.6 新版); D3D12 程序选 VKD3D; 个别程序异常时可试 WineD3D')
             .fontSize(12)
             .fontColor($r('app.color.text_tertiary'))
             .width('100%')

@@ -598,7 +598,11 @@ export class AppLibraryService {
       workingDirectory: this.windowsParentDir(winPath),
       prefixMode: 'reuse',
       d3dBackend: d3dBackend,
-      presentBackend: d3dBackend == 'dxvk_legacy' ? 'venus_broker_present' : 'virgl_compositor',
+      dxvkBackend: env.getDxvkBackend(),
+      // 与 WineEnvService.d3dPresentBackend 同规则: dxvk_* / vkd3d 走 Venus
+      // broker 呈现, 仅 wined3d 回落 virgl 离屏合成
+      presentBackend: d3dBackend.startsWith('dxvk_') || d3dBackend == 'vkd3d_limited_500k' ?
+        'venus_broker_present' : 'virgl_compositor',
       automationMode: false
     }) as ProcessInfo;
     if (result && result.pid > 0) {
@@ -626,7 +630,11 @@ export class AppLibraryService {
       workingDirectory: winDir,
       prefixMode: 'reuse',
       d3dBackend: d3dBackend,
-      presentBackend: d3dBackend == 'dxvk_legacy' ? 'venus_broker_present' : 'virgl_compositor',
+      dxvkBackend: env.getDxvkBackend(),
+      // 与 WineEnvService.d3dPresentBackend 同规则: dxvk_* / vkd3d 走 Venus
+      // broker 呈现, 仅 wined3d 回落 virgl 离屏合成
+      presentBackend: d3dBackend.startsWith('dxvk_') || d3dBackend == 'vkd3d_limited_500k' ?
+        'venus_broker_present' : 'virgl_compositor',
       automationMode: false
     }) as ProcessInfo;
     return (result && result.pid > 0) ? result.pid : -1;
