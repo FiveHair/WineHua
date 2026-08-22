@@ -6,6 +6,7 @@ on:
     branches:
       - master
       - feature/vkd3d-capability-probe
+      - opt/nativewindow-direct-present
     tags:
       - 'dev-*'                 # 开发版 (直接发布, 不占 Latest 徽章)
       - 'rc-*'                  # RC 版 (占 Latest 徽章)
@@ -182,6 +183,10 @@ jobs:
           if ! command -v x86_64-w64-mingw32-widl >/dev/null 2>&1; then
             packages+=(mingw-w64-tools)
           fi
+          # cnc-ddraw Makefile invokes i686-w64-mingw32-gcc (not g++).
+          if ! command -v i686-w64-mingw32-gcc >/dev/null 2>&1; then
+            packages+=(gcc-mingw-w64-i686)
+          fi
           if [ "${#packages[@]}" -gt 0 ]; then
             echo "Installing missing CI packages: ${packages[*]}"
             apt-get update
@@ -201,6 +206,7 @@ jobs:
           glslangValidator --version | head -1
           x86_64-w64-mingw32-g++ --version | head -1
           i686-w64-mingw32-g++ --version | head -1
+          i686-w64-mingw32-gcc --version | head -1
           x86_64-w64-mingw32-widl -V | head -1
           java -version 2>&1 | head -1
           echo "== OHOS SDK =="
@@ -417,6 +423,16 @@ jobs:
                   )
                   print(f"[vkd3d] {name}: machine={machine:#06x} size={len(image)}")
               print(f"[vkd3d] commit={vkd3d_commit}")
+
+              for name in (
+                  "cnc-ddraw/x86/ddraw.dll",
+                  "cnc-ddraw/ddraw.ini",
+              ):
+                  image = wine_data.read(name)
+                  assert image, name
+                  print(f"[cnc-ddraw] {name}: size={len(image)}")
+              ddraw = wine_data.read("cnc-ddraw/x86/ddraw.dll")
+              assert ddraw[:2] == b"MZ", "cnc-ddraw/x86/ddraw.dll"
 
           for profile, expected in expected_runtimes.items():
               print(f"[dxvk/{profile}] commit={expected['commit']}")
