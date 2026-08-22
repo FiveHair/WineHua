@@ -4,8 +4,10 @@
 #include "geometry.h"
 #include "compositor/surface_data.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
+#include <unistd.h>
 #include <hilog/log.h>
 
 #undef LOG_DOMAIN
@@ -557,6 +559,24 @@ int DesktopCompositor::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t render
                  layer.vpDstH > 0 ? layer.vpDstH : layer.h);
     }
     return count;
+}
+
+// ============================================================================
+//  直传 A/B 开关 (诊断用, 定责后移除): cache 根下存在 "no-direct-pass"
+//  文件则禁用直传, 回退 CPU 合成 (11e3a67 时代行为)。用于隔离验证
+//  "直传路径 ↔ 主菜单点击失效" 的因果; marker 2s 刷新防每帧 stat。
+// ============================================================================
+static bool DirectPassEnabled()
+{
+    static std::atomic<int64_t> sLastMs{0};
+    static bool sEnabled = true;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now - sLastMs.load() > 2000) {
+        sLastMs = now;
+        sEnabled = access("/data/storage/el2/base/cache/no-direct-pass", F_OK) != 0;
+    }
+    return sEnabled;
 }
 
 // ============================================================================

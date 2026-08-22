@@ -25,7 +25,16 @@ static const struct wl_seat_interface kSeatImpl = {
 };
 
 // -- wl_pointer 接口实现表 --
-static void ptr_set_cursor(wl_client*, wl_resource*, uint32_t, wl_resource*, int32_t, int32_t) {}
+static void ptr_set_cursor(wl_client* client, wl_resource*, uint32_t,
+                           wl_resource* surface, int32_t hx, int32_t hy) {
+    // 诊断: wine 调 wl_pointer.set_cursor = 光标'可见'切换信号 (is_visible
+    // 依据之一: wine 侧 cursor.wl_surface 或 shape dev 被设置)。此处 server
+    // 只记录不处理 (系统光标由 host 显示) — 20260822 红警2 主菜单排查
+    pid_t cpid = 0; uid_t cuid = 0, cgid = 0;
+    wl_client_get_credentials(client, &cpid, &cuid, &cgid);
+    OH_LOG_INFO(LOG_APP, "[Seat] ptr set_cursor surf=%{public}p hx=%{public}d hy=%{public}d client_pid=%{public}d",
+                static_cast<void*>(surface), hx, hy, static_cast<int>(cpid));
+}
 static void ptr_release(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
 
 static const struct wl_pointer_interface kPointerImpl = {
@@ -140,7 +149,13 @@ void Seat::seat_get_pointer(wl_client* client, wl_resource* seatRes, uint32_t id
         self->pointerResources_.push_back(ptr);
         self->ptrCount_.store((int)self->pointerResources_.size());
     }
-    OH_LOG_INFO(LOG_APP, "[Seat] wl_pointer created OK (total=%{public}d)", self->ptrCount_.load());
+    // 诊断: 记录指针资源的 client 身份 (pid) — 多 client 场景下判断
+    // "注入事件真正送达哪个进程/窗口" 的依据 (20260822 红警2 主菜单
+    // 点击无效排查: 注入 OK 但游戏无反应, nPtrs 从正常 3-4 涨到 6)
+    pid_t cpid = 0; uid_t cuid = 0, cgid = 0;
+    wl_client_get_credentials(client, &cpid, &cuid, &cgid);
+    OH_LOG_INFO(LOG_APP, "[Seat] wl_pointer created OK (total=%{public}d client_pid=%{public}d id=%{public}u)",
+                self->ptrCount_.load(), static_cast<int>(cpid), (unsigned)wl_resource_get_id(ptr));
 }
 
 void Seat::seat_get_keyboard(wl_client* client, wl_resource* seatRes, uint32_t id) {

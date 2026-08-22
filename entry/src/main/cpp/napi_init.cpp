@@ -831,8 +831,8 @@ static napi_value SendPointerEvent(napi_env env, napi_callback_info info) {
     }
     if (action != 1) {  // 跳过 MOVE (高频), 只记录 button/enter/leave
         OH_LOG_INFO(LOG_APP, "[PIPE] ptr tl=%{public}u a=%{public}d btn=0x%{public}x "
-                    "px=(%{public}.0f,%{public}.0f)",
-                    tl, action, button, px, py);
+                    "px=(%{public}.0f,%{public}.0f) raw=(%{public}.1f,%{public}.1f) fromMouse=%{public}d",
+                    tl, action, button, px, py, rawDx, rawDy, fromMouse ? 1 : 0);
     }
     InputManager::GetInstance()->SendPointerEvent(tl, action, px, py, button, rawDx, rawDy, fromMouse);
     return nullptr;
