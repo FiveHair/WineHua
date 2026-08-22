@@ -9,6 +9,7 @@ const KEY_TOUCHPAD = 'touchpadEnabled';
 const KEY_GAMEPAD = 'gamepadEnabled';
 const KEY_KEYBOARD = 'keyboardEnabled';
 const KEY_SPEED = 'cursorSpeed';
+const KEY_REL_SPEED = 'relMouseSpeed';
 const KEY_BUTTONS = 'padButtons';
 const KEY_ZONES = 'padZones';
 const KEY_KB_POS = 'keyboardPos';
@@ -99,6 +100,10 @@ export class InputSettingsService {
   kbRelX: number = 0.5;
   kbRelY: number = 0.9;
   cursorSpeed: number = 1.0;
+  // 全屏游戏 (dinput 相对模式) 鼠标倍率: 叠加在 InputDeviceMapper 设备校准
+  // (鼠标 2.5 / 触控板 0.75) 之上, 只乘 rawDelta — 绝对模式有差分自标定,
+  // 天然不受影响。默认 1.0 = 维持校准后的现状手感
+  relMouseSpeed: number = 1.0;
   buttons: PadButton[] = defaultButtons();
   zones: PadZone[] = defaultZones();
   // 全屏布局编辑页开关 (瞬态, 不持久化); 与 gamepadEnabled 解耦
@@ -139,6 +144,7 @@ export class InputSettingsService {
       this.keyboardEnabled = this.store.getSync(KEY_KEYBOARD, false) as boolean;
       this.introShown = this.store.getSync(KEY_INTRO, false) as boolean;
       this.cursorSpeed = this.store.getSync(KEY_SPEED, 1.0) as number;
+      this.relMouseSpeed = this.store.getSync(KEY_REL_SPEED, 1.0) as number;
       const kbPosJson = this.store.getSync(KEY_KB_POS, '') as string;
       if (kbPosJson) {
         const pos = JSON.parse(kbPosJson) as Record<string, number>;
@@ -175,6 +181,7 @@ export class InputSettingsService {
       this.store.putSync(KEY_GAMEPAD, this.gamepadEnabled);
       this.store.putSync(KEY_KEYBOARD, this.keyboardEnabled);
       this.store.putSync(KEY_SPEED, this.cursorSpeed);
+      this.store.putSync(KEY_REL_SPEED, this.relMouseSpeed);
       this.store.putSync(KEY_BUTTONS, JSON.stringify(this.buttons));
       this.store.putSync(KEY_ZONES, JSON.stringify(this.zones));
       this.store.putSync(KEY_KB_POS, JSON.stringify({ relX: this.kbRelX, relY: this.kbRelY }));
@@ -214,6 +221,16 @@ export class InputSettingsService {
   // 字段+notify 始终更新 — DesktopLayer 镜像的光标速度拖动中立竿见影
   setCursorSpeed(speed: number, persist: boolean = true): void {
     this.cursorSpeed = Math.min(2.5, Math.max(0.3, speed));
+    if (persist) {
+      this.persist();
+    }
+    this.notify();
+  }
+
+  // persist=false 用于滑条拖动中 (同 setCursorSpeed, 逐帧 flush 是磁盘写风暴);
+  // ArkTS 每鼠标事件读字段, 拖动中立竿见影, 无需重启引擎
+  setRelMouseSpeed(speed: number, persist: boolean = true): void {
+    this.relMouseSpeed = Math.min(4.0, Math.max(0.25, speed));
     if (persist) {
       this.persist();
     }

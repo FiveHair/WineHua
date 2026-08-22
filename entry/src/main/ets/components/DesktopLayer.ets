@@ -601,6 +601,7 @@ export struct DesktopLayer {
             let rawDy = ev.rawDeltaY ?? 0;
             const devId = ev.deviceId ?? 0;
             if (devId > 0) {
+              // 设备校准 × 用户倍率 (relMouseSpeed) 均在 getScale 内乘入
               const s = InputDeviceMapper.getInstance().getScale(devId);
               rawDx *= s;
               rawDy *= s;

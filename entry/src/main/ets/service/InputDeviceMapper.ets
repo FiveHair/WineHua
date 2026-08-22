@@ -1,5 +1,6 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { inputDevice } from '@kit.InputKit';
+import { InputSettingsService } from './InputSettingsService';
 
 const DOMAIN = 0x0000;
 const TAG = 'DEV-MAP';
@@ -15,6 +16,9 @@ const TAG = 'DEV-MAP';
 //   - 触控板系数 0.75 = 2.5 × 0.3 (0.3 为设备差): 实测触控板 raw 每事件
 //     4~14 而鼠标 0.5~2, 不衰减则"移动一点点光标跑很多", 手感不合适调
 //     TOUCHPAD_DEVICE_SCALE
+//   - relMouseSpeed (用户倍率): 设置页"全屏游戏鼠标速度", 叠加在设备校准
+//     之上, 在 getScale 内统一乘入 (调用点不各自叠加); 只经 rawDelta 生效
+//     即只影响 dinput 相对模式, 默认 1.0 零变化
 class InputDeviceMapper {
   // deviceId → sources 是否含 touchpad。首次见到该 id 时同步查一次系统
   // (getDeviceInfoSync 有 IPC 成本), 之后纯 Map 命中。设备插拔/重启 id 会变,
@@ -31,17 +35,20 @@ class InputDeviceMapper {
     return InputDeviceMapper.inst;
   }
 
-  // 读事件 deviceId → 增量缩放系数。deviceId 无效/查询失败一律按鼠标系数
+  // 读事件 deviceId → 增量缩放系数 (设备校准 × 用户倍率)。
+  // deviceId 无效/查询失败一律按鼠标系数; 用户倍率每事件直读
+  // InputSettingsService 字段 (无 IPC), 设置页拖动立即生效
   getScale(deviceId: number): number {
-    if (!deviceId) return InputDeviceMapper.MOUSE_SCALE;
+    const user = InputSettingsService.getInstance().relMouseSpeed;
+    if (!deviceId) return InputDeviceMapper.MOUSE_SCALE * user;
     let isTouchpad: boolean | undefined = this.touchpadCache.get(deviceId);
     if (isTouchpad === undefined) {
       isTouchpad = this.queryIsTouchpad(deviceId);
       this.touchpadCache.set(deviceId, isTouchpad);
     }
-    return isTouchpad
+    return (isTouchpad
       ? InputDeviceMapper.MOUSE_SCALE * InputDeviceMapper.TOUCHPAD_DEVICE_SCALE
-      : InputDeviceMapper.MOUSE_SCALE;
+      : InputDeviceMapper.MOUSE_SCALE) * user;
   }
 
   private queryIsTouchpad(deviceId: number): boolean {

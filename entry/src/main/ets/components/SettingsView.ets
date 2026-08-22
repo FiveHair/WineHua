@@ -6,6 +6,7 @@ import { WineEnvService } from '../service/WineEnvService';
 import { FontImportService } from '../service/FontImportService';
 import { LogExportService } from '../service/LogExportService';
 import { DisplaySettingsService } from '../service/DisplaySettingsService';
+import { InputSettingsService } from '../service/InputSettingsService';
 import { DesktopModeService, MODE_VIRTUAL, MODE_FUSION } from '../service/DesktopModeService';
 
 // 设置页 (设计 4.6, 环境已并入): 显示 (置顶) / 环境管理 (Wine 引擎 · Windows 字体 ·
@@ -43,11 +44,14 @@ export struct SettingsView {
   @State fontImporting: boolean = false;
   // -- 显示 --
   @State scaleText: string = '';
+  // 全屏游戏鼠标速度 (InputSettingsService.relMouseSpeed, 立即生效不需重启)
+  @State relSpeedText: string = '100%';
   // 保持屏幕常亮 (镜像 DisplaySettingsService, 设置页即时生效)
   @State keepScreenOn: boolean = false;
 
   private env: WineEnvService = WineEnvService.getInstance();
   private displaySettings: DisplaySettingsService = DisplaySettingsService.getInstance();
+  private inputSettings: InputSettingsService = InputSettingsService.getInstance();
 
   private mirror = (): void => {
     this.state = this.env.engineState;
@@ -91,6 +95,7 @@ export struct SettingsView {
     this.mirror();
     this.scaleText = this.fmtScale(this.displaySettings.scale);
     this.keepScreenOn = this.displaySettings.keepScreenOn;
+    this.relSpeedText = `${Math.round(this.inputSettings.relMouseSpeed * 100)}%`;
   }
 
   // 保持屏幕常亮: 持久化 + 立即应用到主窗口 (EntryAbility 已存引用;
@@ -327,6 +332,38 @@ export struct SettingsView {
                 .width('100%')
             }
           }
+        }
+        .width('100%')
+        .padding(14)
+        .backgroundColor($r('app.color.card_bg'))
+        .borderRadius(12)
+
+        // ══ 卡 1.5: 输入 ══
+        Column({ space: 8 }) {
+          Text('输入')
+            .fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.text_primary'))
+            .width('100%')
+          Row() {
+            Text('全屏游戏鼠标速度')
+              .fontColor($r('app.color.text_primary'))
+              .layoutWeight(1)
+            Text(this.relSpeedText)
+              .fontColor($r('app.color.text_tertiary'))
+          }
+          .width('100%')
+          // Slider 交互同 DPI 缩放: 拖动中只更新显示值, 松手/点按才落盘;
+          // 与 DPI 不同 — 倍率经 InputDeviceMapper.getScale 每事件直读,
+          // 立即生效, 无需重启
+          Slider({ value: this.inputSettings.relMouseSpeed, min: 0.25, max: 4.0, step: 0.25 })
+            .onChange((value: number, mode: SliderChangeMode) => {
+              this.relSpeedText = `${Math.round(value * 100)}%`;
+              this.inputSettings.setRelMouseSpeed(value, mode != SliderChangeMode.Moving);
+            })
+          Text('游戏内隐藏光标转视角/瞄准时生效, 叠加于系统校准之上; 立即生效')
+            .fontSize(12)
+            .fontColor($r('app.color.text_tertiary'))
+            .width('100%')
         }
         .width('100%')
         .padding(14)
