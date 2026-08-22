@@ -156,7 +156,26 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
     }
     int surfW = r->GetWidth();
     int surfH = r->GetHeight();
-    const FitRect& lb = r->GetLetterbox();
+    // 桌面系基准 (20260822 红警2 主菜单点击无效根因修复): 输入坐标换算的
+    // 锚点是"桌面逻辑坐标" (root toplevel 尺寸), 与"渲染当前帧格式"解耦。
+    // 此前用 r->GetLetterbox() (渲染视口) 做逆映射 — 直传 (7930495) 时
+    // renderer 的帧是游戏直传源 800x600, letterbox 逆映射先把物理坐标缩到
+    // 800x600 系, 再进 InputResolver 的 fit 被二次缩放 → 注入坐标与视觉
+    // 光标错位 → 游戏永远点不到按钮 (红警2 主菜单点击无效)。CPU 帧
+    // (1400x920) 时渲染视口恰为恒等映射, 两个基准重合, 故此前单测有效。
+    auto* ws = WaylandServer::GetInstance();
+    FitRect lb{};
+    if (ws->IsDesktopMode()) {
+        const uint32_t desktopRootId = ws->GetDesktopRootToplevelId();
+        const int rootW = ws->GetToplevelW(desktopRootId);
+        const int rootH = ws->GetToplevelH(desktopRootId);
+        if (rootW <= 0 || rootH <= 0 ||
+            !ComputeFitRect(surfW, surfH, rootW, rootH, lb)) {
+            lb = r->GetLetterbox();  // fallback: root 未就绪时退回渲染视口
+        }
+    } else {
+        lb = r->GetLetterbox();
+    }
     if (outLb) *outLb = lb;
 
     if (surfW <= 0 || surfH <= 0 || lb.dstW <= 0 || lb.dstH <= 0) {
@@ -355,12 +374,20 @@ void InputManager::SetToplevelVisible(uint32_t tl, bool visible) {
     OH_LOG_INFO(LOG_APP, "[Input] SetToplevelVisible tl=%{public}u visible=%{public}s", tl, visible ? "true" : "false");
 }
 
-void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double py, int button) {
+void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double py, int button,
+                                    double rawDx, double rawDy, bool fromMouse) {
     // 窗口不可见时抑制输入
     {
         std::lock_guard<std::mutex> lk(visibleMutex_);
         auto it = toplevelVisible_.find(tl);
-        if (it != toplevelVisible_.end() && !it->second) return;
+        if (it != toplevelVisible_.end() && !it->second) {
+            // 抽样 120:1: 窗口不可见时 hover 移动也会走到这里 (125Hz 全量会
+            // 刷屏); 只保留采样行确认"输入被抑制"这一状态
+            static uint32_t sSuppressN = 0;
+            if (++sSuppressN % 120 == 1)
+                OH_LOG_INFO(LOG_APP, "[Input] SUPPRESS tl=%{public}u action=%{public}d (window invisible)", tl, action);
+            return;
+        }
     }
 
     auto* seat = Seat::GetInstance();
@@ -469,28 +496,43 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
     // 相对指针增量 (zwp_relative_pointer_v1): wine 相对模式 (隐藏光标 + 约束,
     // wayland_pointer.c needs_relative) 丢弃绝对 motion, 光标位置 = 基线 +
     // 增量累积。host 不做模式判断 — 绝对 motion 照常注入 (相对模式下被 wine
-    // 丢弃), 同时把注入坐标 (surface 局部空间) 差分出增量, 有 relative 对象
-    // 就入队 REL_MOTION 转发。对象存在 ⇔ wine 判定当前为相对模式。
+    // 丢弃), 有 relative 对象就入队 REL_MOTION。对象存在 ⇔ wine 判定当前为
+    // 相对模式。
+    // 增量来源: 优先用鸿蒙 MouseEvent.rawDelta (鼠标硬件原始增量) — 光标
+    // 被 ClampToContent 钳在屏幕/窗口边缘后, 绝对坐标差分恒为 0, 只有
+    // rawDelta 还在真实上报; 若仍用差分, dinput 视角游戏 (FPS) 鼠标顶到
+    // 边缘即卡死。rawDelta 缺失时 (触屏合成 mouse 等) 回退绝对差分。
     // 基准在 MOVE 与「PRESS 的 enter 定位」时更新 — 两者都真实改变 wine
     // 光标位置 (enter 是相对模式下唯一被消费的绝对坐标); 其余 PRESS/RELEASE
-    // 不发增量也不移动基准, 避免按下瞬间坐标跳变污染后续增量。
+    // 不发增量也不移动基准, 避免按下瞬间坐标跳变污染后续增量/标定样本。
     if (action == ACT_MOVE) {
         const double localX = wl_fixed_to_double(wx);
         const double localY = wl_fixed_to_double(wy);
-        if (hasLastLocal_) {
-            const double dx = localX - lastLocalX_;
-            const double dy = localY - lastLocalY_;
-            if ((dx != 0 || dy != 0) && PointerExtras::GetInstance()->HasRelativePointer()) {
+        const double diffDx = hasLastLocal_ ? (localX - lastLocalX_) : 0.0;
+        const double diffDy = hasLastLocal_ ? (localY - lastLocalY_) : 0.0;
+        if (PointerExtras::GetInstance()->HasRelativePointer()) {
+            double dx = 0.0, dy = 0.0;
+            if (rawDx != 0.0 || rawDy != 0.0) {
+                // 相对模式视角: rawDelta 已由 ArkTS 按设备类型缩放 (鼠标
+                // 2.5 / 触控板 0.75, 见 InputDeviceMapper.ets), C++ 直接使用。
+                // 单事件位移钳制: 防异常巨型跳变 (125Hz 合法单事件远小于此)
+                dx = std::clamp(rawDx, -512.0, 512.0);
+                dy = std::clamp(rawDy, -512.0, 512.0);
+            } else {
+                dx = diffDx;
+                dy = diffDy;
+            }
+            if (dx != 0.0 || dy != 0.0) {
                 Enqueue(InputEvent::REL_MOTION, 0, nullptr,
                         wl_fixed_from_double(dx), wl_fixed_from_double(dy), 0, 0);
-                // 系统性链路日志 (断点 4): 相对模式增量差分 — 相对模式下绝对
+                // 系统性链路日志 (断点 4): 相对模式增量 — 相对模式下绝对
                 // motion 被 wine 丢弃, 增量是光标唯一移动来源; 高频抽样 120:1
-                // (拖动只看增量趋势, 与 SendRelativeMotion 断点 5 配对; 测试需
-                // 全量时改这里)
+                // (与 SendRelativeMotion 断点 5 配对; 测试需全量时改这里)
                 static uint32_t sRelLogN = 0;
                 if (++sRelLogN % 120 == 0)
-                    OH_LOG_INFO(LOG_APP, "[Input] REL d=(%{public}.1f,%{public}.1f) base=(%{public}.1f,%{public}.1f)",
-                                dx, dy, lastLocalX_, lastLocalY_);
+                    OH_LOG_INFO(LOG_APP, "[Input] REL d=(%{public}.1f,%{public}.1f) raw=(%{public}.1f,%{public}.1f)"
+                                " base=(%{public}.1f,%{public}.1f)",
+                                dx, dy, rawDx, rawDy, lastLocalX_, lastLocalY_);
             }
         }
         lastLocalX_ = localX;
@@ -529,14 +571,26 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
             // 模式保持 toplevel 级比较 (一窗一 surface, 语义等价)。
             wl_resource* pressTargetSurf =
                 targetSurf ? targetSurf : ws->GetSurfaceForToplevel(tl);
-            // 系统性链路日志 (断点 3): relMode 仅诊断 (相对模式下 enter 走
-            // 静默校准, 行为与绝对模式一致)
+            // 相对模式 + 物理鼠标: 跳过 enter/motion 重定位, 只投递按键。
+            // LockCursor 冻结系统光标后, 每次点击的坐标恒为冻结点, 而 wine
+            // 相对模式把 enter 当静默 SetCursorPos — 游戏自绘光标走绝对
+            // GetCursorPos (war3) 每次点击都瞬移到固定位置 (实测: 冻结点
+            // 633,392 → local 356.7,256.0 恒定)。触屏 tap 仍是绝对定位设备,
+            // 保留 enter (PAL2 点菜单依赖); 指针尚未聚焦该 surface 时也必须
+            // enter, 否则 button 无焦点投递
+            const bool skipEnter = fromMouse
+                && PointerExtras::GetInstance()->HasRelativePointer()
+                && pressTargetSurf != nullptr
+                && pointerFocusedSurface_.load() == pressTargetSurf;
+            // 系统性链路日志 (断点 3): relMode/skipEnter 仅诊断 (相对模式下
+            // enter 走静默校准, 行为与绝对模式一致; skipEnter=1 时 enter 被跳过)
             OH_LOG_INFO(LOG_APP, "[Input] PRESS-ENTER tl=%{public}u surf=%{public}p"
-                        " relMode=%{public}d focused=%{public}p",
+                        " relMode=%{public}d skip=%{public}d focused=%{public}p",
                         tl, static_cast<void*>(pressTargetSurf),
                         PointerExtras::GetInstance()->HasRelativePointer() ? 1 : 0,
+                        skipEnter ? 1 : 0,
                         static_cast<void*>(pointerFocusedSurface_.load()));
-            if (pressTargetSurf) {
+            if (pressTargetSurf && !skipEnter) {
                 wl_resource* focused = pointerFocusedSurface_.load();
                 const bool needLeave = targetSurf
                     ? (focused != nullptr && focused != pressTargetSurf)
@@ -550,7 +604,8 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
                 lastLocalY_ = wl_fixed_to_double(wy);
                 hasLastLocal_ = true;
             }
-            Enqueue(InputEvent::PTR_MOTION, 0, nullptr, wx, wy, 0, 0);
+            if (!skipEnter)
+                Enqueue(InputEvent::PTR_MOTION, 0, nullptr, wx, wy, 0, 0);
             if (button) {
                 unsigned bit = ButtonToBit(button);
                 if (bit < 32) {
@@ -662,7 +717,13 @@ void InputManager::SendKeyEvent(uint32_t tl, int evdevCode, bool pressed) {
     {
         std::lock_guard<std::mutex> lk(visibleMutex_);
         auto it = toplevelVisible_.find(tl);
-        if (it != toplevelVisible_.end() && !it->second) return;
+        if (it != toplevelVisible_.end() && !it->second) {
+            // 抽样 120:1 (密钥重复按压/自动重复会出现高频, 与指针同一策略)
+            static uint32_t sSuppressN = 0;
+            if (++sSuppressN % 120 == 1)
+                OH_LOG_INFO(LOG_APP, "[Input] SUPPRESS tl=%{public}u evdev=%{public}d (window invisible)", tl, evdevCode);
+            return;
+        }
     }
 
     auto* seat = Seat::GetInstance();

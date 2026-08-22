@@ -38,7 +38,13 @@ public:
     // action: ArkTS MouseAction (Press=1, Release=2, Move=3)
     // px/py: 已转为物理像素的坐标
     // button: 已由 ArkTS MouseMap 映射的 evdev button code (0x110/0x111/0x112)
-    void SendPointerEvent(uint32_t toplevelId, int action, double px, double py, int button);
+    // rawDx/rawDy: ArkTS MouseEvent.rawDeltaX/Y (API15+, 鼠标硬件原始增量,
+    //   物理移动距离单位, 非像素) — 仅 Move 有效, 其余事件/触屏路径传 0。
+    //   是相对模式 (dinput 视角) 的真实位移源, 见 ACT_MOVE 处理
+    // fromMouse: 来自物理鼠标 onMouse 通道 (触屏 onTouch 路径传 false) —
+    //   相对模式下区分点击语义, 见 ACT_PRESS 处理
+    void SendPointerEvent(uint32_t toplevelId, int action, double px, double py, int button,
+                          double rawDx = 0, double rawDy = 0, bool fromMouse = false);
 
     // evdevCode: 已由 ArkTS KeyMap 映射的 evdev keycode
     // pressed: true=按下, false=释放

@@ -25,7 +25,11 @@ static const struct wl_seat_interface kSeatImpl = {
 };
 
 // -- wl_pointer 接口实现表 --
-static void ptr_set_cursor(wl_client*, wl_resource*, uint32_t, wl_resource*, int32_t, int32_t) {}
+// set_cursor 不处理: 系统光标由 host (ArkTS/OH_WindowManager) 显示, wine 的
+// shm 自定义光标不呈现 — 光标可见性跟踪交由相对模式的
+// PointerExtras/InputManager (与 wine 侧 cursor.wl_surface 时序无耦合)。
+static void ptr_set_cursor(wl_client*, wl_resource*, uint32_t,
+                           wl_resource*, int32_t, int32_t) {}
 static void ptr_release(wl_client*, wl_resource* r) { wl_resource_destroy(r); }
 
 static const struct wl_pointer_interface kPointerImpl = {

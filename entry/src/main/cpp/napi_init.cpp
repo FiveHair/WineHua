@@ -3,6 +3,7 @@
 #include "wayland_server.h"
 #include "plugin_manager.h"
 #include "input_manager.h"
+#include "pointer_extras.h"
 #include "egl_renderer.h"
 #include "audio_broker.h"
 #include "audio_ipc_protocol.h"
@@ -938,8 +939,8 @@ static napi_value TakeWindowMask(napi_env env, napi_callback_info info) {
 
 // -- Input forwarding NAPI (unified InputManager path) --
 static napi_value SendPointerEvent(napi_env env, napi_callback_info info) {
-    size_t argc = 5;
-    napi_value args[5];
+    size_t argc = 8;
+    napi_value args[8];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (argc < 5) return nullptr;
     uint32_t tl; int32_t action; double px, py; int32_t button;
@@ -948,12 +949,83 @@ static napi_value SendPointerEvent(napi_env env, napi_callback_info info) {
     napi_get_value_double(env, args[2], &px);
     napi_get_value_double(env, args[3], &py);
     napi_get_value_int32(env, args[4], &button);
+    // 可选: MouseEvent.rawDeltaX/Y (API15+, 仅 Move 传; 缺省 0 = 无 raw 数据,
+    // InputManager 回退绝对差分); args[7] fromMouse: onMouse 物理鼠标通道
+    // 传 true (触屏 onTouch 路径不传) — 相对模式 PRESS 是否跳过 enter 重定位
+    double rawDx = 0, rawDy = 0;
+    if (argc >= 7) {
+        napi_get_value_double(env, args[5], &rawDx);
+        napi_get_value_double(env, args[6], &rawDy);
+    }
+    bool fromMouse = false;
+    if (argc >= 8) {
+        napi_get_value_bool(env, args[7], &fromMouse);
+    }
     if (action != 1) {  // 跳过 MOVE (高频), 只记录 button/enter/leave
         OH_LOG_INFO(LOG_APP, "[PIPE] ptr tl=%{public}u a=%{public}d btn=0x%{public}x "
-                    "px=(%{public}.0f,%{public}.0f)",
-                    tl, action, button, px, py);
+                    "px=(%{public}.0f,%{public}.0f) raw=(%{public}.1f,%{public}.1f) fromMouse=%{public}d",
+                    tl, action, button, px, py, rawDx, rawDy, fromMouse ? 1 : 0);
     }
-    InputManager::GetInstance()->SendPointerEvent(tl, action, px, py, button);
+    InputManager::GetInstance()->SendPointerEvent(tl, action, px, py, button, rawDx, rawDy, fromMouse);
+    return nullptr;
+}
+
+// -- NAPI: registerHostWindow -- (ets 各 Ability 注册主窗口 id, 供
+// OH_WindowManager_LockCursor 锁定光标用 — 仅获焦窗口能锁, 逐个尝试)
+static napi_value RegisterHostWindow(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) return nullptr;
+    int32_t windowId = 0;
+    napi_get_value_int32(env, args[0], &windowId);
+    PointerExtras::RegisterHostWindow(windowId);
+    return nullptr;
+}
+
+// -- NAPI: setPointerLockCallback -- (锁定状态 → ets 隐藏/恢复系统光标)
+// gPointerLockTsfn 在主线程注册/替换、wl 线程回调读取 (20260822 review:
+// 裸指针跨线程读写 + 先 release 后 create 是 data race — 窗口重建 (launcher
+// resume 再次 init) 恰逢相对模式切换时, wl 线程可能读到已关闭/被交换的
+// 句柄 → UAF 或锁状态通知丢失)。修复: atomic 化; 替换时先原子摘除旧句柄
+// 再 release(释放后 wl 线程不可能再读到旧值); 读到 closing 中旧句柄时
+// napi_call_threadsafe_function 返回错误 — 忽略, 新句柄接管后续事件。
+static std::atomic<napi_threadsafe_function> gPointerLockTsfn{nullptr};
+static void CallJsPointerLock(napi_env env, napi_value cb, void*, void* data) {
+    if (env && cb) {
+        napi_value undef, arg;
+        napi_get_undefined(env, &undef);
+        napi_get_boolean(env, reinterpret_cast<uintptr_t>(data) != 0, &arg);
+        napi_call_function(env, undef, cb, 1, &arg, nullptr);
+    }
+}
+static napi_value SetPointerLockCallback(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) return nullptr;
+    if (napi_threadsafe_function old = gPointerLockTsfn.exchange(nullptr)) {
+        napi_release_threadsafe_function(old, napi_tsfn_release);
+    }
+    napi_value name;
+    napi_create_string_utf8(env, "WLPointerLock", NAPI_AUTO_LENGTH, &name);
+    napi_threadsafe_function newTsfn = nullptr;
+    if (napi_create_threadsafe_function(env, args[0], nullptr, name,
+                                         0, 1, nullptr, nullptr, nullptr, CallJsPointerLock,
+                                         &newTsfn) != napi_ok) {
+        OH_LOG_ERROR(LOG_APP, "[NAPI] setPointerLockCallback: create tsfn failed");
+        return nullptr;
+    }
+    gPointerLockTsfn.store(newTsfn);
+    PointerExtras::GetInstance()->SetPointerLockCallback([](bool locked) {
+        if (napi_threadsafe_function tsfn = gPointerLockTsfn.load()) {
+            if (napi_call_threadsafe_function(tsfn,
+                    reinterpret_cast<void*>(static_cast<uintptr_t>(locked ? 1 : 0)),
+                    napi_tsfn_blocking) != napi_ok) {
+                // tsfn 正在关闭 (窗口重建竞态): 忽略, 新句柄接管后续事件
+            }
+        }
+    });
     return nullptr;
 }
 
@@ -1170,6 +1242,8 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"sendPointerEvent", nullptr, SendPointerEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendKeyEvent",     nullptr, SendKeyEvent,     nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendScrollEvent",   nullptr, SendScrollEvent,   nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"registerHostWindow", nullptr, RegisterHostWindow, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setPointerLockCallback", nullptr, SetPointerLockCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"notifyToplevelResize",nullptr,NotifyToplevelResize,nullptr, nullptr, nullptr, napi_default, nullptr},
         {"takeWindowMask", nullptr, TakeWindowMask, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"findToplevelAt",   nullptr, FindToplevelAt,   nullptr, nullptr, nullptr, napi_default, nullptr},

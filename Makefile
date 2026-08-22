@@ -417,6 +417,11 @@ test:
 	    $(ROOT)/host_tests/geometry_test.cpp \
 	    $(ROOT)/entry/src/main/cpp/compositor/geometry.cpp
 	$(HOST_TEST_DIR)/geometry_test
+	g++ -std=c++17 -Wall -Wextra -I $(ROOT)/entry/src/main/cpp \
+	    -o $(HOST_TEST_DIR)/blit_scaled_test \
+	    $(ROOT)/host_tests/blit_scaled_test.cpp \
+	    $(ROOT)/entry/src/main/cpp/compositor/compositor_blit.cpp
+	$(HOST_TEST_DIR)/blit_scaled_test
 
 
 # ============================================================
