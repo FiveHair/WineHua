@@ -852,7 +852,13 @@ static napi_value RegisterHostWindow(napi_env env, napi_callback_info info) {
 }
 
 // -- NAPI: setPointerLockCallback -- (锁定状态 → ets 隐藏/恢复系统光标)
-static napi_threadsafe_function gPointerLockTsfn = nullptr;
+// gPointerLockTsfn 在主线程注册/替换、wl 线程回调读取 (20260822 review:
+// 裸指针跨线程读写 + 先 release 后 create 是 data race — 窗口重建 (launcher
+// resume 再次 init) 恰逢相对模式切换时, wl 线程可能读到已关闭/被交换的
+// 句柄 → UAF 或锁状态通知丢失)。修复: atomic 化; 替换时先原子摘除旧句柄
+// 再 release(释放后 wl 线程不可能再读到旧值); 读到 closing 中旧句柄时
+// napi_call_threadsafe_function 返回错误 — 忽略, 新句柄接管后续事件。
+static std::atomic<napi_threadsafe_function> gPointerLockTsfn{nullptr};
 static void CallJsPointerLock(napi_env env, napi_value cb, void*, void* data) {
     if (env && cb) {
         napi_value undef, arg;
@@ -866,20 +872,26 @@ static napi_value SetPointerLockCallback(napi_env env, napi_callback_info info) 
     napi_value args[1];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     if (argc < 1) return nullptr;
-    if (gPointerLockTsfn) {
-        napi_release_threadsafe_function(gPointerLockTsfn, napi_tsfn_release);
-        gPointerLockTsfn = nullptr;
+    if (napi_threadsafe_function old = gPointerLockTsfn.exchange(nullptr)) {
+        napi_release_threadsafe_function(old, napi_tsfn_release);
     }
     napi_value name;
     napi_create_string_utf8(env, "WLPointerLock", NAPI_AUTO_LENGTH, &name);
-    napi_create_threadsafe_function(env, args[0], nullptr, name,
-                                     0, 1, nullptr, nullptr, nullptr, CallJsPointerLock,
-                                     &gPointerLockTsfn);
+    napi_threadsafe_function newTsfn = nullptr;
+    if (napi_create_threadsafe_function(env, args[0], nullptr, name,
+                                         0, 1, nullptr, nullptr, nullptr, CallJsPointerLock,
+                                         &newTsfn) != napi_ok) {
+        OH_LOG_ERROR(LOG_APP, "[NAPI] setPointerLockCallback: create tsfn failed");
+        return nullptr;
+    }
+    gPointerLockTsfn.store(newTsfn);
     PointerExtras::GetInstance()->SetPointerLockCallback([](bool locked) {
-        if (gPointerLockTsfn) {
-            napi_call_threadsafe_function(gPointerLockTsfn,
-                reinterpret_cast<void*>(static_cast<uintptr_t>(locked ? 1 : 0)),
-                napi_tsfn_blocking);
+        if (napi_threadsafe_function tsfn = gPointerLockTsfn.load()) {
+            if (napi_call_threadsafe_function(tsfn,
+                    reinterpret_cast<void*>(static_cast<uintptr_t>(locked ? 1 : 0)),
+                    napi_tsfn_blocking) != napi_ok) {
+                // tsfn 正在关闭 (窗口重建竞态): 忽略, 新句柄接管后续事件
+            }
         }
     });
     return nullptr;

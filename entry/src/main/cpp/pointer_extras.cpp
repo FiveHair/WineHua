@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 
 #include <window_manager/oh_window.h>
 
@@ -160,10 +161,11 @@ void PointerExtras::OnConstraintResourceDestroyed(wl_resource* r) {
     if (gone.type == ConstraintType::Lock && gone.hasHint) {
         InputManager::GetInstance()->OnPointerWarp(gone.surface, gone.hintX, gone.hintY);
     }
-    // Lock 约束销毁 (游戏退出相对模式 / wine 断连) → 还原 host 系统光标
-    if (gone.type == ConstraintType::Lock) {
-        self->ApplyHostCursorLock(false);
-    }
+    // 注: Lock 约束销毁不再触发解锁 — 宿主冻结只挂在 relative_pointer
+    // 创建上, 约束销毁 (wine 退出相对的同一批里先于 relative 销毁, 且
+    // 红警2 主菜单"可见光标+挂 Lock"本就不冻结) 在此解锁只会有两种结果:
+    // 未锁 (无操作) 或提前解 (relative 对象仍存活, 光标提前恢复)。
+    // 解锁统一在 OnRelativePointerDestroyed (剩余 0 个时)。
     OH_LOG_INFO(LOG_APP, "[PtrExt] constraint destroyed type=%{public}d surf=%{public}p hint=%{public}d",
                 static_cast<int>(gone.type), static_cast<void*>(gone.surface),
                 gone.hasHint ? 1 : 0);
@@ -239,15 +241,20 @@ void PointerExtras::relmgr_get_relative_pointer(wl_client* client, wl_resource*,
 
 void PointerExtras::OnRelativePointerDestroyed(wl_resource* r) {
     auto* self = GetInstance();
+    bool remaining = false;
     {
         std::lock_guard<std::mutex> lk(self->mutex_);
         auto& v = self->relativePointers_;
         v.erase(std::remove(v.begin(), v.end(), r), v.end());
+        remaining = !v.empty();
         OH_LOG_INFO(LOG_APP, "[PtrExt] relative_pointer destroyed (remaining=%{public}zu)", v.size());
     }
     // 锁外调用 (ApplyHostCursorLock 自持 mutex_, 锁内调会死锁);
-    // 相对模式退出 → 还原 host 光标
-    self->ApplyHostCursorLock(false);
+    // 相对模式退出 → 还原 host 光标。仅当全部 relative_pointer 对象都
+    // 销毁时才解锁 (20260822 review #4: wine 可为多 surface 各建一个
+    // 对象, 销毁其中任何一个就解锁会让系统光标提前恢复, 与游戏自绘
+    // 光标并排漂移)。
+    if (!remaining) self->ApplyHostCursorLock(false);
 }
 
 bool PointerExtras::HasRelativePointer() const {
@@ -338,46 +345,52 @@ void PointerExtras::ApplyHostCursorLock(bool lock) {
             if (lockedWindowId_ != 0) {
                 doUnlock = true;
                 ids = {lockedWindowId_};
+                // 受理即清位: 解锁已排入工作线程, 后续 lock 快照不被旧状态吞掉
+                lockedWindowId_ = 0;
             }
         }
     }
-    // Lock/Unlock IPC 序列彼此串行 (窗口服务侧重入序), 与 mutex_ 无关
-    static std::mutex ipcMutex;
-    if (doUnlock) {
-        std::lock_guard<std::mutex> ipc(ipcMutex);
-        const int32_t ret = OH_WindowManager_UnlockCursor(ids[0]);
-        OH_LOG_INFO(LOG_APP, "[PtrExt] host cursor UNLOCKED win=%{public}d ret=%{public}d",
-                    ids[0], ret);
-        {
-            std::lock_guard<std::mutex> lk(mutex_);
-            if (lockedWindowId_ == ids[0]) lockedWindowId_ = 0;
-        }
-        cb(false);
-        return;
-    }
-    if (doLock) {
-        int32_t locked = 0;
-        {
+    if (!doLock && !doUnlock) return;
+    // IPC 挪入独立线程执行 (20260822 review #3): OH_WindowManager_LockCursor
+    // 是同步 Binder 往返, 在调用点 (wl 事件循环线程) 执行会停摆整个
+    // Wayland 循环 — 进游戏瞬间的相对模式切换恰是最高频时刻。工作线程按
+    // ipcMutex 串行保证窗口服务侧重入序; 状态写入与 lockCallback_ 通知在
+    // IPC 完成后进行。
+    std::thread([this, doLock, doUnlock, ids, cb = std::move(cb)]() mutable {
+        // Lock/Unlock IPC 序列彼此串行 (窗口服务侧重入序), 与 mutex_ 无关
+        static std::mutex ipcMutex;
+        if (doUnlock) {
             std::lock_guard<std::mutex> ipc(ipcMutex);
-            // LockCursor 仅对获焦窗口生效 (失焦窗口返回 STATE_ABNORMAL),
-            // 逐个尝试已注册窗口, 成功即停并记下窗口 id 供解锁用
-            for (int32_t id : ids) {
-                const int32_t ret = OH_WindowManager_LockCursor(id, false);  // false = 光标冻结不跟随
-                if (ret == 0) {  // WM_ERROR_OK
-                    locked = id;
-                    OH_LOG_INFO(LOG_APP, "[PtrExt] host cursor LOCKED win=%{public}d", id);
-                    break;
+            const int32_t ret = OH_WindowManager_UnlockCursor(ids[0]);
+            OH_LOG_INFO(LOG_APP, "[PtrExt] host cursor UNLOCKED win=%{public}d ret=%{public}d",
+                        ids[0], ret);
+            cb(false);
+            return;
+        }
+        if (doLock) {
+            int32_t locked = 0;
+            {
+                std::lock_guard<std::mutex> ipc(ipcMutex);
+                // LockCursor 仅对获焦窗口生效 (失焦窗口返回 STATE_ABNORMAL),
+                // 逐个尝试已注册窗口, 成功即停并记下窗口 id 供解锁用
+                for (int32_t id : ids) {
+                    const int32_t ret = OH_WindowManager_LockCursor(id, false);  // false = 光标冻结不跟随
+                    if (ret == 0) {  // WM_ERROR_OK
+                        locked = id;
+                        OH_LOG_INFO(LOG_APP, "[PtrExt] host cursor LOCKED win=%{public}d", id);
+                        break;
+                    }
+                    OH_LOG_WARN(LOG_APP, "[PtrExt] LockCursor win=%{public}d failed ret=%{public}d", id, ret);
                 }
-                OH_LOG_WARN(LOG_APP, "[PtrExt] LockCursor win=%{public}d failed ret=%{public}d", id, ret);
             }
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                if (locked) lockedWindowId_ = locked;
+            }
+            // 全部失败 (无获焦窗口/系统 <API22) 不阻断: rawDelta 相对位移
+            // 通道 (InputManager) 不依赖冻结仍工作; 光标照常隐藏 (相对模式下
+            // 游戏自绘光标, 可见的系统光标只剩干扰)
+            cb(true);
         }
-        {
-            std::lock_guard<std::mutex> lk(mutex_);
-            if (locked) lockedWindowId_ = locked;
-        }
-        // 全部失败 (无获焦窗口/系统 <API22) 不阻断: rawDelta 相对位移
-        // 通道 (InputManager) 不依赖冻结仍工作; 光标照常隐藏 (相对模式下
-        // 游戏自绘光标, 可见的系统光标只剩干扰)
-        cb(true);
-    }
+    }).detach();
 }

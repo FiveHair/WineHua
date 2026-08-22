@@ -9,7 +9,6 @@
 #include <atomic>
 #include <cmath>
 #include <algorithm>
-#include <string>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -416,7 +415,11 @@ void InputManager::SendPointerEvent(uint32_t tl, int action, double px, double p
         std::lock_guard<std::mutex> lk(visibleMutex_);
         auto it = toplevelVisible_.find(tl);
         if (it != toplevelVisible_.end() && !it->second) {
-            OH_LOG_INFO(LOG_APP, "[Input] SUPPRESS tl=%{public}u action=%{public}d (window invisible)", tl, action);
+            // 抽样 120:1: 窗口不可见时 hover 移动也会走到这里 (125Hz 全量会
+            // 刷屏); 只保留采样行确认"输入被抑制"这一状态
+            static uint32_t sSuppressN = 0;
+            if (++sSuppressN % 120 == 1)
+                OH_LOG_INFO(LOG_APP, "[Input] SUPPRESS tl=%{public}u action=%{public}d (window invisible)", tl, action);
             return;
         }
     }
@@ -760,7 +763,10 @@ void InputManager::SendKeyEvent(uint32_t tl, int evdevCode, bool pressed) {
         std::lock_guard<std::mutex> lk(visibleMutex_);
         auto it = toplevelVisible_.find(tl);
         if (it != toplevelVisible_.end() && !it->second) {
-            OH_LOG_INFO(LOG_APP, "[Input] SUPPRESS tl=%{public}u evdev=%{public}d (window invisible)", tl, evdevCode);
+            // 抽样 120:1 (密钥重复按压/自动重复会出现高频, 与指针同一策略)
+            static uint32_t sSuppressN = 0;
+            if (++sSuppressN % 120 == 1)
+                OH_LOG_INFO(LOG_APP, "[Input] SUPPRESS tl=%{public}u evdev=%{public}d (window invisible)", tl, evdevCode);
             return;
         }
     }
@@ -996,24 +1002,15 @@ void InputManager::InjectPointerEnter(uint32_t tl, wl_resource* surface, wl_fixe
     pointerEnterSerial_ = s;
     int nSent = 0;
     struct wl_client* surfClient = wl_resource_get_client(surface);
-    pid_t surfPid = 0; uid_t uid = 0, gid = 0;
-    wl_client_get_credentials(surfClient, &surfPid, &uid, &gid);
-    OH_LOG_INFO(LOG_APP, "[Input] InjectEnter tl=%{public}u serial=%{public}u sx=%{public}.1f sy=%{public}.1f nPtrs=%{public}zu t=%{public}u surf_pid=%{public}d",
-                tl, s, wl_fixed_to_double(sx), wl_fixed_to_double(sy), ptrs.size(), NowMs(),
-                static_cast<int>(surfPid));
+    OH_LOG_INFO(LOG_APP, "[Input] InjectEnter tl=%{public}u serial=%{public}u sx=%{public}.1f sy=%{public}.1f nPtrs=%{public}zu t=%{public}u",
+                tl, s, wl_fixed_to_double(sx), wl_fixed_to_double(sy), ptrs.size(), NowMs());
     for (auto* ptr : ptrs) {
-        pid_t cpid = 0;
-        if (ptr) wl_client_get_credentials(wl_resource_get_client(ptr), &cpid, &uid, &gid);
         // 安全检查: surface 必须与 pointer 属于同一 client (防止跨客户端错误)
         if (ptr && wl_resource_get_client(ptr) == surfClient) {
             wl_pointer_send_enter(ptr, s, surface, sx, sy);
             wl_pointer_send_frame(ptr);
             nSent++;
         }
-        // 诊断: 每个指针资源的 client pid + 是否命中投递 — 判定事件
-        // 真正到达的进程 (20260822 主菜单点击无效排查, nPtrs 3-4→6)
-        OH_LOG_INFO(LOG_APP, "[Input] Enter ptr id=%{public}u client_pid=%{public}d matched=%{public}d",
-                    (unsigned)wl_resource_get_id(ptr), static_cast<int>(cpid), (ptr && wl_resource_get_client(ptr) == surfClient) ? 1 : 0);
     }
     OH_LOG_INFO(LOG_APP, "[Input] InjectEnter OK sent=%{public}d", nSent);
 }
@@ -1037,19 +1034,9 @@ void InputManager::InjectPointerMotion(wl_fixed_t sx, wl_fixed_t sy) {
     }
     // 高频路径 (hover ~125Hz) 抽样 120:1, 防止刷爆 hilog
     static uint32_t sInjMotionLogN = 0;
-    if (++sInjMotionLogN % 120 == 0) {
-        // 抽样行附 client pid 集合 (20260822 主菜单排查): 事件实际送达对象
-        std::string pids;
-        for (auto* ptr : ptrs) {
-            if (!ptr) continue;
-            pid_t mpid = 0; uid_t uid = 0, gid = 0;
-            wl_client_get_credentials(wl_resource_get_client(ptr), &mpid, &uid, &gid);
-            pids += std::to_string(mpid);
-            pids += " ";
-        }
-        OH_LOG_INFO(LOG_APP, "[Input] InjectMotion sx=%{public}.1f sy=%{public}.1f OK n=%{public}u ptrs=%{public}zu pid=[%{public}s]",
-                    wl_fixed_to_double(sx), wl_fixed_to_double(sy), sInjMotionLogN, ptrs.size(), pids.c_str());
-    }
+    if (++sInjMotionLogN % 120 == 0)
+        OH_LOG_INFO(LOG_APP, "[Input] InjectMotion sx=%{public}.1f sy=%{public}.1f OK n=%{public}u ptrs=%{public}zu",
+                    wl_fixed_to_double(sx), wl_fixed_to_double(sy), sInjMotionLogN, ptrs.size());
 }
 
 void InputManager::InjectPointerButton(uint32_t button, uint32_t state) {
@@ -1066,13 +1053,6 @@ void InputManager::InjectPointerButton(uint32_t button, uint32_t state) {
                 button, state, s, enterSerial, ptrs.size(), NowMs());
     for (auto* ptr : ptrs) {
         if (ptr) {
-            pid_t bpid = 0; uid_t uid = 0, gid = 0;
-            wl_client_get_credentials(wl_resource_get_client(ptr), &bpid, &uid, &gid);
-            // 诊断: button 无条件发往所有 pointer 资源 — 逐资源打印送达
-            // client (20260822 主菜单排查; 低频点击路径全量)
-            OH_LOG_INFO(LOG_APP, "[Input] Button→ptr id=%{public}u client_pid=%{public}d enter_focused=%{public}u",
-                        (unsigned)wl_resource_get_id(ptr), static_cast<int>(bpid),
-                        (enterSerial == pointerEnterSerial_.load()) ? 1u : 0u);
             wl_pointer_send_button(ptr, s, NowMs(), button, state);
             wl_pointer_send_frame(ptr);
         }

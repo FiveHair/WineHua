@@ -4,10 +4,8 @@
 #include "geometry.h"
 #include "compositor/surface_data.h"
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstring>
-#include <unistd.h>
 #include <hilog/log.h>
 
 #undef LOG_DOMAIN
@@ -562,24 +560,6 @@ int DesktopCompositor::GetZeroCopyOccluders(uint64_t surfaceKey, uint32_t render
 }
 
 // ============================================================================
-//  直传 A/B 开关 (诊断用, 定责后移除): cache 根下存在 "no-direct-pass"
-//  文件则禁用直传, 回退 CPU 合成 (11e3a67 时代行为)。用于隔离验证
-//  "直传路径 ↔ 主菜单点击失效" 的因果; marker 2s 刷新防每帧 stat。
-// ============================================================================
-static bool DirectPassEnabled()
-{
-    static std::atomic<int64_t> sLastMs{0};
-    static bool sEnabled = true;
-    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (now - sLastMs.load() > 2000) {
-        sLastMs = now;
-        sEnabled = access("/data/storage/el2/base/cache/no-direct-pass", F_OK) != 0;
-    }
-    return sEnabled;
-}
-
-// ============================================================================
 // TakeToplevelFrame: 桌面合成核心 (~390 行)
 // ============================================================================
 
@@ -831,92 +811,23 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                     }
                     if (directPixels) {
                         // assign 而非 swap: 源缓冲属 wl 线程的层状态, 必须拷出
-                        OH_LOG_INFO(LOG_APP,
-                                    "[MW-TAKE] direct pass src=%{public}dx%{public}d "
-                                    "fit=%{public}dx%{public}d+%{public}d,%{public}d",
-                                    directW, directH,
-                                    transform.dstW, transform.dstH,
-                                    transform.offX, transform.offY);
                         out.assign(directPixels->begin(), directPixels->end());
                         w = directW;
                         h = directH;
                         rst->ClearDirty();
-                        // 直传成功诊断 (20:1 抽样): 源像素内容统计 (全黑/alpha=0
-                        // 比例 — 证明"游戏画面是否在此帧"的依据) + 全 sub 明细
-                        // (画面是否在 sub 层): 20260822 黑屏排查用
-                        static uint32_t sDirectPassDiagN = 0;
-                        if (++sDirectPassDiagN % 20 == 1) {
-                            const uint32_t* pxu =
-                                reinterpret_cast<const uint32_t*>(directPixels->data());
-                            size_t total = directPixels->size() / 4;
-                            int blackPx = 0, alpha0Px = 0;
-                            size_t n = std::max<size_t>(1, total / 256);
-                            for (size_t i = 0; i < total; i += n) {
-                                const uint32_t v = pxu[i];
-                                if ((v & 0xFFu) == 0 && ((v >> 8) & 0xFFu) == 0 &&
-                                    ((v >> 16) & 0xFFu) == 0) blackPx++;
-                                if ((v >> 24) == 0) alpha0Px++;
-                            }
-                            OH_LOG_INFO(LOG_APP,
-                                        "[MW-TAKE] direct *passDiag* src=%{public}dx%{public}d "
-                                        "black=%{public}d/%{public}zu alpha0=%{public}d subs=%{public}zu fsid=%{public}u",
-                                        directW, directH, blackPx, total / 256, alpha0Px,
-                                        subsurfaceLayers_.size(), fullscreenId);
-                            for (const auto& sl : subsurfaceLayers_) {
-                                OH_LOG_INFO(LOG_APP,
-                                            "[MW-TAKE] direct *subs* pt=%{public}u key=%{public}llu "
-                                            "ext=%{public}d w=%{public}d h=%{public}d "
-                                            "vpDst=%{public}dx%{public}d fmt=%{public}d op=%{public}d "
-                                            "px=%{public}zu",
-                                            sl.parentToplevel,
-                                            static_cast<unsigned long long>(sl.surfaceKey),
-                                            sl.isExternal ? 1 : 0,
-                                            sl.w, sl.h, sl.vpDstW, sl.vpDstH,
-                                            static_cast<int>(sl.shmFormat), sl.opaque ? 1 : 0,
-                                            sl.pixels.size());
-                            }
-                        }
                         const auto directDone = TakeClock::now();
                         // 分段语义同下: 直传无基底拷贝/快照/blit, 全部计入输出段
                         breakdown.Add(elapsedUs(takeStarted, lockAcquired),
                                       0, 0, 0,
                                       elapsedUs(lockAcquired, directDone),
                                       elapsedUs(takeStarted, directDone));
-                        return true;
-                    }
-                    // 直传失败诊断 (20:1 抽样): 实际几何 vs fit 期望 —
-                    // 一次定位画面到底在 sub 还是窗口帧/为何几何对不上
-                    static uint32_t sDirectFailN = 0;
-                    if (++sDirectFailN % 20 == 1) {
-                        const int fw = fsTop->Width(), fh = fsTop->Height();
-                        const size_t fp = fsTop->Pixels().size();
-                        const int cw = contentSub ? contentSub->w : 0;
-                        const int ch = contentSub ? contentSub->h : 0;
-                        const size_t cp = contentSub ? contentSub->pixels.size() : 0;
+                        // 帧总结 (与 CPU 合成分支同格式, 数据量一致 — 直传
+                        // 期间也能从日志确认"当前在直传模式")
                         OH_LOG_INFO(LOG_APP,
-                                    "[MW-TAKE] direct *fail* occl=%{public}d/t%{public}d/tl%{public}u/"
-                                    "zc%{public}d sub=%{public}dx%{public}d px=%{public}zu "
-                                    "fsTop=%{public}dx%{public}d px=%{public}zu shm=%{public}d "
-                                    "want=%{public}dx%{public}d fsid=%{public}u root=%{public}dx%{public}d",
-                                    topOccluded ? 1 : 0, occlType, occlTl, occlZc ? 1 : 0,
-                                    cw, ch, cp, fw, fh, fp,
-                                    fsTop->ShmFormat(), transform.srcW, transform.srcH,
-                                    fullscreenId, rootW, rootH);
-                        // 全 subsurface 状态摘要: 游戏画面层是谁/归属/几何/
-                        // 格式 — 直接回答 contentSub 为何没选中
-                        for (const auto& sl : subsurfaceLayers_) {
-                            OH_LOG_INFO(LOG_APP,
-                                        "[MW-TAKE] direct *subs* pt=%{public}u key=%{public}llu "
-                                        "ext=%{public}d w=%{public}d h=%{public}d "
-                                        "vpDst=%{public}dx%{public}d fmt=%{public}d op=%{public}d "
-                                        "px=%{public}zu",
-                                        sl.parentToplevel,
-                                        static_cast<unsigned long long>(sl.surfaceKey),
-                                        sl.isExternal ? 1 : 0,
-                                        sl.w, sl.h, sl.vpDstW, sl.vpDstH,
-                                        static_cast<int>(sl.shmFormat), sl.opaque ? 1 : 0,
-                                        sl.pixels.size());
-                        }
+                                    "[MW-TAKE] root #%{public}u %{public}dx%{public}d "
+                                    "subsurfaces=%{public}zu mode=direct fs=%{public}d",
+                                    id, w, h, subsurfaceLayers_.size(), hasFullscreen ? 1 : 0);
+                        return true;
                     }
                 }
             }
@@ -963,17 +874,6 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             out.size() != rootBytes ||
             desktopOutputRootFrameSerial_ != desktopRootFrameSerial_ ||
             desktopCompositionSignature_ != compositionSignature;
-        if (rebuildBase) {
-            // 诊断: 局部合成未生效时确认触发条件 (全帧合成路径的每次重建)
-            OH_LOG_INFO(LOG_APP,
-                        "[MW-REBASE] init=%{public}d sizeMismatch=%{public}d "
-                        "rootSerial=%{public}llu/%{public}llu sigChanged=%{public}d",
-                        !desktopOutputInitialized_ ? 1 : 0,
-                        out.size() != rootBytes ? 1 : 0,
-                        static_cast<unsigned long long>(desktopOutputRootFrameSerial_),
-                        static_cast<unsigned long long>(desktopRootFrameSerial_),
-                        desktopCompositionSignature_ != compositionSignature ? 1 : 0);
-        }
 
         /*
          * 层间快照结构 (BlitSource): 把 blit 要读的全部源像素/元数据拷成
@@ -1250,8 +1150,18 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                     fillBlackRect(transform.offX + transform.dstW, transform.offY,
                                   rootW - transform.offX - transform.dstW, transform.dstH);
                 } else {
-                    std::fill_n(reinterpret_cast<uint32_t*>(composited.data()),
-                                composited.size() / 4, 0xFF000000u);
+                    // 垫黑底只垫本帧重绘范围 (R): 整帧垫黑在局部合成时会
+                    // 抹掉 R 外上帧已合成的内容 (20260822 review 发现:
+                    // ARGB 全屏窗口 contentOpaque=false 时命中此分支, 上方
+                    // 弹窗更新触发 partial 帧即黑屏一次)。full 帧垫整帧。
+                    if (!dmg.full) {
+                        for (int row = dmg.y; row < dmg.y + dmg.h; ++row)
+                            std::fill_n(reinterpret_cast<uint32_t*>(composited.data()) +
+                                        static_cast<size_t>(row) * rootW + dmg.x, dmg.w, 0xFF000000u);
+                    } else {
+                        std::fill_n(reinterpret_cast<uint32_t*>(composited.data()),
+                                    composited.size() / 4, 0xFF000000u);
+                    }
                 }
                 if (!fullscreenContentCovered) {
                     BlitScaled(composited.data(), rootW, rootH,
