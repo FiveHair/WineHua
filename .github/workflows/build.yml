@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - master
-      - feature/vkd3d-capability-probe
+      - main-ui
     tags:
       - 'dev-*'                 # 开发版 (直接发布, 不占 Latest 徽章)
       - 'rc-*'                  # RC 版 (占 Latest 徽章)
