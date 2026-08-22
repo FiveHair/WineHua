@@ -961,7 +961,11 @@ static napi_value SendPointerEvent(napi_env env, napi_callback_info info) {
     if (argc >= 8) {
         napi_get_value_bool(env, args[7], &fromMouse);
     }
-    if (action != 1) {  // 跳过 MOVE (高频), 只记录 button/enter/leave
+    // 跳过 MOVE (=3, 高频), 只记录 button/enter/leave。
+    // 曾误写 action!=1: 跳过的是 PRESS (日志只见 Release 不见 Press),
+    // 且 MOVE 全量刷屏 — ArkTS MouseAction: Press=1 Release=2 Move=3
+    // (与 input_manager.cpp ACT_* 注释一致)
+    if (action != 3) {
         OH_LOG_INFO(LOG_APP, "[PIPE] ptr tl=%{public}u a=%{public}d btn=0x%{public}x "
                     "px=(%{public}.0f,%{public}.0f) raw=(%{public}.1f,%{public}.1f) fromMouse=%{public}d",
                     tl, action, button, px, py, rawDx, rawDy, fromMouse ? 1 : 0);

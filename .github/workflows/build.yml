@@ -3,7 +3,9 @@ name: Build HAP (arm64-v8a, unsigned)
 
 on:
   push:
-    branches: [master, main-ui]
+    branches:
+      - master
+      - main-ui
     tags:
       - 'dev-*'                 # 开发版 (直接发布, 不占 Latest 徽章)
       - 'rc-*'                  # RC 版 (占 Latest 徽章)
