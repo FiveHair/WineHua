@@ -3,6 +3,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import testNapi from 'libentry.so';
 import { WineWindowManager } from '../service/WineWindowManager';
 import { InputSettingsService } from '../service/InputSettingsService';
+import { InputDeviceMapper } from '../service/InputDeviceMapper';
 import { EVDEV_KEY_ENTER, OH2EVDEV } from '../common/KeyMap';
 import { mapMouseButton } from '../common/MouseMap';
 
@@ -593,7 +594,18 @@ export struct DesktopLayer {
               hilog.info(DOMAIN, 'CLICK-PIPE', '[ArkTS] MOUSE-MOVE tl=%{public}d px=(%{public}d,%{public}d) n=%{public}d',
                 tl, px, py, this.hoverLogCounter);
             }
-            testNapi.sendPointerEvent(tl, MouseAction.Move, px, py, 0, ev.rawDeltaX, ev.rawDeltaY);
+            // rawDelta 按设备校准 (与 WineWindow 同规则: 鼠标 2.5 / 触控板 0.75)
+            // — 收口 ArkTS 时此处漏乘, 桌面模式相对模式增量只有融合窗口的
+            // 1/2.5, 同一鼠标两种手感; 绝对模式有差分自标定, 不受影响
+            let rawDx = ev.rawDeltaX ?? 0;
+            let rawDy = ev.rawDeltaY ?? 0;
+            const devId = ev.deviceId ?? 0;
+            if (devId > 0) {
+              const s = InputDeviceMapper.getInstance().getScale(devId);
+              rawDx *= s;
+              rawDy *= s;
+            }
+            testNapi.sendPointerEvent(tl, MouseAction.Move, px, py, 0, rawDx, rawDy);
             return;
           }
           if (ev.action !== MouseAction.Press && ev.action !== MouseAction.Release) return;
