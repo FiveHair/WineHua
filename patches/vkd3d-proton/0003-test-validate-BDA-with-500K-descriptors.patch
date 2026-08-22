@@ -12,17 +12,17 @@ index 9385b296..92d9e697 100644
 --- a/tests/vkd3d_limited_500k_microtest.c
 +++ b/tests/vkd3d_limited_500k_microtest.c
 @@ -16,6 +16,7 @@
-
+ 
  #define VKD3D_LIMITED_MAX_RESOURCE_VIEW_HEAP_SIZE 500000u
  #define VKD3D_LIMITED_COPY_BUFFER_SIZE 256u
 +#define VKD3D_LIMITED_BDA_READBACK_OFFSET 64u
-
+ 
  /*
   * ByteAddressBuffer t0;
 @@ -127,6 +128,27 @@ static void vkd3d_limited_dump_bytes(const char *label, const uint8_t *bytes, si
      fputc('\n', stderr);
  }
-
+ 
 +static int vkd3d_limited_validate_bytes(const char *label, const uint8_t *actual,
 +        const uint8_t *expected, size_t byte_count)
 +{
@@ -55,7 +55,7 @@ index 9385b296..92d9e697 100644
 +                    : "requested D3D12 GPU operations and byte readback passed");
      return fclose(file) == 0;
  }
-
+ 
 @@ -167,7 +189,7 @@ int main(int argc, char **argv)
      D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_desc;
      D3D12_ROOT_SIGNATURE_DESC root_signature_desc;
@@ -160,7 +160,7 @@ index 9385b296..92d9e697 100644
 +            goto done;
 +        }
      }
-
+ 
      stage = descriptor_heap ? "descriptor-gpu" : "copy";
 @@ -460,6 +552,32 @@ int main(int argc, char **argv)
          ID3D12GraphicsCommandList_ResourceBarrier(command_list, 1, &barrier);
@@ -197,7 +197,7 @@ index 9385b296..92d9e697 100644
      {
 @@ -510,7 +628,8 @@ int main(int argc, char **argv)
      }
-
+ 
      read_range.Begin = 0;
 -    read_range.End = sizeof(expected);
 +    read_range.End = descriptor_heap
@@ -208,7 +208,7 @@ index 9385b296..92d9e697 100644
 @@ -518,21 +637,16 @@ int main(int argc, char **argv)
          goto done;
      }
-
+ 
 -    if (memcmp(mapped_data, expected, sizeof(expected)))
 +    stage = descriptor_heap ? "readback-descriptor" : "readback-copy";
 +    if (!vkd3d_limited_validate_bytes("DESCRIPTOR", mapped_data, expected, sizeof(expected)))
@@ -218,7 +218,7 @@ index 9385b296..92d9e697 100644
 -        const uint8_t *actual = mapped_data;
 -        size_t mismatch_index;
 +        const uint8_t *bda_actual = (const uint8_t *)mapped_data + VKD3D_LIMITED_BDA_READBACK_OFFSET;
-
+ 
 -        for (mismatch_index = 0; mismatch_index < sizeof(expected); ++mismatch_index)
 -        {
 -            if (actual[mismatch_index] != expected[mismatch_index])

@@ -196,30 +196,18 @@ chunk. Apply after 0001 Map Width flush.
  
 --- a/libs/vkd3d/vkd3d_private.h
 +++ b/libs/vkd3d/vkd3d_private.h
-@@ -896,6 +896,10 @@
- 
+@@ -897,2 +897,6 @@
      struct vkd3d_private_store private_store;
- 
 +    /* WineHua: D3D12 Map/Unmap refcount for persistently mapped UPLOAD
 +     * buffers. ExecuteCommandLists flushes desc.Width, not the parent slab. */
 +    LONG winehua_map_count;
 +    struct list winehua_mapped_entry;
  };
- 
- static inline bool d3d12_resource_is_buffer(const struct d3d12_resource *resource)
-@@ -922,6 +926,7 @@
- LONG64 vkd3d_allocate_cookie();
- 
+@@ -924,2 +928,3 @@
  bool d3d12_resource_is_cpu_accessible(const struct d3d12_resource *resource);
 +void vkd3d_winehua_flush_mapped_upload_buffers(struct d3d12_device *device);
  void d3d12_resource_promote_desc(const D3D12_RESOURCE_DESC *desc, D3D12_RESOURCE_DESC1 *desc1);
- HRESULT d3d12_resource_validate_desc(const D3D12_RESOURCE_DESC1 *desc, struct d3d12_device *device);
- VkImageSubresource d3d12_resource_get_vk_subresource(const struct d3d12_resource *resource,
-@@ -2944,6 +2949,7 @@
-     PFN_vkd3d_signal_event signal_event;
- 
+@@ -2949,2 +2954,3 @@
      pthread_mutex_t mutex;
 +    struct list winehua_mapped_uploads;
      struct vkd3d_render_pass_cache render_pass_cache;
- 
-     VkPhysicalDeviceMemoryProperties memory_properties;

@@ -14,7 +14,7 @@ index 1732c314..9385b296 100644
 @@ -17,6 +17,46 @@
  #define VKD3D_LIMITED_MAX_RESOURCE_VIEW_HEAP_SIZE 500000u
  #define VKD3D_LIMITED_COPY_BUFFER_SIZE 256u
-
+ 
 +/*
 + * ByteAddressBuffer t0;
 + * ByteAddressBuffer t4 : register(t4);
@@ -59,7 +59,7 @@ index 1732c314..9385b296 100644
  {
      D3D12_RESOURCE_DESC desc;
 @@ -65,9 +105,10 @@ static int vkd3d_limited_parse_descriptor_count(int argc, char **argv, UINT *des
-
+ 
      errno = 0;
      value = strtoul(argument, &end, 10);
 -    if (errno || !end || *end || value > VKD3D_LIMITED_MAX_RESOURCE_VIEW_HEAP_SIZE)
@@ -74,16 +74,16 @@ index 1732c314..9385b296 100644
 @@ -86,18 +127,18 @@ static void vkd3d_limited_dump_bytes(const char *label, const uint8_t *bytes, si
      fputc('\n', stderr);
  }
-
+ 
 -static void vkd3d_limited_write_result(const char *path, int status, const char *stage)
 +static int vkd3d_limited_write_result(const char *path, int status, const char *stage)
  {
      FILE *file;
-
+ 
      if (!path || !(file = fopen(path, "wb")))
 -        return;
 +        return 0;
-
+ 
      fprintf(file, "{\"status\":\"%s\",\"stage\":\"%s\",\"message\":\"%s\"}\n",
              status ? "FAIL" : "PASS", stage,
              status ? "see Wine stderr for the failed 500K microtest operation"
@@ -92,17 +92,17 @@ index 1732c314..9385b296 100644
 +                    : "500K descriptor heap GPU read and D3D12 copy/readback passed");
 +    return fclose(file) == 0;
  }
-
+ 
  /*
 @@ -112,7 +153,7 @@ static void vkd3d_limited_write_checkpoint(const char *path, const char *state,
      if (!path || !(file = fopen(path, "wb")))
          return;
-
+ 
 -    fprintf(file, "{\"state\":\"%s\",\"stage\":\"%s\"}\\n", state, stage);
 +    fprintf(file, "{\"state\":\"%s\",\"stage\":\"%s\"}\n", state, stage);
      fclose(file);
  }
-
+ 
 @@ -123,11 +164,17 @@ int main(int argc, char **argv)
          0x30, 0x4b, 0x2d, 0x43, 0x4f, 0x50, 0x59, 0x00,
      };
@@ -146,10 +146,10 @@ index 1732c314..9385b296 100644
 -    UINT increment_size;
 +    UINT increment_size = 0;
      int status = 1;
-
+ 
      vkd3d_limited_write_checkpoint(checkpoint_path, "RUNNING", "startup");
 @@ -284,26 +335,136 @@ int main(int argc, char **argv)
-
+ 
      if (descriptor_heap)
      {
 +        heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -249,7 +249,7 @@ index 1732c314..9385b296 100644
 +            goto done;
 +        }
      }
-
+ 
 -    stage = "copy";
 +    stage = descriptor_heap ? "descriptor-gpu" : "copy";
      ID3D12GraphicsCommandList_CopyBufferRegion(command_list, resource, 0, upload, 0, sizeof(expected));
@@ -291,7 +291,7 @@ index 1732c314..9385b296 100644
 +    {
 +        ID3D12GraphicsCommandList_CopyBufferRegion(command_list, readback, 0, resource, 0, sizeof(expected));
 +    }
-
+ 
      if (FAILED(hr = ID3D12GraphicsCommandList_Close(command_list)))
      {
 @@ -389,8 +550,16 @@ done:
@@ -313,7 +313,7 @@ index 1732c314..9385b296 100644
      if (upload)
 @@ -411,7 +580,13 @@ done:
          FreeLibrary(d3d12_module);
-
+ 
      /* A passing readback is insufficient if object teardown faults. */
 -    vkd3d_limited_write_result(result_path, status, stage);
 +    if (!vkd3d_limited_write_result(result_path, status, stage))
@@ -323,6 +323,6 @@ index 1732c314..9385b296 100644
 +    }
 +    fprintf(stderr, "VKD3D_LIMITED_500K_MICROTEST FINAL: status=%s stage=%s result_written=1.\n",
 +            status ? "FAIL" : "PASS", stage);
-
+ 
      return status;
  }

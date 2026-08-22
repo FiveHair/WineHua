@@ -22,7 +22,7 @@ index d28b6fa6..d8501ef4 100644
 @@ -1361,6 +1361,13 @@ void vkd3d_meta_get_predicate_pipeline(struct vkd3d_meta_ops *meta_ops,
      info->data_size = predicate_ops->data_sizes[command_type];
  }
-
+ 
 +static bool vkd3d_winehua_disable_query_meta(void)
 +{
 +    const char *value = getenv("VKD3D_WINEHUA_DISABLE_QUERY_META");
@@ -36,7 +36,7 @@ index d28b6fa6..d8501ef4 100644
 @@ -1380,8 +1387,14 @@ HRESULT vkd3d_meta_ops_init(struct vkd3d_meta_ops *meta_ops, struct d3d12_device
      if (FAILED(hr = vkd3d_swapchain_ops_init(&meta_ops->swapchain, device)))
          goto fail_swapchain_ops;
-
+ 
 -    if (FAILED(hr = vkd3d_query_ops_init(&meta_ops->query, device)))
 +    if (vkd3d_winehua_disable_query_meta())
 +    {
@@ -46,7 +46,7 @@ index d28b6fa6..d8501ef4 100644
 +    {
          goto fail_query_ops;
 +    }
-
+ 
      if (FAILED(hr = vkd3d_predicate_ops_init(&meta_ops->predicate, device)))
          goto fail_predicate_ops;
 diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
@@ -56,7 +56,7 @@ index 72fbb39c..be3d475f 100644
 @@ -1511,15 +1511,31 @@ static HRESULT STDMETHODCALLTYPE d3d12_resource_GetDevice(d3d12_resource_iface *
      return d3d12_device_query_interface(resource->device, iid, device);
  }
-
+ 
 +static bool vkd3d_winehua_force_coherent_map_sync(void)
 +{
 +    const char *value = getenv("VKD3D_WINEHUA_FORCE_COHERENT_MAP_SYNC");
@@ -70,10 +70,10 @@ index 72fbb39c..be3d475f 100644
      const struct d3d12_device *device = resource->device;
 +    VkDeviceSize atom_size;
 +    VkDeviceSize range_end;
-
+ 
      if (range && range->End <= range->Begin)
          return false;
-
+ 
 -    if (device->memory_properties.memoryTypes[resource->mem.device_allocation.vk_memory_type].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
 +    /* WineHua's OHOS vtest transport uses distinct Host and Guest mappings.
 +     * A Host-coherent allocation therefore still needs an explicit command to
@@ -84,12 +84,12 @@ index 72fbb39c..be3d475f 100644
 +            & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) &&
 +            !vkd3d_winehua_force_coherent_map_sync())
          return false;
-
+ 
      vk_mapped_range->sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
 @@ -1543,6 +1559,14 @@ static bool d3d12_resource_get_mapped_memory_range(struct d3d12_resource *resour
          vk_mapped_range->size = range->End - range->Begin;
      }
-
+ 
 +    /* D3D12 map ranges are byte-granular, while non-coherent Vulkan cache
 +     * operations must cover whole nonCoherentAtomSize units. */
 +    atom_size = device->device_info.properties2.properties.limits.nonCoherentAtomSize;
@@ -100,11 +100,11 @@ index 72fbb39c..be3d475f 100644
 +
      return true;
  }
-
-@@ -1627,6 +1651,26 @@ static HRESULT STDMETHODCALLTYPE d3d12_resource_Map(d3d12_resource_iface *iface,
+ 
+@@ -1627,6 +1651,25 @@ static HRESULT STDMETHODCALLTYPE d3d12_resource_Map(d3d12_resource_iface *iface,
          TRACE("Returning pointer %p.\n", *data);
      }
-
+ 
 +    /* Mark upload allocations as CPU-written even when an application keeps
 +     * the D3D12 resource persistently mapped and never calls Unmap. Venus uses
 +     * this explicit flush as write intent and publishes the current contents
@@ -130,7 +130,7 @@ index 72fbb39c..be3d475f 100644
 @@ -5857,6 +5893,17 @@ HRESULT d3d12_descriptor_heap_create(struct d3d12_device *device,
          return E_INVALIDARG;
      }
-
+ 
 +#ifdef VKD3D_EXPERIMENTAL_LIMITED_RESOURCE_VIEW_HEAPS
 +    if ((desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
 +            && desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV
@@ -158,17 +158,17 @@ index a4eb6f62..53e1cddb 100644
 +                return VKD3D_MAX_SHADER_VISIBLE_RESOURCE_VIEW_DESCRIPTOR_COUNT
 +                        + VKD3D_DESCRIPTOR_DEBUG_NUM_PAD_DESCRIPTORS;
 +            return VKD3D_MAX_SHADER_VISIBLE_RESOURCE_VIEW_DESCRIPTOR_COUNT;
-
+ 
          case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER:
 -            return 2048;
 +            return VKD3D_MAX_SHADER_VISIBLE_SAMPLER_DESCRIPTOR_COUNT;
-
+ 
          default:
              ERR("Invalid descriptor heap type %d.\n", heap_type);
 @@ -4934,25 +4935,41 @@ static uint32_t vkd3d_bindless_state_get_bindless_flags(struct d3d12_device *dev
              !device_info->descriptor_indexing_features.descriptorBindingVariableDescriptorCount)
          return 0;
-
+ 
 -    if (device_info->descriptor_indexing_properties.maxPerStageDescriptorUpdateAfterBindSampledImages >= 1000000 &&
 +    if (device_info->descriptor_indexing_properties.maxPerStageDescriptorUpdateAfterBindSamplers >=
 +            VKD3D_MAX_SHADER_VISIBLE_SAMPLER_DESCRIPTOR_COUNT &&
@@ -183,7 +183,7 @@ index a4eb6f62..53e1cddb 100644
              device_info->descriptor_indexing_features.shaderSampledImageArrayNonUniformIndexing &&
              device_info->descriptor_indexing_features.shaderUniformTexelBufferArrayNonUniformIndexing)
          flags |= VKD3D_BINDLESS_SAMPLER | VKD3D_BINDLESS_SRV;
-
+ 
 -    if (device_info->descriptor_indexing_properties.maxPerStageDescriptorUpdateAfterBindStorageImages >= 1000000 &&
 +    if (device_info->descriptor_indexing_properties.maxPerStageDescriptorUpdateAfterBindStorageImages >=
 +            VKD3D_MAX_SHADER_VISIBLE_RESOURCE_VIEW_DESCRIPTOR_COUNT &&
@@ -194,7 +194,7 @@ index a4eb6f62..53e1cddb 100644
              device_info->descriptor_indexing_features.shaderStorageImageArrayNonUniformIndexing &&
              device_info->descriptor_indexing_features.shaderStorageTexelBufferArrayNonUniformIndexing)
          flags |= VKD3D_BINDLESS_UAV;
-
+ 
 -    if (device_info->descriptor_indexing_properties.maxPerStageDescriptorUpdateAfterBindUniformBuffers >= 1000000 &&
 +    if (device_info->descriptor_indexing_properties.maxPerStageDescriptorUpdateAfterBindUniformBuffers >=
 +            VKD3D_MAX_SHADER_VISIBLE_RESOURCE_VIEW_DESCRIPTOR_COUNT &&
@@ -226,7 +226,7 @@ index a4eb6f62..53e1cddb 100644
 +            device_info->properties2.properties.limits.minStorageBufferOffsetAlignment <= 16)
      {
          flags |= VKD3D_BINDLESS_RAW_SSBO;
-
+ 
 diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
 index 687bafc9..c39de9d5 100644
 --- a/libs/vkd3d/vkd3d_private.h
@@ -234,7 +234,7 @@ index 687bafc9..c39de9d5 100644
 @@ -57,6 +57,14 @@
  #define VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS 8u
  #define VKD3D_MAX_MUTABLE_DESCRIPTOR_TYPES 6u
-
+ 
 +#define VKD3D_MAX_SHADER_VISIBLE_SAMPLER_DESCRIPTOR_COUNT 2048u
 +
 +#ifdef VKD3D_EXPERIMENTAL_LIMITED_RESOURCE_VIEW_HEAPS
@@ -244,7 +244,7 @@ index 687bafc9..c39de9d5 100644
 +#endif
 +
  #define VKD3D_PIPELINE_BIND_POINT_COUNT 2u
-
+ 
  #define VKD3D_TILE_SIZE 65536
 diff --git a/meson.build b/meson.build
 index f9e813c5..9e39f0be 100644
@@ -256,12 +256,12 @@ index f9e813c5..9e39f0be 100644
  enable_descriptor_qa     = get_option('enable_descriptor_qa')
 +enable_limited_resource_view_heaps = get_option('enable_limited_resource_view_heaps')
  enable_trace             = get_option('enable_trace')
-
+ 
  if enable_d3d12 == 'auto'
 @@ -60,6 +61,13 @@ if enable_descriptor_qa
    add_project_arguments('-DVKD3D_ENABLE_DESCRIPTOR_QA', language : 'c')
  endif
-
+ 
 +if enable_limited_resource_view_heaps
 +  if enable_descriptor_qa
 +    error('The 500K resource-view profile does not support descriptor QA padding.')
