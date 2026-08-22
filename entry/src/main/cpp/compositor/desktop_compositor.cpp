@@ -975,7 +975,22 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                     const auto it = lastTopSerial_.find(layer.toplevelId);
                     if (it != lastTopSerial_.end() && it->second == cst->FrameSerial())
                         continue;
-                    ux = cst->X(); uy = cst->Y(); uw = cst->Width(); uh = cst->Height();
+                    if (hasFullscreen && layer.toplevelId == fullscreenId) {
+                        // 全屏游戏窗口: R 贡献 = fit 后屏幕内容区 — 与
+                        // blitSubsurface 全屏分支同几何 (内容 blit 到
+                        // transform.offX/Y + dstW/H)。窗口逻辑几何 (红警2
+                        // 全屏窗口 800x600) 不是屏幕矩形: 直用会把 R 算成
+                        // "左上角 800x600" (MW-TAKE dmg=(0,0 800x600) 实锤),
+                        // R 外区域永久复用上帧 → 画面只剩左上角。黑边
+                        // (fillBlackRect) 不在 R 无需重画: 首帧/rebuildBase
+                        // 整帧时已落盘, 之后黑边不变。
+                        FitMapLayerRect(transform, layer.x - fullscreenX,
+                                        layer.y - fullscreenY,
+                                        cst->Width(), cst->Height(),
+                                        ux, uy, uw, uh);
+                    } else {
+                        ux = cst->X(); uy = cst->Y(); uw = cst->Width(); uh = cst->Height();
+                    }
                 }
                 if (uw <= 0 || uh <= 0) continue;
                 unionRect(ux, uy, uw, uh);
