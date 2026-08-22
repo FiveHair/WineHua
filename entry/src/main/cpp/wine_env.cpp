@@ -187,7 +187,8 @@ void PrependEnvValue(std::vector<std::string>& env, const std::string& key,
 /* DirectDraw compatibility overlay.  Default-on whenever the packaged
  * cnc-ddraw DLL exists: classic DDraw games then load it with no user
  * setting.  Opt out with WINEHUA_DDRAW_BACKEND=wine (or off/builtin/0).
- * Uses WINEDLLDIR/WINEDLLOVERRIDES, not the DXVK ntdll hook.  Must run
+ * Sets WINEHUA_DDRAW_ROOT so ntdll search_winehua_ddraw_overlay can open
+ * the PE through \\??\\unix before DllPath hits 64-bit system32.  Must run
  * after per-run environment lines are merged. */
 void AppendDdrawBackendEnv(std::vector<std::string>& env)
 {
@@ -212,10 +213,16 @@ void AppendDdrawBackendEnv(std::vector<std::string>& env)
         return;
 
     UpsertEnvLine(env, "WINEHUA_DDRAW_BACKEND=cnc");
-    /* cnc-ddraw reads this before falling back to ddraw.ini next to the DLL. */
-    UpsertEnvLine(env, "CNC_DDRAW_CONFIG_FILE=" + cncRoot + "/ddraw.ini");
-    PrependEnvValue(env, "WINEDLLOVERRIDES", "ddraw=n", ";");
-    PrependEnvValue(env, "WINEDLLPATH", cnc86 + ":" + cnc64, ":");
+    UpsertEnvLine(env, "WINEHUA_DDRAW_ROOT=" + cncRoot);
+    /* PE GetPrivateProfile cannot open a Unix path. StageCncDdrawOverlay
+     * copies this ini to syswow64, which 32-bit games can actually read. */
+    UpsertEnvLine(env, "CNC_DDRAW_CONFIG_FILE=C:\\windows\\syswow64\\ddraw.ini");
+    /* Native first so 32-bit C&C-style games hit the overlay. Builtin
+     * fallback is required: the overlay is i386-only, and `ddraw=n` with no
+     * x64 native image makes every 64-bit LoadLibrary("ddraw.dll") fail, which
+     * is the Explorer flash-exit seen with C:\smoke\x64\winehua_ddraw_smoke.exe. */
+    PrependEnvValue(env, "WINEDLLOVERRIDES", "ddraw=n,b", ";");
+    PrependEnvValue(env, "WINEDLLPATH", cnc86, ":");
 
     /* Shift existing WINEDLLDIR<n> entries up by two slots and put the
      * cnc-ddraw overlay first.  ntdll stops scanning at the first missing
@@ -237,10 +244,16 @@ void AppendDdrawBackendEnv(std::vector<std::string>& env)
         while (isdigit((unsigned char)*p)) ++p;
         return *p == '=';
     }), env.end());
-    UpsertEnvLine(env, "WINEDLLDIR0=" + cnc86);
-    UpsertEnvLine(env, "WINEDLLDIR1=" + cnc64);
+    unsigned int slot = 0;
+    UpsertEnvLine(env, "WINEDLLDIR" + std::to_string(slot++) + "=" + cnc86);
+    /* Do not occupy a WINEDLLDIR index with a directory that does not exist.
+     * ntdll stops at the first missing *variable*, but a missing path still
+     * wastes a slot and has broken 32-bit ntdll lookup when combined with
+     * later VKD3D rewrites. */
+    if (access((cnc64 + "/ddraw.dll").c_str(), R_OK) == 0)
+        UpsertEnvLine(env, "WINEDLLDIR" + std::to_string(slot++) + "=" + cnc64);
     for (size_t i = 0; i < dirs.size(); ++i)
-        UpsertEnvLine(env, "WINEDLLDIR" + std::to_string(i + 2) + "=" + dirs[i]);
+        UpsertEnvLine(env, "WINEDLLDIR" + std::to_string(slot + i) + "=" + dirs[i]);
 }
 
 void AppendD3dBackendEnv(std::vector<std::string>& env,

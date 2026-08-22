@@ -506,15 +506,15 @@ bool GraphicsBroker::SendVirglDetachLocked(uint64_t surfaceKey)
 
 bool GraphicsBroker::AttachZeroCopyTarget(uint64_t surfaceKey,
                                           OHNativeWindow* producerWindow,
-                                          uint64_t framePeriodNs)
+                                          uint64_t framePeriodNs,
+                                          bool vulkanSurface)
 {
     if (!surfaceKey || !producerWindow || GetState().active != GraphicsBackend::Virgl)
         return false;
 
     std::lock_guard<std::mutex> lock(virglIpcMutex_);
     if (zeroCopyAttachedSurfaces_.count(surfaceKey)) return true;
-    uint32_t flags = vulkanPresentMode_.load(std::memory_order_acquire)
-        ? virgl_ipc::kSurfaceVulkan : 0;
+    uint32_t flags = vulkanSurface ? virgl_ipc::kSurfaceVulkan : 0;
     if (virglServerUsesInProcess_.load(std::memory_order_acquire))
         flags |= virgl_ipc::kSurfaceNativeObjectReference;
     if (!SendVirglTargetLocked(surfaceKey, producerWindow, framePeriodNs, flags)) return false;

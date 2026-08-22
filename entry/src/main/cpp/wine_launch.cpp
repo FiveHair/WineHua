@@ -263,6 +263,38 @@ static bool EnsureWow64Files(const std::string& binDir, const std::string& prefi
                 total, copied, failed);
     return total > 0 && failed == 0;
 }
+
+/* EnsureWow64Files copies Wine's builtin i386 PE ddraw.dll into syswow64.
+ * LoadLibrary("ddraw.dll") from a 32-bit process finds that copy first, so
+ * WINEDLLDIR/WINEDLLOVERRIDES never reach the cnc-ddraw overlay.  Restage
+ * the overlay after every wow64 refresh and after wineboot, which can
+ * rewrite the same slot from wine.inf. */
+static bool StageCncDdrawOverlay(const std::string& prefixDir)
+{
+    const std::string srcDll = std::string(WINE_RUNTIME_ROOT) + "/cnc-ddraw/x86/ddraw.dll";
+    const std::string srcIni = std::string(WINE_RUNTIME_ROOT) + "/cnc-ddraw/ddraw.ini";
+    if (access(srcDll.c_str(), R_OK) != 0) {
+        OH_LOG_INFO(LOG_APP, "[Launch-Async] cnc-ddraw overlay not packaged, skip staging");
+        return true;
+    }
+
+    const std::string syswow64 = prefixDir + "/drive_c/windows/syswow64";
+    if (!EnsureDirRecursive(syswow64, 0777)) return false;
+
+    const std::string dstDll = syswow64 + "/ddraw.dll";
+    unlink(dstDll.c_str());
+    const bool ok = CopyFileIfNeeded(srcDll, dstDll);
+    if (access(srcIni.c_str(), R_OK) == 0) {
+        CopyFileIfNeeded(srcIni, syswow64 + "/ddraw.ini");
+        CopyFileIfNeeded(srcIni, prefixDir + "/drive_c/windows/ddraw.ini");
+    }
+    struct stat st;
+    const long bytes = (ok && stat(dstDll.c_str(), &st) == 0) ? (long)st.st_size : -1;
+    OH_LOG_INFO(LOG_APP, "[Launch-Async] cnc-ddraw overlay staged syswow64 bytes=%{public}ld ok=%{public}s",
+                bytes, ok ? "true" : "false");
+    return ok;
+}
+
 static bool IsWineserverSocketReady(const std::string& prefix) {
     char sockDir[512];
     snprintf(sockDir, sizeof(sockDir), "%s/.wineserver", prefix.c_str());
@@ -443,6 +475,8 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
             napi_call_threadsafe_function(gStateTsfn, strdup("state:failed:wineboot"), napi_tsfn_blocking);
         return false;
     }
+    if (!StageCncDdrawOverlay(p->prefixDir))
+        OH_LOG_WARN(LOG_APP, "[Launch-Async] cnc-ddraw overlay staging failed before wineserver");
 
     // -- wineserver via NCP --
     // NCP does not inherit the app environment. WineserverMain parses
@@ -688,6 +722,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
             return false;
         }
     }
+
+    if (!StageCncDdrawOverlay(p->prefixDir))
+        OH_LOG_WARN(LOG_APP, "[Launch-Async] cnc-ddraw overlay staging failed after wineboot");
 
     // -- explorer desktop shell (仅 desktop 模式) --
     PrepareDesktopSessionGraphicsEnv(*p);

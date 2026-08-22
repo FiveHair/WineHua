@@ -178,7 +178,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         for (const auto& surface : surfaces)
         {
             if (surface.surfaceKey != zeroCopySurfaceKey_) continue;
-            if (surface.vulkan != broker.IsVulkanPresentMode()) {
+            if (surface.vulkan != zeroCopyVulkanSource_) {
                 ReleaseZeroCopyBinding();
                 break;
             }
@@ -190,11 +190,23 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         return true;
     }
 
+    /* Vulkan-ness belongs to the presenting surface, not to the session. A DXVK
+     * session still hosts GL clients (cnc-ddraw, explorer), and the child picks
+     * its presenter target from the flag we send: a GL surface tagged Vulkan
+     * gets a Venus target that rejects every GL present. Prefer a surface
+     * matching the session present mode, then fall back to the other kind. */
     const bool wantVulkanSurface = broker.IsVulkanPresentMode();
+    std::vector<const winehua::ZeroCopySurfaceInfo*> ordered;
+    ordered.reserve(surfaces.size());
     for (const auto& surface : surfaces)
+        if (surface.vulkan == wantVulkanSurface) ordered.push_back(&surface);
+    for (const auto& surface : surfaces)
+        if (surface.vulkan != wantVulkanSurface) ordered.push_back(&surface);
+
+    for (const auto* candidate : ordered)
     {
+        const auto& surface = *candidate;
         if (!surface.surfaceKey || surface.attached) continue;
-        if (surface.vulkan != wantVulkanSurface) continue;
         WaylandServer::ZeroCopyLayerInfo layer;
         if (!server->GetZeroCopyLayerInfo(surface.surfaceKey, rendererToplevelId,
                                           static_cast<int>(surface.width),
@@ -244,7 +256,8 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         if (!zeroCopyProducerWindow_ ||
             !broker.AttachZeroCopyTarget(
                 surface.surfaceKey, zeroCopyProducerWindow_,
-                static_cast<uint64_t>(vsyncPeriodNs_.load(std::memory_order_relaxed))))
+                static_cast<uint64_t>(vsyncPeriodNs_.load(std::memory_order_relaxed)),
+                surface.vulkan))
         {
             ReleaseZeroCopyBinding();
             continue;
@@ -255,7 +268,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
         zeroCopySurfaceId_ = surface.surfaceId;
         zeroCopySourceW_ = static_cast<int>(surface.width);
         zeroCopySourceH_ = static_cast<int>(surface.height);
-        zeroCopyVulkanSource_ = surface.vulkan || broker.IsVulkanPresentMode();
+        zeroCopyVulkanSource_ = surface.vulkan;
         zeroCopyLayerX_ = layer.x;
         zeroCopyLayerY_ = layer.y;
         zeroCopyLayerW_ = layer.width;
@@ -277,6 +290,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
                     "[VIRGL-ZC][MAIN] consumer attached tl=%{public}u key=%{public}llu "
                     "pid=%{public}u surface=%{public}u source=%{public}dx%{public}d "
                     "layer=%{public}dx%{public}d+%{public}d,%{public}d queue=%{public}d "
+                    "vk=%{public}d want_vk=%{public}d "
                     "size_ret=%{public}d usage_ret=%{public}d drop_ret=%{public}d "
                     "drop=%{public}d mailbox=%{public}d",
                     rendererToplevelId,
@@ -284,6 +298,7 @@ bool EglRenderer::TryAttachZeroCopySurface(uint32_t rendererToplevelId)
                     zeroCopyClientPid_, zeroCopySurfaceId_,
                     zeroCopySourceW_, zeroCopySourceH_, zeroCopyLayerW_, zeroCopyLayerH_,
                     zeroCopyLayerX_, zeroCopyLayerY_, queueSize,
+                    zeroCopyVulkanSource_ ? 1 : 0, wantVulkanSurface ? 1 : 0,
                     sizeResult, usageResult, dropResult,
                     dropUnread ? 1 : 0, dropUnread ? 1 : 0);
         return true;
