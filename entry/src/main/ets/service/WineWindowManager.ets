@@ -66,13 +66,15 @@ export class WineWindowManager {
   // 回主页面"的语义), 新 desktop_root 事件再置 true
   desktopActive: boolean = false;
   // 桌面 root 的 XComponent surface 校准完成（renderer 就绪）才置 true。
-  // desktop_root 只是 toplevel 出现，renderer 就绪晚数秒 — ensureDesktop
-  // 等这个信号再放行程序启动，否则程序窗口抢占桌面渲染初始化会闪退
   desktopSurfaceReady: boolean = false;
   // 启动器可见性镜像 (Index @Watch 同步): 非桌面态时窗口退出全屏,
   // XComponent surface 高度随系统栏波动 — DesktopLayer.onSurfaceChanged
   // 据此跳过 root resize, 避免把中间态高度发给 Wine 桌面 (热重启残留 bug)
   desktopLauncherVisible: boolean = true;
+  // Optional exact-title gate for an explicitly requested visible managed
+  // window. Clean-prefix bootstrap helpers must stay headless so they cannot
+  // steal the foreground from EntryAbility before the requested program starts.
+  private managedToplevelTitleFilter: string = '';
   // 主窗口 windowStage (ARGB 异型子窗口/popup 回退宿主)
   private mainWindowStage: window.WindowStage | null = null;
 
@@ -146,13 +148,18 @@ export class WineWindowManager {
     this.isDesktopMode = !this.automationMode &&
       (isPadOrPhone || DesktopModeService.getInstance().mode === 'virtual');
     this.desktopSeparateWindow = this.isDesktopMode && !isPadOrPhone;
-    // 同步 C++: explorer 是否启动由 IsDesktopMode 决定 (wine_launch.cpp)
     testNapi.setDesktopMode(this.isDesktopMode);
     hilog.info(DOMAIN, TAG,
       '[MW] mode policy: type=%{public}s automation=%{public}s → %{public}s (separateWindow=%{public}s)',
       deviceInfo.deviceType, this.automationMode ? 'true' : 'false',
       this.isDesktopMode ? 'DESKTOP MODE' : 'MANAGED MODE',
       this.desktopSeparateWindow ? 'yes' : 'no');
+  }
+
+  setManagedToplevelTitleFilter(title: string): void {
+    this.managedToplevelTitleFilter = title;
+    hilog.info(DOMAIN, TAG, '[MW] managed toplevel title filter=%{public}s',
+      title.length > 0 ? title : '<disabled>');
   }
 
   async init(windowStage: window.WindowStage, abilityContext: common.UIAbilityContext): Promise<void> {
@@ -364,6 +371,12 @@ export class WineWindowManager {
       return;
     }
     const e = this.ensureEntry(id);
+    if (event === 'title') {
+      try {
+        const obj: Record<string, string | number> = JSON.parse(data) as Record<string, string | number>;
+        if (obj.title) e.title = obj.title as string;
+      } catch (_) { /* applyEvent will report malformed title data if a window is created */ }
+    }
     e.events.push([event, data]);
     hilog.info(DOMAIN, TAG, '[MW] -> queue pending #%{public}d %{public}s (window not ready, queue=%{public}d)',
       id, event, e.events.length);
@@ -378,6 +391,11 @@ export class WineWindowManager {
       case 'created':
         if (this.isDesktopMode) {
           hilog.info(DOMAIN, TAG, '[MW] Desktop mode: toplevel #%{public}d created, skipping Ability', id);
+        } else if (this.managedToplevelTitleFilter.length > 0 &&
+          this.entries.get(id)?.title !== this.managedToplevelTitleFilter) {
+          hilog.info(DOMAIN, TAG,
+            '[MW] managed toplevel #%{public}d title="%{public}s" suppressed; waiting for "%{public}s"',
+            id, this.entries.get(id)?.title ?? '', this.managedToplevelTitleFilter);
         } else {
           hilog.info(DOMAIN, TAG, '[MW] -> startWineWindowAbility(#%{public}d)', id);
           this.startWineWindowAbility(id, data);
