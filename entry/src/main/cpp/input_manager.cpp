@@ -157,7 +157,26 @@ wl_fixed_t InputManager::CoordTransform(double px, double py, uint32_t tl,
     }
     int surfW = r->GetWidth();
     int surfH = r->GetHeight();
-    const FitRect& lb = r->GetLetterbox();
+    // 桌面系基准 (20260822 红警2 主菜单点击无效根因修复): 输入坐标换算的
+    // 锚点是"桌面逻辑坐标" (root toplevel 尺寸), 与"渲染当前帧格式"解耦。
+    // 此前用 r->GetLetterbox() (渲染视口) 做逆映射 — 直传 (7930495) 时
+    // renderer 的帧是游戏直传源 800x600, letterbox 逆映射先把物理坐标缩到
+    // 800x600 系, 再进 InputResolver 的 fit 被二次缩放 → 注入坐标与视觉
+    // 光标错位 → 游戏永远点不到按钮 (红警2 主菜单点击无效)。CPU 帧
+    // (1400x920) 时渲染视口恰为恒等映射, 两个基准重合, 故此前单测有效。
+    auto* ws = WaylandServer::GetInstance();
+    FitRect lb{};
+    if (ws->IsDesktopMode()) {
+        const uint32_t desktopRootId = ws->GetDesktopRootToplevelId();
+        const int rootW = ws->GetToplevelW(desktopRootId);
+        const int rootH = ws->GetToplevelH(desktopRootId);
+        if (rootW <= 0 || rootH <= 0 ||
+            !ComputeFitRect(surfW, surfH, rootW, rootH, lb)) {
+            lb = r->GetLetterbox();  // fallback: root 未就绪时退回渲染视口
+        }
+    } else {
+        lb = r->GetLetterbox();
+    }
     if (outLb) *outLb = lb;
 
     if (surfW <= 0 || surfH <= 0 || lb.dstW <= 0 || lb.dstH <= 0) {
