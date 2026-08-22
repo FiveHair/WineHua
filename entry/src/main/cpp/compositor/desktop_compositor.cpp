@@ -737,10 +737,20 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
             transform.srcW > 0 && transform.srcH > 0) {
             const ToplevelManager::ToplevelState* fsTop =
                 tmgr_.FindToplevelLocked(fullscreenId);
-            if (fsTop && fsTop->Width() > 0 && fsTop->Height() > 0 &&
-                fsTop->X() <= 0 && fsTop->Y() <= 0 &&
-                fsTop->X() + fsTop->Width() >= rootW &&
-                fsTop->Y() + fsTop->Height() >= rootH) {
+            // 放宽直传门槛 (20060822 实测): 全屏游戏窗口逻辑几何
+            // (800x600/640x480 等) 由 fit 放大铺满屏幕, 旧条件"逻辑几何
+            // 覆盖 root"连真实游戏全屏都不满足 → 直传永不触发, 每帧 CPU
+            // BlitScaled 1227x920 70-85ms 钉死 ~10fps (鼠标不够跟手根因,
+            // GL-TAKE 合成段 avg 70-85ms 实测)。"其下层被盖住"由 fit 输出
+            // 自身保证: CPU 路径 fillBlackRect 整屏黑边 + 内容 fit, 最终
+            // 像素覆盖整屏, 下层贡献恒 0; 直传路径 GPU 侧 glClear 黑底 +
+            // GL fit (ComputeFitRect 与 CPU 同源, 直传源尺寸==fit 内容尺寸
+            // 时两者像素级一致, 见下方 directPixels 校验)。上方遮挡仍由
+            // topOccluded 检查; 真正必要条件只有下面逐条校验的:
+            //   1. 窗口自身几何正直 (Width/Height > 0)
+            //   2. 直传源尺寸 == transform.srcW/H (几何等价)
+            //   3. 无上层可见内容层 (topOccluded)
+            if (fsTop && fsTop->Width() > 0 && fsTop->Height() > 0) {
                 size_t fsZ = 0;
                 bool fsLayerFound = false;
                 for (const auto& layer : layers) {
@@ -754,6 +764,9 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                 if (fsLayerFound) {
                     const SubsurfaceLayer* contentSub = nullptr;
                     bool topOccluded = false;
+                    uint32_t occlTl = 0;
+                    int occlType = -1;
+                    bool occlZc = false;
                     for (const auto& layer : layers) {
                         if (layer.zIndex <= fsZ) continue;  // 全屏窗口及其下: 被盖住
                         if (layer.ShouldSkipCpu() ||
@@ -765,8 +778,16 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                             // 本窗口内容 sub (游戏画面): 候选直传源
                             if (!contentSub) {
                                 const auto& sl = *layer.sub;
+                                // 注: 不再要求 (shmFormat!=0 || opaque) — GL
+                                // readback 类画面 (opengl_readback, ARGB 800x600)
+                                // 的 alpha 通道是 GL 帧缓冲残留 (未清区 0/绘制区
+                                // 255), opaque 全帧扫描被非 255 像素拦下, 害直传
+                                // 落到窗口黑帧 (20260822 黑屏实锤: 窗口帧 95%
+                                // black/alpha0)。ARGB sub 由渲染器 uForceOpaque
+                                // 强制不透明: alpha=255 区域与 CPU 混合分支逐
+                                // 像素一致, alpha=0 区域 CPU 保留黑底 (RGB 残留
+                                // 值通常亦黑) — 视觉等价。
                                 if (sl.w > 0 && sl.h > 0 &&
-                                    (sl.shmFormat != 0 || sl.opaque) &&
                                     (sl.vpDstW <= 0 || sl.vpDstW >= sl.w) &&
                                     (sl.vpDstH <= 0 || sl.vpDstH >= sl.h))
                                     contentSub = &sl;
@@ -774,6 +795,9 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                             continue;
                         }
                         topOccluded = true;  // 上方可见层: 需要真合成
+                        occlTl = layer.toplevelId;
+                        occlType = static_cast<int>(layer.type);
+                        occlZc = layer.zcActive;
                         break;
                     }
                     const std::vector<uint8_t>* directPixels = nullptr;
@@ -788,8 +812,15 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                             directPixels = &contentSub->pixels;
                             directW = contentSub->w;
                             directH = contentSub->h;
-                        } else if (fsTop->ShmFormat() != 0 &&
-                                   fsTop->Width() == transform.srcW &&
+                        // 不再要求 shmFormat!=0 (XRGB): 20260822 实测红警2 类
+                        // 全屏游戏窗口帧是 ARGB (shmFormat=0) 但内容 alpha 全
+                        // 255 (游戏自绘不透明画面), 原 XRGB 条件把直传全部
+                        // 摁死 → 每帧 CPU BlitScaled 70-85ms。渲染器 context
+                        // 无 GL_BLEND + uForceOpaque 强制不透明: alpha=255 时
+                        // 与 CPU 合成输出逐像素一致 (黑边 glClear 同效
+                        // fillBlackRect); 半透明全屏内容 (预期无, 游戏用
+                        // XRGB/全不透明) 会丢失混合 — 容忍并看验收。
+                        } else if (fsTop->Width() == transform.srcW &&
                                    fsTop->Height() == transform.srcH &&
                                    fsTop->Pixels().size() ==
                                        static_cast<size_t>(fsTop->Width()) * fsTop->Height() * 4) {
@@ -800,10 +831,51 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                     }
                     if (directPixels) {
                         // assign 而非 swap: 源缓冲属 wl 线程的层状态, 必须拷出
+                        OH_LOG_INFO(LOG_APP,
+                                    "[MW-TAKE] direct pass src=%{public}dx%{public}d "
+                                    "fit=%{public}dx%{public}d+%{public}d,%{public}d",
+                                    directW, directH,
+                                    transform.dstW, transform.dstH,
+                                    transform.offX, transform.offY);
                         out.assign(directPixels->begin(), directPixels->end());
                         w = directW;
                         h = directH;
                         rst->ClearDirty();
+                        // 直传成功诊断 (20:1 抽样): 源像素内容统计 (全黑/alpha=0
+                        // 比例 — 证明"游戏画面是否在此帧"的依据) + 全 sub 明细
+                        // (画面是否在 sub 层): 20260822 黑屏排查用
+                        static uint32_t sDirectPassDiagN = 0;
+                        if (++sDirectPassDiagN % 20 == 1) {
+                            const uint32_t* pxu =
+                                reinterpret_cast<const uint32_t*>(directPixels->data());
+                            size_t total = directPixels->size() / 4;
+                            int blackPx = 0, alpha0Px = 0;
+                            size_t n = std::max<size_t>(1, total / 256);
+                            for (size_t i = 0; i < total; i += n) {
+                                const uint32_t v = pxu[i];
+                                if ((v & 0xFFu) == 0 && ((v >> 8) & 0xFFu) == 0 &&
+                                    ((v >> 16) & 0xFFu) == 0) blackPx++;
+                                if ((v >> 24) == 0) alpha0Px++;
+                            }
+                            OH_LOG_INFO(LOG_APP,
+                                        "[MW-TAKE] direct *passDiag* src=%{public}dx%{public}d "
+                                        "black=%{public}d/%{public}zu alpha0=%{public}d subs=%{public}zu fsid=%{public}u",
+                                        directW, directH, blackPx, total / 256, alpha0Px,
+                                        subsurfaceLayers_.size(), fullscreenId);
+                            for (const auto& sl : subsurfaceLayers_) {
+                                OH_LOG_INFO(LOG_APP,
+                                            "[MW-TAKE] direct *subs* pt=%{public}u key=%{public}llu "
+                                            "ext=%{public}d w=%{public}d h=%{public}d "
+                                            "vpDst=%{public}dx%{public}d fmt=%{public}d op=%{public}d "
+                                            "px=%{public}zu",
+                                            sl.parentToplevel,
+                                            static_cast<unsigned long long>(sl.surfaceKey),
+                                            sl.isExternal ? 1 : 0,
+                                            sl.w, sl.h, sl.vpDstW, sl.vpDstH,
+                                            static_cast<int>(sl.shmFormat), sl.opaque ? 1 : 0,
+                                            sl.pixels.size());
+                            }
+                        }
                         const auto directDone = TakeClock::now();
                         // 分段语义同下: 直传无基底拷贝/快照/blit, 全部计入输出段
                         breakdown.Add(elapsedUs(takeStarted, lockAcquired),
@@ -811,6 +883,40 @@ bool DesktopCompositor::TakeToplevelFrame(uint32_t id, std::vector<uint8_t>& out
                                       elapsedUs(lockAcquired, directDone),
                                       elapsedUs(takeStarted, directDone));
                         return true;
+                    }
+                    // 直传失败诊断 (20:1 抽样): 实际几何 vs fit 期望 —
+                    // 一次定位画面到底在 sub 还是窗口帧/为何几何对不上
+                    static uint32_t sDirectFailN = 0;
+                    if (++sDirectFailN % 20 == 1) {
+                        const int fw = fsTop->Width(), fh = fsTop->Height();
+                        const size_t fp = fsTop->Pixels().size();
+                        const int cw = contentSub ? contentSub->w : 0;
+                        const int ch = contentSub ? contentSub->h : 0;
+                        const size_t cp = contentSub ? contentSub->pixels.size() : 0;
+                        OH_LOG_INFO(LOG_APP,
+                                    "[MW-TAKE] direct *fail* occl=%{public}d/t%{public}d/tl%{public}u/"
+                                    "zc%{public}d sub=%{public}dx%{public}d px=%{public}zu "
+                                    "fsTop=%{public}dx%{public}d px=%{public}zu shm=%{public}d "
+                                    "want=%{public}dx%{public}d fsid=%{public}u root=%{public}dx%{public}d",
+                                    topOccluded ? 1 : 0, occlType, occlTl, occlZc ? 1 : 0,
+                                    cw, ch, cp, fw, fh, fp,
+                                    fsTop->ShmFormat(), transform.srcW, transform.srcH,
+                                    fullscreenId, rootW, rootH);
+                        // 全 subsurface 状态摘要: 游戏画面层是谁/归属/几何/
+                        // 格式 — 直接回答 contentSub 为何没选中
+                        for (const auto& sl : subsurfaceLayers_) {
+                            OH_LOG_INFO(LOG_APP,
+                                        "[MW-TAKE] direct *subs* pt=%{public}u key=%{public}llu "
+                                        "ext=%{public}d w=%{public}d h=%{public}d "
+                                        "vpDst=%{public}dx%{public}d fmt=%{public}d op=%{public}d "
+                                        "px=%{public}zu",
+                                        sl.parentToplevel,
+                                        static_cast<unsigned long long>(sl.surfaceKey),
+                                        sl.isExternal ? 1 : 0,
+                                        sl.w, sl.h, sl.vpDstW, sl.vpDstH,
+                                        static_cast<int>(sl.shmFormat), sl.opaque ? 1 : 0,
+                                        sl.pixels.size());
+                        }
                     }
                 }
             }
