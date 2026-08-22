@@ -495,8 +495,17 @@ jobs:
 
       - name: Generate changelog
         run: |
-          # 找到上一个 tag (若存在)
-          prev_tag=$(git describe --tags --abbrev=0 "${{ steps.tag.outputs.tag }}^" 2>/dev/null || echo "")
+          # 按频道找上一个同类 tag (dev→dev, rc→rc, v→v): 各频道 changelog
+          # 只相对自己上一版统计, 避免 dev 频繁构建把 rc/v 的变更列表切碎。
+          # 注意 git describe 只沿祖先链找 — 同频道 tag 须在同一分支线上
+          tag="${{ steps.tag.outputs.tag }}"
+          case "$tag" in
+            dev-*) match='dev-*' ;;
+            rc-*)  match='rc-*' ;;
+            v*)    match='v*' ;;
+            *)     match='*' ;;
+          esac
+          prev_tag=$(git describe --tags --abbrev=0 --match "$match" "${tag}^" 2>/dev/null || echo "")
           if [ -n "$prev_tag" ]; then
             {
               echo "## Changes since \`$prev_tag\`"
