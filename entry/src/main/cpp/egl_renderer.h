@@ -25,7 +25,7 @@ public:
 
     uint32_t GetToplevelId() const { return toplevelId_; }
     void SetToplevelId(uint32_t id) { toplevelId_ = id; }
-    void SetSize(int w, int h) { width_ = w; height_ = h; }
+    void SetSize(int w, int h) { width_ = w; height_ = h; sizeDirty_.store(true); }
     bool IsValid() const { return running_; }
 
     // 尺寸 getters (供输入坐标转换: 触控坐标 -> wine 内容坐标)
@@ -119,6 +119,7 @@ private:
     };
 
     int width_ = 0, height_ = 0;
+    std::atomic<bool> sizeDirty_{false};  // resize(SetSize)后需强制重绘一次(无新帧也上屏), 避免旧帧被拉伸
     int frameW_ = 0, frameH_ = 0;  // Wine 帧内容尺寸 (坐标转换)
     bool frameArgb_ = false;       // 当前帧是 ARGB8888 (layered/shaped 异型窗口, 透传 alpha)
     int texW_ = 0, texH_ = 0;      // 上次上传的纹理尺寸 (用于避免每帧 glTexImage2D)

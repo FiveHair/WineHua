@@ -807,18 +807,26 @@ void EglRenderer::RenderLoop() {
         // (ForceToplevelRedraw 的 dirty 与 buffer 异步切换存在竞争窗口),
         // 静止窗口再无新帧触发重绘, 系统把旧 buffer 拉伸显示导致缩放错误
         if (!haveFrame && rendered) {
-            EGLint curW = 0, curH = 0;
-            eglQuerySurface(display_, surface_, EGL_WIDTH, &curW);
-            eglQuerySurface(display_, surface_, EGL_HEIGHT, &curH);
-            if (curW == width_ && curH == height_) {
-                loopCount++;
-                ++skipFrames_;   // 诊断: 统计跳过 swap 的帧数
-                if (!waitForFrameTick()) break;
-                continue;
+            // resize 悬置: SetSize 后无新帧也必须强制重绘上屏, 否则画面停在
+            // 旧帧被系统拉伸到新 surface 尺寸 (缩放错误), 直到 wine 提交新帧。
+            if (sizeDirty_.load()) {
+                OH_LOG_INFO(LOG_APP,
+                            "[MW-RNDR] tl=%{public}u sizeDirty with no new frame, force re-letterbox",
+                            useToplevel);
+            } else {
+                EGLint curW = 0, curH = 0;
+                eglQuerySurface(display_, surface_, EGL_WIDTH, &curW);
+                eglQuerySurface(display_, surface_, EGL_HEIGHT, &curH);
+                if (curW == width_ && curH == height_) {
+                    loopCount++;
+                    ++skipFrames_;   // 诊断: 统计跳过 swap 的帧数
+                    if (!waitForFrameTick()) break;
+                    continue;
+                }
+                OH_LOG_INFO(LOG_APP,
+                            "[MW-RNDR] tl=%{public}u surface %{public}dx%{public}d -> %{public}dx%{public}d with no new frame, re-letterbox",
+                            useToplevel, width_, height_, curW, curH);
             }
-            OH_LOG_INFO(LOG_APP,
-                        "[MW-RNDR] tl=%{public}u surface %{public}dx%{public}d -> %{public}dx%{public}d with no new frame, re-letterbox",
-                        useToplevel, width_, height_, curW, curH);
         }
 
         // 获取 EGL surface 实际大小
@@ -987,6 +995,7 @@ void EglRenderer::RenderLoop() {
 
         const uint64_t swapStartedUs = PerfNowUs();
         const bool swapOk = eglSwapBuffers(display_, surface_) == EGL_TRUE;
+        if (swapOk) sizeDirty_.store(false);   // 重绘已上屏, 清除 resize 悬置标记
         const uint64_t frameEndedUs = PerfNowUs();
         if (haveFrame) {
             // 诊断: 每帧有帧 swap 都打印 — 对齐合成(MW-TAKE)时刻与上屏(swap)时刻,
