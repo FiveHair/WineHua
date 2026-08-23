@@ -997,10 +997,18 @@ static napi_value RegisterHostWindow(napi_env env, napi_callback_info info) {
 static std::atomic<napi_threadsafe_function> gPointerLockTsfn{nullptr};
 static void CallJsPointerLock(napi_env env, napi_value cb, void*, void* data) {
     if (env && cb) {
-        napi_value undef, arg;
+        // data 打包: bit0 = locked, 高位 = 触发相对模式的约束 surface 的 toplevelId
+        // (解锁时该值为 0)。送到 ets 供"桌面 shell 自身藏光标 vs 游戏真相对模式"
+        // 的门禁区分。
+        uintptr_t packed = reinterpret_cast<uintptr_t>(data);
+        const bool locked = (packed & 1u) != 0;
+        const uint32_t toplevelId = static_cast<uint32_t>(packed >> 1);
+        napi_value undef, argLocked, argTl;
         napi_get_undefined(env, &undef);
-        napi_get_boolean(env, reinterpret_cast<uintptr_t>(data) != 0, &arg);
-        napi_call_function(env, undef, cb, 1, &arg, nullptr);
+        napi_get_boolean(env, locked, &argLocked);
+        napi_create_uint32(env, toplevelId, &argTl);
+        napi_value args[2] = {argLocked, argTl};
+        napi_call_function(env, undef, cb, 2, args, nullptr);
     }
 }
 static napi_value SetPointerLockCallback(napi_env env, napi_callback_info info) {
@@ -1021,10 +1029,12 @@ static napi_value SetPointerLockCallback(napi_env env, napi_callback_info info) 
         return nullptr;
     }
     gPointerLockTsfn.store(newTsfn);
-    PointerExtras::GetInstance()->SetPointerLockCallback([](bool locked) {
+    PointerExtras::GetInstance()->SetPointerLockCallback([](bool locked, uint32_t toplevelId) {
         if (napi_threadsafe_function tsfn = gPointerLockTsfn.load()) {
-            if (napi_call_threadsafe_function(tsfn,
-                    reinterpret_cast<void*>(static_cast<uintptr_t>(locked ? 1 : 0)),
+            // bit0 = locked, 高位 = toplevelId (见 CallJsPointerLock 解包)
+            uintptr_t packed = static_cast<uintptr_t>(locked ? 1u : 0u) |
+                               (static_cast<uintptr_t>(toplevelId) << 1);
+            if (napi_call_threadsafe_function(tsfn, reinterpret_cast<void*>(packed),
                     napi_tsfn_blocking) != napi_ok) {
                 // tsfn 正在关闭 (窗口重建竞态): 忽略, 新句柄接管后续事件
             }

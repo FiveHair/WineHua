@@ -150,6 +150,9 @@ public:
     const DisplayPolicy& Policy() const { return policy_; }
     void SetDesktopRootToplevelId(uint32_t id) { desktopRootToplevelId_ = id; }
     uint32_t GetDesktopRootToplevelId() const { return desktopRootToplevelId_; }
+    // wl_surface → toplevelId 反查 (PointerExtras 判相对模式的约束 surface
+    // 是否桌面 root 自身 — 区分"桌面 shell 启动瞬时藏光标"与"游戏真相对模式")
+    uint32_t FindToplevelIdBySurface(wl_resource* surf) { return toplevelMgr_.FindToplevelBySurface(surf); }
     void SetDesktopRootRecognitionEnabled(bool enabled) { desktopRootMgr_.SetRecognitionEnabled(enabled); }
     /* 首启 wineboot 期间抑制窗口创建事件 (PC 窗口模式): wineboot 的
      * "Setting up Wine" 等待窗不创建独立 OHOS 窗口 — 与 Pad 桌面模式对齐
