@@ -52,7 +52,7 @@ public:
     static void RegisterHostWindow(int32_t windowId);
     // 锁定状态变化回调 (NAPI 层注册 → tsfn → ets setPointerVisible)。
     // 注意在 Wayland 线程触发
-    void SetPointerLockCallback(std::function<void(bool)> cb);
+    void SetPointerLockCallback(std::function<void(bool, uint32_t)> cb);
 
     // 相对指针增量广播: wine 有 relative_pointer 对象时把输入增量发过去。
     // 对象存在 ⇔ wine 判定当前为相对模式 (隐藏光标 + 约束); 无对象 = 绝对
@@ -92,6 +92,8 @@ private:
         wl_resource* res = nullptr;       // locked/confined 对象
         bool hasHint = false;             // locked 的 cursor_position_hint
         double hintX = 0, hintY = 0;
+        uint32_t toplevelId = 0;          // surface 所属 toplevel (相对模式门禁:
+                                          // 是否桌面 root 自身, 见 relmgr)
     };
 
     // mutable: const 查询接口 (HasRelativePointer) 也要锁
@@ -110,8 +112,8 @@ private:
 
     // Host 光标锁定实施 (见上方 public 注释); 失败只记日志不阻断 — A 方案
     // (rawDelta 相对位移) 不依赖锁定, 老系统 (API<22) 上相对模式仍工作
-    void ApplyHostCursorLock(bool lock);
+    void ApplyHostCursorLock(bool lock, uint32_t toplevelId);
     std::vector<int32_t> hostWindowIds_;       // mutex_ 保护; 各 Ability 主窗口
     int32_t lockedWindowId_ = 0;               // 实际锁定成功的窗口 (0=未锁)
-    std::function<void(bool)> lockCallback_;   // mutex_ 保护
+    std::function<void(bool, uint32_t)> lockCallback_;   // mutex_ 保护
 };
