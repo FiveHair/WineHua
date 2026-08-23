@@ -156,14 +156,14 @@ export class WineWindowManager {
   //                Pad: 悬浮 = launcherVisible; 完整 = !launcherVisible
   //               完整桌面下 toplevelId == desktopRootId → 桌面 shell 自身藏
   //               光标 (启动瞬时) → 禁止; 子窗口 (真实游戏/程序) → 允许。
-  private canHideCursor(toplevelId: number): boolean {
+  private canHideCursor(fromToplevel: number): boolean {
     if (!this.isDesktopMode) return true;
     if (this.desktopSeparateWindow) {
       if (!this.desktopWindowActive) return false;
     } else if (this.desktopLauncherVisible) {
       return false;
     }
-    return toplevelId !== this.desktopRootId;
+    return fromToplevel !== this.desktopRootId;
   }
 
   // 统一重算并应用光标显隐: shouldHide = pointerLocked × canHideCursor()。
