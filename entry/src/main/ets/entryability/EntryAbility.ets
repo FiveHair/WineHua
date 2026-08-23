@@ -312,19 +312,20 @@ export default class EntryAbility extends UIAbility {
     // 手机走 fork-shim，必须在 Index.doInit 的首次 NCP 调用前设置。
     testNapi.setPhoneMode(deviceInfo.deviceType === 'phone');
 
-    // Phone desktop is rendered in a full-window XComponent. Let the system
-    // rotate that window with the sensor; its surface callback propagates the
-    // resulting size to Wine before the next frame is composited.
+    // Phone desktop is rendered in a full-window XComponent. Force the window
+    // to landscape (module.json5 orientation=landscape 亦静态锁定), so the
+    // surface callback hands Wine a landscape rect before the first frame is
+    // composited — 手机/pad 都保持横屏, 不随传感器变竖屏。
     if (deviceInfo.deviceType === 'phone') {
       try {
         const mainWindow = windowStage.getMainWindowSync();
-        mainWindow.setPreferredOrientation(window.Orientation.AUTO_ROTATION).then(() => {
-          hilog.info(DOMAIN, 'testTag', 'phone auto-rotation enabled');
+        mainWindow.setPreferredOrientation(window.Orientation.LANDSCAPE).then(() => {
+          hilog.info(DOMAIN, 'testTag', 'phone forced landscape');
         }).catch((err: Error) => {
-          hilog.warn(DOMAIN, 'testTag', 'phone auto-rotation failed: %{public}s', JSON.stringify(err));
+          hilog.warn(DOMAIN, 'testTag', 'phone forced landscape failed: %{public}s', JSON.stringify(err));
         });
       } catch (err) {
-        hilog.warn(DOMAIN, 'testTag', 'phone auto-rotation setup failed: %{public}s', JSON.stringify(err));
+        hilog.warn(DOMAIN, 'testTag', 'phone forced landscape setup failed: %{public}s', JSON.stringify(err));
       }
     }
 
