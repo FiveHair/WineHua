@@ -304,6 +304,66 @@ static bool UsesDxvkOverlay(const std::string& backend)
            backend == "vkd3d_limited_500k";
 }
 
+// -- 兼容模式全局档位 (设置页 → launchClient compatEnvStr 分号串) --
+// ArkTS 侧按 BOX64_DYNAREC_PRESETS 拼 "K=V;K=V;..."; 此处只放行
+// BOX64_DYNAREC_* 行 (纯档位参数, 防注入其它 key), 空串 = 出厂基线不注入。
+// 会话 env 经 UpsertEnvLine 压过基线 (每 key 最后写入者胜出);
+// DXVK/desktop 的 WEAKBARRIER=0 clamp 在 AppendStableDesktopDxvkEnv 尾,
+// 只会重新压回, 不会被档位击穿 (该 clamp 是 Venus 图形 ring 约束, 只
+// 覆盖 explorer 会话链; wineboot/wineserver 无图形, 档位原值直接生效)。
+// 仅 __aarch64__ (Box64) 设备有意义; x86_64 原生跑无 box64, 空转不注入。
+#ifdef __aarch64__
+// 统一过滤: 前缀 + entryParams 协议危险字符 ('|'/'\n') + 缺 '=' 畸形行 — 会话
+// env 与 NCP entryParams 两条通道同一套行为 (原来源彼此漂移, 静默丢弃语义不一)
+static std::vector<std::string> FilterCompatLines(const std::string& compatEnvStr)
+{
+    std::vector<std::string> raw;
+    std::string cur;
+    for (const char c : compatEnvStr) {
+        if (c == ';') {
+            if (!cur.empty()) raw.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) raw.push_back(cur);
+    std::vector<std::string> filtered;
+    for (const std::string& line : raw) {
+        if (line.rfind("BOX64_DYNAREC_", 0) != 0)
+            continue;
+        if (line.find('|') != std::string::npos || line.find('\n') != std::string::npos)
+            continue;
+        if (line.find('=') == std::string::npos)
+            continue;
+        filtered.push_back(line);
+    }
+    return filtered;
+}
+
+static void AppendCompatEnvLines(std::vector<std::string>& envStrs, const LaunchParams& p)
+{
+    // smoke/experiment (automation) 使用隔离 prefix, 回归必须跑出厂基线
+    if (p.automationMode)
+        return;
+    for (const std::string& line : FilterCompatLines(p.compatEnvStr))
+        UpsertEnvLine(envStrs, line);
+}
+
+// wineboot/wineserver 走 NCP entryParams (不继承 app env), 把档位追加为
+// __env= 段 — 子进程 apply overrides 晚于进程内 SetBox64PerfEnv 基线,
+// 档位胜出 (wineserver 见 WineserverMain 的二次 apply)。
+static void AppendCompatEnvToEntryParams(std::string& entryParams, const LaunchParams& p)
+{
+    if (p.automationMode)
+        return;
+    for (const std::string& line : FilterCompatLines(p.compatEnvStr)) {
+        entryParams += "|__env=";
+        entryParams += line;
+    }
+}
+#endif // __aarch64__
+
 static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
                                        const LaunchParams& params)
 {
@@ -451,6 +511,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
             "|wineserver|-f|-p|__env=WINEPREFIX=" + p->prefixDir;
         if (p->prefixDir == WINE_SMOKE_PREFIX)
             wsEntryParams += "|__env=WINEHUA_PROCESS_EXIT_TELEMETRY=1";
+        AppendCompatEnvToEntryParams(wsEntryParams, *p);
         OH_LOG_WARN(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
         NativeChildProcess_Args wsArgs = {};
         wsArgs.entryParams = const_cast<char*>(wsEntryParams.c_str());
@@ -554,6 +615,8 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
             entryParams += "|__env=WINEDLLOVERRIDES=mscoree,mshtml=";
             entryParams += "|__env=WINEHUA_BOOTSTRAP_PHASE=clean-automation";
         }
+        // 兼容模式全局档位 (wineboot Main 的 apply overrides 晚于 setup_wine_env)
+        AppendCompatEnvToEntryParams(entryParams, *p);
         // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
@@ -629,6 +692,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" +
             "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir +
             "|__env=LANG=" + p->wineLang + ".UTF-8|__env=LC_ALL=" + p->wineLang + ".UTF-8";
+        AppendCompatEnvToEntryParams(entryParams, *p);
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
         NativeChildProcess_Options options = {};
@@ -785,6 +849,9 @@ void LaunchThreadFunc(LaunchParams* p) {
     p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin,
                                audioBootstrapFd, p->homeDir, p->prefixDir, p->wineLang);
     AppendD3dBackendEnv(p->envStrs, p->d3dBackend, p->dxvkBackend, p->winehuaBin);
+    // 兼容模式全局档位: 压过基线; WEAKBARRIER=0 clamp 在 explorerEnv 重放链尾
+    // (AppendStableDesktopDxvkEnv) 会再压回 — 档位不击穿 DXVK/desktop 约束
+    AppendCompatEnvLines(p->envStrs, *p);
     const std::string serializedEnv = SerializeEnvToEntryParams(p->envStrs);
 
     mkdir(p->prefixDir.c_str(), 0755);

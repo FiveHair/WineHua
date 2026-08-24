@@ -2,7 +2,7 @@ export const startServer: (sockPath: string) => boolean;
 export const setHostShadowProfile: (profile: string) => boolean;
 export const launchClient: (exePath: string, argv: string[], sockPath: string, libPath: string,
   homeDir: string, automationMode?: boolean, prefixMode?: string, d3dBackend?: string,
-  dxvkBackend?: string, wineLang?: string) => number;
+  dxvkBackend?: string, wineLang?: string, compatEnvStr?: string) => number;
 export const stopClient: () => void;
 export const stopAll: () => void;
 export const setStateCallback: (cb: (state: string) => void) => void;
