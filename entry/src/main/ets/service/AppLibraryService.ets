@@ -88,6 +88,9 @@ const BUILTIN_TOOLS: BuiltinTool[] = [
   { name: '注册表编辑器', exe: 'windows/regedit.exe' },
   { name: '任务管理器', exe: 'windows/system32/taskmgr.exe' },
   { name: '控制面板', exe: 'windows/system32/control.exe' },
+  // wine 自带 IE 浏览器 (mshtml/jscript/vbscript 内建可用); 文件名是
+  // iexplore.exe (常见误写 iexplorer), 经 FakeDlls 装进 system32
+  { name: '浏览器', exe: 'windows/system32/iexplore.exe' },
   // wine 自带小工具 (system32 的 exe stub, 设备实测存在)
   { name: '扫雷', exe: 'windows/system32/winemine.exe' },
   { name: 'winefile', exe: 'windows/system32/winefile.exe' },
