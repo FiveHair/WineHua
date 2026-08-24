@@ -336,7 +336,7 @@ static void apply_entry_param_env_overrides(const std::vector<std::string>& envO
         std::string key = envLine.substr(0, sep);
         std::string value = envLine.substr(sep + 1);
         setenv(key.c_str(), value.c_str(), 1);
-        if (key == "WINEHUA_BOOTSTRAP_PHASE")
+        if (key == "WINEHUA_BOOTSTRAP_PHASE" || key.rfind("BOX64_DYNAREC_", 0) == 0)
             OH_LOG_INFO(LOG_APP, "[WineChild] env override %{public}s=%{public}s",
                         key.c_str(), value.c_str());
     }
@@ -771,6 +771,9 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
     std::string libDir = std::string(binDir) + "/x86_64-unix";
     setenv("BOX64_LD_LIBRARY_PATH", libDir.c_str(), 1);
     SetBox64PerfEnv();
+    // __env= 段在此前 (:712) 已 apply 一次, 但 SetBox64PerfEnv 的 setenv(...,1)
+    // 会把 BOX64_DYNAREC_* 盖回硬基线 — 重新 apply, 让全局兼容档位压过基线
+    apply_entry_param_env_overrides(envOverrides);
 
     // Build argv: ["box64", "/path/to/wineserver", "wineserver", "-f", "-p"]
     std::string wsPath = std::string(binDir) + "/wineserver";

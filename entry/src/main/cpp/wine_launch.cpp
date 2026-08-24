@@ -304,6 +304,53 @@ static bool UsesDxvkOverlay(const std::string& backend)
            backend == "vkd3d_limited_500k";
 }
 
+// -- 兼容模式全局档位 (设置页 → launchClient compatEnvStr 分号串) --
+// ArkTS 侧按 BOX64_DYNAREC_PRESETS 拼 "K=V;K=V;..."; 此处只放行
+// BOX64_DYNAREC_* 行 (纯档位参数, 防注入其它 key), 空串 = 出厂基线不注入。
+// 会话 env 经 UpsertEnvLine 压过基线 (每 key 最后写入者胜出);
+// DXVK/desktop 的 WEAKBARRIER=0 clamp 在 AppendStableDesktopDxvkEnv 尾,
+// 只会重新压回, 不会被档位击穿。
+static std::vector<std::string> SplitCompatEnv(const std::string& s)
+{
+    std::vector<std::string> out;
+    std::string cur;
+    for (const char c : s) {
+        if (c == ';') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+static void AppendCompatEnvLines(std::vector<std::string>& envStrs, const LaunchParams& p)
+{
+    if (p.compatEnvStr.empty())
+        return;
+    for (const std::string& line : SplitCompatEnv(p.compatEnvStr)) {
+        if (line.rfind("BOX64_DYNAREC_", 0) == 0)
+            UpsertEnvLine(envStrs, line);
+    }
+}
+
+// wineboot/wineserver 走 NCP entryParams (不继承 app env), 把档位追加为
+// __env= 段 — 子进程 apply overrides 晚于进程内 SetBox64PerfEnv 基线,
+// 档位胜出 (wineserver 见 WineserverMain 的二次 apply)。
+static void AppendCompatEnvToEntryParams(std::string& entryParams, const LaunchParams& p)
+{
+    if (p.compatEnvStr.empty())
+        return;
+    for (const std::string& line : SplitCompatEnv(p.compatEnvStr)) {
+        if (line.rfind("BOX64_DYNAREC_", 0) != 0 || line.find('|') != std::string::npos)
+            continue;
+        entryParams += "|__env=";
+        entryParams += line;
+    }
+}
+
 static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
                                        const LaunchParams& params)
 {
@@ -451,6 +498,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
             "|wineserver|-f|-p|__env=WINEPREFIX=" + p->prefixDir;
         if (p->prefixDir == WINE_SMOKE_PREFIX)
             wsEntryParams += "|__env=WINEHUA_PROCESS_EXIT_TELEMETRY=1";
+        AppendCompatEnvToEntryParams(wsEntryParams, *p);
         OH_LOG_WARN(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
         NativeChildProcess_Args wsArgs = {};
         wsArgs.entryParams = const_cast<char*>(wsEntryParams.c_str());
@@ -554,6 +602,8 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
             entryParams += "|__env=WINEDLLOVERRIDES=mscoree,mshtml=";
             entryParams += "|__env=WINEHUA_BOOTSTRAP_PHASE=clean-automation";
         }
+        // 兼容模式全局档位 (wineboot Main 的 apply overrides 晚于 setup_wine_env)
+        AppendCompatEnvToEntryParams(entryParams, *p);
         // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
@@ -629,6 +679,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" +
             "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir +
             "|__env=LANG=" + p->wineLang + ".UTF-8|__env=LC_ALL=" + p->wineLang + ".UTF-8";
+        AppendCompatEnvToEntryParams(entryParams, *p);
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
         NativeChildProcess_Options options = {};
@@ -785,6 +836,9 @@ void LaunchThreadFunc(LaunchParams* p) {
     p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin,
                                audioBootstrapFd, p->homeDir, p->prefixDir, p->wineLang);
     AppendD3dBackendEnv(p->envStrs, p->d3dBackend, p->dxvkBackend, p->winehuaBin);
+    // 兼容模式全局档位: 压过基线; WEAKBARRIER=0 clamp 在 explorerEnv 重放链尾
+    // (AppendStableDesktopDxvkEnv) 会再压回 — 档位不击穿 DXVK/desktop 约束
+    AppendCompatEnvLines(p->envStrs, *p);
     const std::string serializedEnv = SerializeEnvToEntryParams(p->envStrs);
 
     mkdir(p->prefixDir.c_str(), 0755);
