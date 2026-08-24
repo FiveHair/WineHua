@@ -357,7 +357,7 @@ export struct SettingsView {
               this.relSpeedText = `${Math.round(value * 100)}%`;
               this.inputSettings.setRelMouseSpeed(value, mode != SliderChangeMode.Moving);
             })
-          Text('游戏内隐藏光标转视角/瞄准时生效, 叠加于系统校准之上; 立即生效')
+          Text('适用于游戏内置的鼠标光标、旋转视角等场景，立即生效')
             .fontSize(12)
             .fontColor($r('app.color.text_tertiary'))
             .width('100%')
