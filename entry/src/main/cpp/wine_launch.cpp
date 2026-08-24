@@ -309,31 +309,45 @@ static bool UsesDxvkOverlay(const std::string& backend)
 // BOX64_DYNAREC_* 行 (纯档位参数, 防注入其它 key), 空串 = 出厂基线不注入。
 // 会话 env 经 UpsertEnvLine 压过基线 (每 key 最后写入者胜出);
 // DXVK/desktop 的 WEAKBARRIER=0 clamp 在 AppendStableDesktopDxvkEnv 尾,
-// 只会重新压回, 不会被档位击穿。
-static std::vector<std::string> SplitCompatEnv(const std::string& s)
+// 只会重新压回, 不会被档位击穿 (该 clamp 是 Venus 图形 ring 约束, 只
+// 覆盖 explorer 会话链; wineboot/wineserver 无图形, 档位原值直接生效)。
+// 仅 __aarch64__ (Box64) 设备有意义; x86_64 原生跑无 box64, 空转不注入。
+#ifdef __aarch64__
+// 统一过滤: 前缀 + entryParams 协议危险字符 ('|'/'\n') + 缺 '=' 畸形行 — 会话
+// env 与 NCP entryParams 两条通道同一套行为 (原来源彼此漂移, 静默丢弃语义不一)
+static std::vector<std::string> FilterCompatLines(const std::string& compatEnvStr)
 {
-    std::vector<std::string> out;
+    std::vector<std::string> raw;
     std::string cur;
-    for (const char c : s) {
+    for (const char c : compatEnvStr) {
         if (c == ';') {
-            if (!cur.empty()) out.push_back(cur);
+            if (!cur.empty()) raw.push_back(cur);
             cur.clear();
         } else {
             cur += c;
         }
     }
-    if (!cur.empty()) out.push_back(cur);
-    return out;
+    if (!cur.empty()) raw.push_back(cur);
+    std::vector<std::string> filtered;
+    for (const std::string& line : raw) {
+        if (line.rfind("BOX64_DYNAREC_", 0) != 0)
+            continue;
+        if (line.find('|') != std::string::npos || line.find('\n') != std::string::npos)
+            continue;
+        if (line.find('=') == std::string::npos)
+            continue;
+        filtered.push_back(line);
+    }
+    return filtered;
 }
 
 static void AppendCompatEnvLines(std::vector<std::string>& envStrs, const LaunchParams& p)
 {
-    if (p.compatEnvStr.empty())
+    // smoke/experiment (automation) 使用隔离 prefix, 回归必须跑出厂基线
+    if (p.automationMode)
         return;
-    for (const std::string& line : SplitCompatEnv(p.compatEnvStr)) {
-        if (line.rfind("BOX64_DYNAREC_", 0) == 0)
-            UpsertEnvLine(envStrs, line);
-    }
+    for (const std::string& line : FilterCompatLines(p.compatEnvStr))
+        UpsertEnvLine(envStrs, line);
 }
 
 // wineboot/wineserver 走 NCP entryParams (不继承 app env), 把档位追加为
@@ -341,15 +355,14 @@ static void AppendCompatEnvLines(std::vector<std::string>& envStrs, const Launch
 // 档位胜出 (wineserver 见 WineserverMain 的二次 apply)。
 static void AppendCompatEnvToEntryParams(std::string& entryParams, const LaunchParams& p)
 {
-    if (p.compatEnvStr.empty())
+    if (p.automationMode)
         return;
-    for (const std::string& line : SplitCompatEnv(p.compatEnvStr)) {
-        if (line.rfind("BOX64_DYNAREC_", 0) != 0 || line.find('|') != std::string::npos)
-            continue;
+    for (const std::string& line : FilterCompatLines(p.compatEnvStr)) {
         entryParams += "|__env=";
         entryParams += line;
     }
 }
+#endif // __aarch64__
 
 static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
                                        const LaunchParams& params)

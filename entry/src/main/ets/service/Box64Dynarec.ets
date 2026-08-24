@@ -3,7 +3,10 @@
 // 的 BOX64_AVX / BOX64_DYNAREC_VOLATILE_METADATA — 那两项随全局基线保留)。
 // 仅 arm64 (Box64 模拟) 生效; x86_64 原生跑忽略。档位语义从保守到激进:
 // stability 最稳, performance 最快。注入时整体覆盖对应 key (完整档位语义,
-// 不受全局基线残留参数干扰)。
+// 不受全局基线残留参数干扰); 唯一例外: WEAKBARRIER 在 DXVK/vkd3d 桌面会话
+// 链 (explorer 及桌面内程序) 被 AppendStableDesktopDxvkEnv 强制 clamp 为 0
+// (Venus 共享内存 ring 的 x86 定序约束), 档位值只在 wineboot/wineserver
+// (无图形) 生效。
 // 独立模块/共享表: AppLibraryService (自定义启动 per-process 注入) 与
 // WineEnvService (全局基线, 经 launchClient 下发 native) 都引用 — 避免两
 // service 循环 import。
