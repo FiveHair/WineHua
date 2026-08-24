@@ -8,6 +8,7 @@ import { LogExportService } from '../service/LogExportService';
 import { DisplaySettingsService } from '../service/DisplaySettingsService';
 import { InputSettingsService } from '../service/InputSettingsService';
 import { DesktopModeService, MODE_VIRTUAL, MODE_FUSION } from '../service/DesktopModeService';
+import { compatIndexOfMode, compatModeFromIndex } from '../service/Box64Dynarec';
 
 // 设置页 (设计 4.6, 环境已并入): 显示 (置顶) / 环境管理 (Wine 引擎 · Windows 字体 ·
 // 会话维护 · 危险区)。原环境页 (EnvPanel) 三卡整体并入本页; 原"关于"卡片与
@@ -36,6 +37,11 @@ export struct SettingsView {
   @State wineLang: string = 'zh_CN';
   @State restartHint: boolean = false;
   @State langRestartHint: boolean = false;
+  // 兼容模式分段选中项 (Box64 dynarec 全局档位, 镜像 env.getCompatMode):
+  // 0=默认(出厂基线) 1=稳定 2=保守 3=均衡 4=性能 (选项对齐自定义启动弹窗)
+  @State compatSel: number[] = [0];
+  @State compatMode: string = '';
+  @State compatRestartHint: boolean = false;
   // 桌面模式分段选中项 (仅 PC): 0=融合模式 1=虚拟桌面, 与 desktopMode 同步
   @State desktopModeSel: number[] = [0];
   @State desktopMode: string = MODE_FUSION;
@@ -71,6 +77,13 @@ export struct SettingsView {
     const langSel = this.wineLang == 'en_US' ? 1 : 0;
     if (this.langSel[0] != langSel) {
       this.langSel = [langSel];
+    }
+    this.compatMode = this.env.getCompatMode();
+    // 派生兼容模式选中项 (变化才赋值, 与 backendSel 同守卫; 未知值兜底 0,
+    // 与 normalizeCompatMode 同向 — UI 高亮与不注入的实际行为一致)
+    const compatIdx = compatIndexOfMode(this.compatMode);
+    if (this.compatSel[0] != compatIdx) {
+      this.compatSel = [compatIdx];
     }
     // 桌面模式镜像 (仅 PC 生效; Pad/phone 恒虚拟桌面, 设置项不渲染)
     const desktopMode = DesktopModeService.getInstance().mode;
@@ -130,6 +143,17 @@ export struct SettingsView {
     }
     this.env.setD3dPreference(backend);
     this.restartHint = true;
+  }
+
+  // 兼容模式档位切换: 仅写配置 (service 内持久化)。双通道生效:
+  // 新启动的程序 (launch/openInWine 直启) 立即生效;
+  // 运行中的桌面会话 (explorer 及子孙) 重启引擎后生效 (UI 负责分档提示)
+  private selectCompat(mode: string): void {
+    if (mode == this.compatMode) {
+      return;
+    }
+    this.env.setCompatModePreference(mode);
+    this.compatRestartHint = true;
   }
 
   // Wine 语言切换: 同渲染策略, 仅写配置, 重启 Wine 引擎后生效
@@ -385,8 +409,7 @@ export struct SettingsView {
           .width('100%').alignItems(VerticalAlign.Center)
 
           Text('渲染策略')
-            .fontSize(13)
-            .fontColor($r('app.color.text_secondary'))
+            .fontColor($r('app.color.text_primary'))
             .width('100%')
           SegmentButton({
             options: SegmentButtonOptions.capsule({
@@ -407,6 +430,32 @@ export struct SettingsView {
             .width('100%')
           if (this.restartHint) {
             Text('渲染策略已更改, 重启 Wine 引擎后生效')
+              .fontSize(12)
+              .fontColor($r('app.color.state_warn'))
+              .width('100%')
+          }
+
+          Text('兼容模式')
+            .fontColor($r('app.color.text_primary'))
+            .width('100%')
+          SegmentButton({
+            options: SegmentButtonOptions.capsule({
+              buttons: [{ text: '默认' }, { text: '稳定' }, { text: '保守' },
+                { text: '均衡' }, { text: '性能' }],
+              multiply: false
+            }),
+            selectedIndexes: $compatSel,
+            onItemClicked: (index: number) => {
+              this.selectCompat(compatModeFromIndex(index) ?? '');
+            }
+          })
+          .width('100%')
+          Text('性能档最快 / 稳定档最稳; 个别程序异常时可降档重试')
+            .fontSize(12)
+            .fontColor($r('app.color.text_tertiary'))
+            .width('100%')
+          if (this.compatRestartHint) {
+            Text('兼容模式已更改; 新启动的程序立即生效, 运行中的桌面会话重启后生效')
               .fontSize(12)
               .fontColor($r('app.color.state_warn'))
               .width('100%')
@@ -460,6 +509,7 @@ export struct SettingsView {
               this.restartHint = false;
               this.langRestartHint = false;
               this.desktopModeRestartHint = false;
+              this.compatRestartHint = false;
               this.env.restartEngine();
             })
           Button('强制停止 Wine 引擎')

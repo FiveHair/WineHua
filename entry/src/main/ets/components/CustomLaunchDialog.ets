@@ -1,4 +1,5 @@
 import { SegmentButton, SegmentButtonOptions } from '@kit.ArkUI';
+import { compatModeFromIndex } from '../service/Box64Dynarec';
 
 // Windows 版本选项 (下拉): label 为显示名, value 为 wine 侧 version_names 表
 // 合法值 (ntdll/version.c 精确 wcscmp, 全小写), 与 winecfg 下拉同款列表
@@ -36,10 +37,11 @@ const WINVER_OPTIONS: WinverOption[] = [
 // 自定义启动对话框 (应用库/文件页右键菜单「自定义启动」弹出): 临时选择
 // 渲染策略 + 兼容模式档位 + Windows 版本, 点「启动」按所选参数启动一次 —
 // 不写入持久化配置。
-// 每套选择第一项都是「跟随全局」= 不覆盖 (启动时映射为 undefined 传 onLaunch)。
-// 兼容模式为 Box64 动态翻译档位 (仅 ARM 设备生效, x86_64 原生跑无效果),
-// 对齐 Winlator 4 档位: 稳定/保守/均衡/性能, 每档完整 11 个 BOX64_DYNAREC_*
-// 参数注入 (见 AppLibraryService.BOX64_DYNAREC_PRESETS), 覆盖压过全局基线。
+// 每套选择第一项都是「跟随全局」= 不覆盖 (启动时映射为 undefined 传 onLaunch;
+// launch 侧回落设置页全局档位, 非出厂基线)。兼容模式为 Box64 动态翻译档位
+// (仅 ARM 设备生效, x86_64 原生跑无效果), 对齐 Winlator 4 档位: 稳定/保守/
+// 均衡/性能, 每档完整 11 个 BOX64_DYNAREC_* 参数注入 (共享表见
+// Box64Dynarec.BOX64_DYNAREC_PRESETS), 覆盖压过全局基线。
 // Windows 版本注入 WINEHUA_WINDOWS_VERSION 环境变量, 逐进程生效 (两架构都
 // 有效)。版本项多 (18), SegmentButton 上限 5 个按钮放不下, 用 Select 下拉
 // (winecfg 同款交互)。
@@ -69,9 +71,7 @@ export struct CustomLaunchDialog {
     const opt = WINVER_OPTIONS.find((o: WinverOption) => o.label == this.winverLabel);
     const winver = opt?.value || undefined;
     this.onLaunch(g == 1 ? 'dxvk' : g == 2 ? 'wined3d' : undefined,
-      c == 1 ? 'stability' : c == 2 ? 'conservative'
-        : c == 3 ? 'intermediate' : c == 4 ? 'performance' : undefined,
-      winver);
+      compatModeFromIndex(c), winver);
     this.controller?.close();
   }
 
@@ -118,7 +118,7 @@ export struct CustomLaunchDialog {
             this.compatSel = [index];
           }
         })
-        Text('Box64 动态翻译档位')
+        Text('跟随全局 = 使用设置页「兼容模式」档位')
           .fontSize(11)
           .fontColor($r('app.color.text_tertiary'))
       }

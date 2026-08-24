@@ -7,6 +7,7 @@ import { zlib } from '@kit.BasicServicesKit';
 import { ProcessService, ProcessInfo } from './ProcessService';
 import { WineWindowManager } from './WineWindowManager';
 import { DisplaySettingsService } from './DisplaySettingsService';
+import { normalizeCompatMode, box64DynarecEnvString } from './Box64Dynarec';
 import { SmokeLaunchRequest, SmokeRunner, defaultSmokeRequest, parseSmokeRequest,
   syncManagedSmoke } from './SmokeRunner';
 
@@ -184,6 +185,11 @@ export class WineEnvService {
   // 实测本应用 persistProp 在冷启动时不从磁盘恢复值 (haps/entry/files/
   // persistent_storage 明明有值仍返回默认值), 原因未查明, 绕开
   private wineLang: string = 'zh_CN';
+  // 设置页"兼容模式"全局档位 (Box64 dynarec 档位, 对齐自定义启动弹窗):
+  // '' = 出厂基线不注入; 其余 = BOX64_DYNAREC_PRESETS 档位。preferences
+  // 持久化; 仅写入配置 — 新启动的程序立即生效, 运行中的桌面会话重启引擎后
+  // 生效 (双通道, UI 负责分档提示)
+  private compatMode: string = '';
   private settingsStore: preferences.Preferences | null = null;
   private perfProfile: string = 'baseline';
   private smokeStarted: boolean = false;
@@ -300,6 +306,30 @@ export class WineEnvService {
     this.notify();
   }
 
+  // 设置页"兼容模式"切换: 持久化 (preferences API, putSync+flush 直写磁盘)。
+  // 仅写入配置 — 新启动的程序立即生效; 运行中的桌面会话重启引擎后生效
+  // (UI 负责分档提示)
+  setCompatModePreference(mode: string): void {
+    const selected = normalizeCompatMode(mode);
+    if (this.settingsStore) {
+      try {
+        this.settingsStore.putSync('compat_mode', selected);
+        this.settingsStore.flush();
+      } catch (e) {
+        // 写盘失败: 不更新内存值 (重启后读回的仍是旧档), 让 UI 反映真实持久化状态
+        hilog.error(DOMAIN, 'wine', 'compat mode persist fail: %{public}s', JSON.stringify(e));
+        this.notify();
+        return;
+      }
+    }
+    this.compatMode = selected;
+    hilog.info(DOMAIN, 'wine', 'Compat mode selected=%{public}s',
+      selected === '' ? 'baseline' : selected);
+    this.notify();
+  }
+
+  getCompatMode(): string { return this.compatMode; }
+
   // 环境页"渲染策略"切换: 持久化偏好 + 同步 AppStorage 生效值 + 重读启动参数。
   // 仅写入配置 — 已在运行的 Wine 不受影响, 重启引擎后生效 (UI 负责提示)
   setD3dPreference(backend: string): void {
@@ -374,6 +404,15 @@ export class WineEnvService {
       this.skippedUpgradeSha = this.settingsStore.getSync('skipped_upgrade_sha', '') as string;
     } catch (e) {
       hilog.error(DOMAIN, 'wine', 'lang settings load fail: %{public}s', JSON.stringify(e));
+    }
+    // 兼容模式档位读回: 独立 try/catch — 与 lang 失败区分, 便于定位档位丢失来源
+    if (this.settingsStore) {
+      try {
+        this.compatMode = normalizeCompatMode(
+          this.settingsStore.getSync('compat_mode', '') as string);
+      } catch (e) {
+        hilog.error(DOMAIN, 'wine', 'compat mode load fail: %{public}s', JSON.stringify(e));
+      }
     }
     this.updateLaunchRequest();
 
@@ -963,7 +1002,8 @@ export class WineEnvService {
       return;
     }
     testNapi.launchClient(BOX64, [], this.sockPath, `${BIN_DIR}:${WINE_LIB}`, this.zHome,
-      this.automationMode, this.prefixMode, this.d3dBackend, this.dxvkBackend, this.wineLang);
+      this.automationMode, this.prefixMode, this.d3dBackend, this.dxvkBackend, this.wineLang,
+      box64DynarecEnvString(this.compatMode));
   }
 
   // 重置 prefix (编排式): 有会话先停止并等 state:stopped (native 确认注册表进程

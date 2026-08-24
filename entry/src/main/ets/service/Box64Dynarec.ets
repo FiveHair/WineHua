@@ -65,9 +65,10 @@ export const BOX64_DYNAREC_PRESETS: Record<string, Record<string, string>> = {
   }
 };
 
-// 全局兼容模式值: '' = 出厂基线 (不注入, 当前默认行为);
-// 其余与 BOX64_DYNAREC_PRESETS 档位一一对应
-export type CompatMode = '' | 'stability' | 'conservative' | 'intermediate' | 'performance';
+// 档位值 (不含 ''), 与 BOX64_DYNAREC_PRESETS 键一一对应
+export type DynarecMode = 'stability' | 'conservative' | 'intermediate' | 'performance';
+// 全局兼容模式值: '' = 出厂基线 (不注入, 当前默认行为)
+export type CompatMode = '' | DynarecMode;
 
 // 白名单归一 (写入与 preferences 读回两处都用, 防脏键/旧数据污染 env 串)
 export function normalizeCompatMode(m: string): CompatMode {
@@ -85,4 +86,33 @@ export function box64DynarecEnvString(mode: string): string {
     return '';
   }
   return Object.keys(preset).map((k: string) => `${k}=${preset[k]}`).join(';');
+}
+
+// 档位 UI 元数据: 4 档 (按 BOX64_DYNAREC_PRESETS 顺序), 第 0 项由各 UI 自定义
+// (设置页「默认」= 出厂基线不注入; 弹窗「跟随全局」= 弹窗不覆盖落全局档)。
+// index↔档位映射据此派生, 避免 4 处手写三元链。按钮文本因 SegmentButton
+// buttons 要求静态元组, 无法 spread 动态数组, label 留在各 UI 手写。
+interface CompatModeOption {
+  label: string;
+  value: DynarecMode;
+}
+
+const COMPAT_MODE_OPTIONS: CompatModeOption[] = [
+  { label: '稳定', value: 'stability' },
+  { label: '保守', value: 'conservative' },
+  { label: '均衡', value: 'intermediate' },
+  { label: '性能', value: 'performance' }
+];
+
+// 档位值 → 段选 index (第 0 项=自定义项): 未知/'' → 0, 与 normalizeCompatMode
+// 兜底同向 (显示「默认/跟随全局」与不注入的实际行为一致)
+export function compatIndexOfMode(mode: string): number {
+  const idx = COMPAT_MODE_OPTIONS.findIndex((o: CompatModeOption) => o.value == mode);
+  return idx >= 0 ? idx + 1 : 0;
+}
+
+// 段选 index → 档位值: 第 0 项/越界 → undefined (调用方自行映射: 设置页=基线, 弹窗=跟随全局)
+export function compatModeFromIndex(idx: number): DynarecMode | undefined {
+  const opt = COMPAT_MODE_OPTIONS[idx - 1];
+  return opt?.value;
 }
