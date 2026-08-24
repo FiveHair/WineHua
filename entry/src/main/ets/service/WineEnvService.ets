@@ -6,6 +6,7 @@ import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
 import { zlib } from '@kit.BasicServicesKit';
 import { ProcessService, ProcessInfo } from './ProcessService';
 import { WineWindowManager } from './WineWindowManager';
+import { DisplaySettingsService } from './DisplaySettingsService';
 import { SmokeLaunchRequest, SmokeRunner, defaultSmokeRequest, parseSmokeRequest,
   syncManagedSmoke } from './SmokeRunner';
 
@@ -479,6 +480,8 @@ export class WineEnvService {
       this.opBusy = false;
       this.bgStart = false;
       this.setInitStatus('桌面准备中...', false);
+      // 引擎没起来但不再属"初始化进行中" (overlay 已隐去): 常亮恢复设置值
+      this.applyKeepScreenOn();
     } else if (name == 'failed') {
       // 覆盖启动失败 (wineserver spawn/wineboot) 与运行中主 wineserver 非预期
       // 死亡 (ProcMon 上报) — 失败统一进 failInit: overlay 给 重试/重置 入口,
@@ -513,8 +516,31 @@ export class WineEnvService {
     this.opBusy = false;
     this.bgStart = false;
     this.setInitStatus('已就绪', false);
+    // 初始化结束: 强制常亮到此为止, 屏幕恢复按用户设置
+    this.applyKeepScreenOn();
     // wineboot 可能还在后台初始化 prefix，轮询等待 drive_c 就绪
     this.waitForPrefix();
+  }
+
+  // 屏幕常亮统一策略: wine 初始化中 (initBusy, 含 doInit 全程) 强制常亮 —
+  // 无视用户设置; 结束/失败/暂停后恢复设置值。只作用于主窗口: wine 会话
+  // 停掉时全部游戏/VDA 窗口随 toplevel destroyed 经 terminateSelf 关闭
+  // (WineWindowManager), 且初始化中 canLaunch=false 无新窗口 → 前台恒为主
+  // 窗口。挂点 = initBusy 全部置位/清除处 (doInit 起/enterReady/ready-degraded/
+  // failInit/升级中止) + SettingsView 开关切换 (唯一打穿点)。
+  applyKeepScreenOn(): void {
+    const on = (this.initBusy || this.engineState == 'starting')
+      ? true : DisplaySettingsService.getInstance().keepScreenOn;
+    const mainWin = WineWindowManager.getInstance().getMainWindow();
+    hilog.warn(DOMAIN, 'wine', 'applyKeepScreenOn: on=%{public}s (initBusy=%{public}s state=%{public}s win=%{public}s)',
+      String(on), String(this.initBusy), this.engineState, mainWin ? 'ok' : 'null');
+    if (!mainWin) {
+      return;
+    }
+    mainWin.setWindowKeepScreenOn(on)
+      .catch((e: Object) => {
+        hilog.warn(DOMAIN, 'wine', 'applyKeepScreenOn fail: %{public}s', JSON.stringify(e));
+      });
   }
 
   private detectRawfileWineData(): boolean {
@@ -790,6 +816,8 @@ export class WineEnvService {
     // 启动器内 EngineGuide 的 failed 分支承接 重试/重置 自救
     this.setInitStatus(text, !this.bgStart);
     this.bgStart = false;
+    // 初始化失败 (不在初始化): 常亮恢复设置值
+    this.applyKeepScreenOn();
   }
 
   // prefix 是否已在盘上 (drive_c 存在): 引导"首次/二次进入"文案分野 —
@@ -853,6 +881,8 @@ export class WineEnvService {
     }
     this.initBusy = true;
     this.initFailed = false;
+    // 初始化开始: 屏幕强制常亮 (无视用户设置); 结束/失败由各自挂点恢复
+    this.applyKeepScreenOn();
     if (!await this.acquireZHome(this.ctx)) {
       this.failInit('获取下载目录失败');
       return;
@@ -899,6 +929,8 @@ export class WineEnvService {
       this.initOverlayVisible = false;
       this.initBusy = false;
       this.upgradePending = true;
+      // 暂停初始化 (等用户决定应用升级): 常亮恢复设置值
+      this.applyKeepScreenOn();
       this.notify();
       return;
     } else if (this.runtimeNeedsRefresh() && this.isAutomation()) {

@@ -98,17 +98,14 @@ export struct SettingsView {
     this.relSpeedText = `${Math.round(this.inputSettings.relMouseSpeed * 100)}%`;
   }
 
-  // 保持屏幕常亮: 持久化 + 立即应用到主窗口 (EntryAbility 已存引用;
-  // 不依赖 getLastWindow, 多窗口下它会返回游戏子窗口)
+  // 保持屏幕常亮: 持久化后统一走 env 策略 — wine 初始化中强制常亮,
+  // 开关只改设置值不生效常亮状态 (防打穿); 非初始化期立即应用到主窗口
+  // (env 内 WineWindowManager.getMainWindow, 不依赖 getLastWindow —
+  // 多窗口下它会返回游戏子窗口)
   private toggleKeepScreenOn(v: boolean): void {
     this.keepScreenOn = v;
     this.displaySettings.setKeepScreenOn(v);
-    const mainWin = AppStorage.get<window.Window>('winehua.mainWindow');
-    if (mainWin) {
-      mainWin.setWindowKeepScreenOn(v).catch((e: Object) => {
-        hilog.error(0x0000, 'SettingsView', 'setWindowKeepScreenOn fail: %{public}s', JSON.stringify(e));
-      });
-    }
+    this.env.applyKeepScreenOn();
   }
 
   // 状态文本配色, 与标题栏同一套规则: 失败红 / 运行绿 / 就绪或进行中蓝 / 未启动灰
