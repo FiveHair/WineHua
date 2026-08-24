@@ -511,7 +511,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
             "|wineserver|-f|-p|__env=WINEPREFIX=" + p->prefixDir;
         if (p->prefixDir == WINE_SMOKE_PREFIX)
             wsEntryParams += "|__env=WINEHUA_PROCESS_EXIT_TELEMETRY=1";
+#ifdef __aarch64__
         AppendCompatEnvToEntryParams(wsEntryParams, *p);
+#endif
         OH_LOG_WARN(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
         NativeChildProcess_Args wsArgs = {};
         wsArgs.entryParams = const_cast<char*>(wsEntryParams.c_str());
@@ -616,7 +618,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
             entryParams += "|__env=WINEHUA_BOOTSTRAP_PHASE=clean-automation";
         }
         // 兼容模式全局档位 (wineboot Main 的 apply overrides 晚于 setup_wine_env)
+#ifdef __aarch64__
         AppendCompatEnvToEntryParams(entryParams, *p);
+#endif
         // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
@@ -692,7 +696,9 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" +
             "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir +
             "|__env=LANG=" + p->wineLang + ".UTF-8|__env=LC_ALL=" + p->wineLang + ".UTF-8";
+#ifdef __aarch64__
         AppendCompatEnvToEntryParams(entryParams, *p);
+#endif
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
         NativeChildProcess_Options options = {};
@@ -851,7 +857,9 @@ void LaunchThreadFunc(LaunchParams* p) {
     AppendD3dBackendEnv(p->envStrs, p->d3dBackend, p->dxvkBackend, p->winehuaBin);
     // 兼容模式全局档位: 压过基线; WEAKBARRIER=0 clamp 在 explorerEnv 重放链尾
     // (AppendStableDesktopDxvkEnv) 会再压回 — 档位不击穿 DXVK/desktop 约束
+#ifdef __aarch64__
     AppendCompatEnvLines(p->envStrs, *p);
+#endif
     const std::string serializedEnv = SerializeEnvToEntryParams(p->envStrs);
 
     mkdir(p->prefixDir.c_str(), 0755);
