@@ -82,7 +82,7 @@ export struct EngineGuide {
           : this.state == 'ready' ? '环境初始化完成后即可使用'
           : (this.env.hasPrefixOnDisk()
             ? '启动引擎后即可浏览应用与文件'
-            : '首次启动需解压数据并初始化环境，约需 1 分钟；之后启动只需几秒')
+            : '首次启动需解压数据并初始化环境，可能需要 1-2 分钟；之后启动只需几秒')
       })
       if (this.busy) {
         LoadingProgress()

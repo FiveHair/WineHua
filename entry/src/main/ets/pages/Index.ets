@@ -808,6 +808,11 @@ struct Index {
             .fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.text_primary'))
             .margin({ bottom: 8 })
+          // 初始化等待耗时预期: 弹窗显示的每次初始化 (首启/重启/重置) 都给预期
+          Text('可能需要 1-2 分钟')
+            .fontSize(13)
+            .fontColor($r('app.color.text_tertiary'))
+            .margin({ bottom: 4 })
           Text(this.initOverlayText)
             .fontSize(15)
             .fontColor($r('app.color.text_secondary'))
