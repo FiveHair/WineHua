@@ -268,9 +268,9 @@ static const char *select_winedebug_profile(int argc, char *argv[])
 
 static void setup_wine_env(const char* binDir, const char* homeDir, const char *winedebug)
 {
-    std::string shareDir = std::string(binDir) + "/../share";
-    std::string libDir = std::string(binDir) + "/x86_64-unix";
+    const std::string libDir = std::string(binDir) + "/x86_64-unix";
 
+    // 分歧键: 库搜索路径 (主进程 BuildWineEnv 按图形后端另算 runtimeLibPath)
 #ifdef __aarch64__
     // ARM64: x86_64 .so 由 Box64 加载，不在系统 LD_LIBRARY_PATH
     // LD_LIBRARY_PATH 只包含 ARM64 原生 .so
@@ -285,39 +285,23 @@ static void setup_wine_env(const char* binDir, const char* homeDir, const char *
            (libDir + ":/data/storage/el1/bundle/libs/x86_64").c_str(), 1);
 #endif
 
-    if (homeDir && homeDir[0])
-        setenv("HOME", homeDir, 1);
+    // 公共基线: 与主进程 BuildWineEnv 同一张表 (wine_env_baseline.h), 增键只改一处
+    winehua::ApplyEnvLinesToEnviron(winehua::BuildWineBaselineLines(
+        {binDir, homeDir && homeDir[0] ? homeDir : "", WINE_PREFIX}));
+    // 分歧键: 合成器 socket 固定名 (主进程侧是 sockName 参数)
     setenv("WAYLAND_DISPLAY", "wine-wayland", 1);
-    setenv("WINEPREFIX", WINE_PREFIX, 1);
+    // 读 WINEPREFIX 设 XDG_RUNTIME_DIR/PROCESSBROKER, 必须在基线 (WINEPREFIX) 之后
     refresh_wine_session_paths();
-    setenv("WINEDATADIR", (shareDir + "/wine").c_str(), 1);
-    setenv("XKB_CONFIG_ROOT", (shareDir + "/X11/xkb").c_str(), 1);
     // WINEBINDIR/WINEUNIXDIR 覆盖 init_paths() 中基于 dladdr(ntdll.so) 推算的错误路径
     // ntdll.so 在 bundle libs 目录，而 PE DLL / Unix SO 数据都在 wine/bin/ 下
     setenv("WINEBINDIR", binDir, 1);   // wine/bin/
     setenv("WINEUNIXDIR", binDir, 1);  // wine/bin/ (含 x86_64-unix/x86_64-windows)
-    setenv("WINEDLLDIR", libDir.c_str(), 1);
-    setenv("WINEDLLDIR0", (std::string(binDir) + "/x86_64-windows").c_str(), 1);
-    setenv("WINEDLLDIR1", (std::string(binDir) + "/i386-windows").c_str(), 1);
-    setenv("WINEDLLDIR2", binDir, 1);
-    {
-        std::string dllPath = std::string(binDir) + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir;
-#ifndef __aarch64__
-        dllPath += ":/data/storage/el1/bundle/libs/x86_64";
-#endif
-        setenv("WINEDLLPATH", dllPath.c_str(), 1);
-    }
     // Box64 日志: 0=关闭 (3=DEBUG 会产生海量 I/O)
-    SetBox64PerfEnv();
+    winehua::SetBox64PerfEnv();
 #ifdef __aarch64__
     // 标记 Box64 in-process 模式，供 x86_64 wine 代码 (process.c) 运行时判断
     setenv("USE_LIBBOX64", "1", 1);
 #endif
-    setenv("PATH", (std::string("/usr/local/bin:/data/app/bin:/usr/bin:/vendor/bin:")
-                    + binDir + "/x86_64-windows:" + binDir + "/i386-windows:" + binDir).c_str(), 1);
-    setenv("TMPDIR", WINE_TMPDIR, 1);
-    std::string midiSoundfontPath = std::string(binDir) + "/../audio/winehua-gm.sf2";
-    setenv("MIDI_SOUNDFONT_PATH", midiSoundfontPath.c_str(), 1);
     setenv("WINEDEBUG", winedebug && winedebug[0] ? winedebug : default_winedebug_profile(), 1);
 }
 
@@ -709,6 +693,13 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step1: setting env...");
     setenv("WINEPREFIX", WINE_PREFIX, 1);
     setenv("WINEDEBUG", "-all", 1);
+#ifdef __aarch64__
+    // Box64 基线必须先于 __env apply: 会话档位 (BOX64_DYNAREC_*) 经 __env
+    // 下发, apply 最后执行才能保证 "后写胜出"。此前基线在后、靠 dynarec 行
+    // 二次重放兜底, 顺序理顺后重放已删。
+    setenv("BOX64_LD_LIBRARY_PATH", (std::string(binDir) + "/x86_64-unix").c_str(), 1);
+    winehua::SetBox64PerfEnv();
+#endif
     apply_entry_param_env_overrides(envOverrides);
     OH_LOG_INFO(LOG_APP, "[WineChild] ws step2: mkdir prefix=%{public}s...", active_wine_prefix());
     mkdir(active_wine_prefix(), 0755);
@@ -767,23 +758,8 @@ extern "C" void WineserverMain(NativeChildProcess_Args args)
         return;
     }
 
-    // Box64 env for wineserver (x86_64 wineserver ELF inside Box64).
-    std::string libDir = std::string(binDir) + "/x86_64-unix";
-    setenv("BOX64_LD_LIBRARY_PATH", libDir.c_str(), 1);
-    SetBox64PerfEnv();
-    // __env= 段在此前 (:712) 已 apply 一次 — 该次必须先于 mkdir (WINEPREFIX
-    // 覆盖依赖), 不可整体延迟。但 SetBox64PerfEnv 的 setenv(...,1) 把
-    // BOX64_DYNAREC_* 盖回硬基线, 此处只重放 dynarec 行让其压过基线;
-    // 其余 __env key (WINEPREFIX 等) 不重放, 避免覆盖 :712 之后的环境决策
-    for (const std::string& envLine : envOverrides) {
-        if (envLine.rfind("BOX64_DYNAREC_", 0) != 0)
-            continue;
-        size_t sep = envLine.find('=');
-        if (sep == std::string::npos || sep == 0)
-            continue;
-        setenv(envLine.substr(0, sep).c_str(), envLine.substr(sep + 1).c_str(), 1);
-    }
-
+    // Box64 env (BOX64_LD_LIBRARY_PATH / 性能基线) 已在 step1 先于 __env
+    // apply 设置, 此处直接拼 argv。
     // Build argv: ["box64", "/path/to/wineserver", "wineserver", "-f", "-p"]
     std::string wsPath = std::string(binDir) + "/wineserver";
     int box64_argc = argc2 + 2;
