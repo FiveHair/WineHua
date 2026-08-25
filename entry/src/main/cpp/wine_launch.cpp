@@ -2,6 +2,7 @@
 #include "wine_exe.h"
 #include "wine_process.h"
 #include "wine_env.h"
+#include "env_profiles.h"
 #include "wine_constants.h"
 #include "wayland_server.h"
 #include "audio_ipc_protocol.h"
@@ -281,16 +282,8 @@ static bool IsWineserverSocketReady(const std::string& prefix) {
     return found;
 }
 
-static std::string FindLaunchEnvironmentValue(const LaunchParams& params,
-                                              const char* key)
-{
-    const std::string prefix = std::string(key) + "=";
-    for (auto it = params.envStrs.rbegin(); it != params.envStrs.rend(); ++it) {
-        if (it->rfind(prefix, 0) == 0)
-            return it->substr(prefix.size());
-    }
-    return {};
-}
+// FindLaunchEnvironmentValue / UsesDxvkOverlay / 兼容档位三函数 /
+// AppendStableDesktopDxvkEnv 已迁入 env_profiles.cpp (策略集中, 重构第 3 步)
 
 static bool UsesVulkanD3dBackend(const std::string& backend)
 {
@@ -298,154 +291,9 @@ static bool UsesVulkanD3dBackend(const std::string& backend)
            backend == "vkd3d_limited_500k";
 }
 
-static bool UsesDxvkOverlay(const std::string& backend)
-{
-    return backend.rfind("dxvk_", 0) == 0 ||
-           backend == "vkd3d_limited_500k";
-}
-
-// -- 兼容模式全局档位 (设置页 → launchClient compatEnvStr 分号串) --
-// ArkTS 侧按 BOX64_DYNAREC_PRESETS 拼 "K=V;K=V;..."; 此处只放行
-// BOX64_DYNAREC_* 行 (纯档位参数, 防注入其它 key), 空串 = 出厂基线不注入。
-// 会话 env 经 UpsertEnvLine 压过基线 (每 key 最后写入者胜出);
-// DXVK/desktop 的 WEAKBARRIER=0 clamp 在 AppendStableDesktopDxvkEnv 尾,
-// 只会重新压回, 不会被档位击穿 (该 clamp 是 Venus 图形 ring 约束, 只
-// 覆盖 explorer 会话链; wineboot/wineserver 无图形, 档位原值直接生效)。
-// 仅 __aarch64__ (Box64) 设备有意义; x86_64 原生跑无 box64, 空转不注入。
-#ifdef __aarch64__
-// 统一过滤: 前缀 + entryParams 协议危险字符 ('|'/'\n') + 缺 '=' 畸形行 — 会话
-// env 与 NCP entryParams 两条通道同一套行为 (原来源彼此漂移, 静默丢弃语义不一)
-static std::vector<std::string> FilterCompatLines(const std::string& compatEnvStr)
-{
-    std::vector<std::string> raw;
-    std::string cur;
-    for (const char c : compatEnvStr) {
-        if (c == ';') {
-            if (!cur.empty()) raw.push_back(cur);
-            cur.clear();
-        } else {
-            cur += c;
-        }
-    }
-    if (!cur.empty()) raw.push_back(cur);
-    std::vector<std::string> filtered;
-    for (const std::string& line : raw) {
-        if (line.rfind("BOX64_DYNAREC_", 0) != 0)
-            continue;
-        if (line.find('|') != std::string::npos || line.find('\n') != std::string::npos)
-            continue;
-        if (line.find('=') == std::string::npos)
-            continue;
-        filtered.push_back(line);
-    }
-    return filtered;
-}
-
-static void AppendCompatEnvLines(std::vector<std::string>& envStrs, const LaunchParams& p)
-{
-    // smoke/experiment (automation) 使用隔离 prefix, 回归必须跑出厂基线
-    if (p.automationMode)
-        return;
-    for (const std::string& line : FilterCompatLines(p.compatEnvStr))
-        UpsertEnvLine(envStrs, line);
-}
-
-// wineboot/wineserver 走 NCP entryParams (不继承 app env), 把档位追加为
-// __env= 段 — 子进程 apply overrides 晚于进程内 SetBox64PerfEnv 基线,
-// 档位胜出 (wineserver 见 WineserverMain 的二次 apply)。
-static void AppendCompatEnvToEntryParams(std::string& entryParams, const LaunchParams& p)
-{
-    if (p.automationMode)
-        return;
-    for (const std::string& line : FilterCompatLines(p.compatEnvStr)) {
-        entryParams += "|__env=";
-        entryParams += line;
-    }
-}
-#endif // __aarch64__
-
-static void AppendStableDesktopDxvkEnv(std::vector<std::string>& env,
-                                       const LaunchParams& params)
-{
-    if (!UsesDxvkOverlay(params.d3dBackend)) return;
-
-    /* SetHostShadowProfile carries the selected diagnostic profile through
-     * the host-side broker environment before Explorer is launched.  Keep
-     * the desktop descendants on that explicit profile instead of replacing
-     * it with the product default below. */
-    const char* shadowTrace = getenv("VKR_WINEHUA_SHADOW_TRACE");
-    const bool guestPerf = shadowTrace && !strcmp(shadowTrace, "perf");
-    std::string selectedProfile =
-        FindLaunchEnvironmentValue(params, "WINEHUA_PERF_PROFILE");
-    if (selectedProfile.empty()) {
-        if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-frame-assoc-trace"))
-            selectedProfile = "shadow-precise-dirty-ring-frame-assoc-trace";
-        else if (shadowTrace && !strcmp(shadowTrace, "present-image-trace"))
-            selectedProfile = "shadow-precise-dirty-ring-present-image-trace";
-        else if (shadowTrace && !strcmp(shadowTrace, "gpu-frame-profile"))
-            selectedProfile = "shadow-precise-dirty-ring-gpu-frame-profile";
-        else if (shadowTrace && !strcmp(shadowTrace, "frame-timeline"))
-            selectedProfile = "shadow-precise-dirty-ring-frame-timeline";
-        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-descriptor-serialized"))
-            selectedProfile = "shadow-precise-dirty-ring-inline-upload-descriptor-serialized";
-        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-serialized"))
-            selectedProfile = "shadow-precise-dirty-ring-inline-upload-serialized";
-        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-alias-cover"))
-            selectedProfile = "shadow-precise-dirty-ring-inline-upload-alias-cover";
-        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload-coverage-sort"))
-            selectedProfile = "shadow-precise-dirty-ring-inline-upload-coverage-sort";
-        else if (shadowTrace && !strcmp(shadowTrace, "inline-gpu-upload"))
-            selectedProfile = "shadow-precise-dirty-ring-inline-upload";
-        else if (shadowTrace && !strcmp(shadowTrace, "no-gpu-upload-fast"))
-            selectedProfile = "shadow-precise-dirty-ring-no-upload-fast";
-        else if (shadowTrace && !strcmp(shadowTrace, "no-gpu-upload"))
-            selectedProfile = "shadow-precise-dirty-ring-no-upload";
-        else
-            selectedProfile = guestPerf ? "shadow-precise-strong-ring-perf"
-                                        : "shadow-precise-dirty-ring-inline-upload-coverage-sort";
-    }
-
-    /* Explorer-launched programs inherit the desktop process environment and
-     * bypass Index.d3dLaunchEnvironment(). Keep the product-correct settings
-     * here without changing the explicit A/B profiles used by runWineProgram. */
-    /* Product sessions retain warnings and errors without formatting DXVK's
-     * informational startup stream. Smoke and explicit diagnostics override
-     * this through runWineProgram's per-process environment. */
-    UpsertEnvLine(env, "DXVK_LOG_LEVEL=warn");
-    UpsertEnvLine(env, "DXVK_LOG_PATH=C:\\windows\\temp");
-#ifdef __aarch64__
-    UpsertEnvLine(env, "BOX64_DYNAREC_WEAKBARRIER=0");
-#endif
-    UpsertEnvLine(env, "WINEHUA_PERF_PROFILE=" + selectedProfile);
-    UpsertEnvLine(env, "DXVK_WINEHUA_PRECISE_SHADOW=1");
-    if (selectedProfile == "shadow-precise-dirty-ring-inline-upload-descriptor-serialized") {
-        UpsertEnvLine(env, "VKR_WINEHUA_DESCRIPTOR_UPDATE_SERIALIZE=1");
-    }
-    const std::string strongRing =
-        FindLaunchEnvironmentValue(params, "VN_WINEHUA_STRONG_RING_BARRIER");
-    UpsertEnvLine(env, "VN_WINEHUA_STRONG_RING_BARRIER=" +
-                  (strongRing.empty() ? "1" : strongRing));
-    if (params.d3dBackend == "dxvk_modern_2_6" ||
-        (params.d3dBackend == "vkd3d_limited_500k" &&
-         params.dxvkBackend == "dxvk_modern_2_6")) {
-        const char* traceKeys[] = {
-            "DXVK_WINEHUA_TRACE_SAMPLED",
-            "DXVK_WINEHUA_TRACE_FLOW",
-            "DXVK_WINEHUA_TRACE_API",
-        };
-        for (const char* key : traceKeys) {
-            const std::string value = FindLaunchEnvironmentValue(params, key);
-            env.push_back(std::string(key) + "=" + (value.empty() ? "0" : value));
-        }
-    }
-    if (guestPerf) {
-        UpsertEnvLine(env, "VN_WINEHUA_PERF_SUMMARY=1");
-        UpsertEnvLine(env, "VN_WINEHUA_PERF_LOG=/storage/Users/currentUser/Download/app.hackeris.winehua/winehua_guest_ring_perf.log");
-        /* vn_log uses MESA_LOG_DEBUG.  Raise only the explicit diagnostic
-         * profile so the Guest ring summary survives the OHOS logger filter. */
-        UpsertEnvLine(env, "MESA_LOG_LEVEL=debug");
-    }
-}
+// 兼容模式全局档位三函数 (FilterCompatLines / AppendCompatEnvLines /
+// AppendCompatEnvToEntryParams) 与 AppendStableDesktopDxvkEnv
+// 已迁入 env_profiles.cpp, 签名从 LaunchParams 解耦 (重构第 3 步)
 
 static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
 {
@@ -466,30 +314,35 @@ static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
         return;
     }
 
-    std::vector<std::string> env;
-    gb.AppendWineEnv(env);
-    AppendD3dBackendEnv(env, params.d3dBackend, params.dxvkBackend, params.winehuaBin);
-    AppendStableDesktopDxvkEnv(env, params);
-    /* The broker now receives the finalized environment through the
-     * serialized __env entryParams channel. Keep this helper side-effect
-     * free so the old broker-global environment path cannot diverge from
-     * Explorer and smoke launches. */
+    /* The broker receives the finalized environment through the serialized
+     * __env entryParams channel; env 组装统一走 BuildSessionEnv
+     * (env_profiles.cpp), 此处只确保 graphics broker 就绪并记录状态。 */
     LogGraphicsBackendStateForLaunch("DesktopSession");
+}
+
+// LaunchParams → SessionEnvPolicy 适配: 管线输入声明 (env_profiles.cpp)
+static winehua::SessionEnvPolicy SessionPolicyFromLaunch(const LaunchParams& p, int audioFd)
+{
+    winehua::SessionEnvPolicy s;
+    s.sockDir = p.sockDir;
+    s.sockName = p.sockName;
+    s.libPath = p.libPath;
+    s.binDir = p.winehuaBin;
+    s.homeDir = p.homeDir;
+    s.prefixDir = p.prefixDir;
+    s.wineLang = p.wineLang;
+    s.audioBootstrapFd = audioFd;
+    s.d3dBackend = p.d3dBackend;
+    s.dxvkBackend = p.dxvkBackend;
+    s.compatEnvStr = p.compatEnvStr;
+    s.automationMode = p.automationMode;
+    return s;
 }
 
 // broker SPAWN 请求统一走 wine_exe.h 的 SpawnViaBroker (与手动启动共用),
 // 避免在 wine_launch.cpp 复制第二份 broker 协议实现。
 
-static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
-                          const std::string& serializedEnv, bool* desktopDegraded) {
-    // serializedEnv 之前用于 NCP 直启 explorer 时嵌入 entryParams；
-    // explorer 桌面模式已改为走 broker（通过 SpawnViaBroker 传输 env），
-    // 此参数不再使用。
-    (void)serializedEnv;
-
-    // audioFdNode 之前用于 explorer NCP fdList；改为 broker 后,
-    // broker::HandleRequest 自动为每个请求创建 audio bootstrap fd。
-    (void)audioBootstrapFd;
+static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDegraded) {
 
     // Prefix registry and user data survive runtime upgrades, while the
     // syswow64 PE files are managed copies. Validate them before wineserver
@@ -512,7 +365,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         if (p->prefixDir == WINE_SMOKE_PREFIX)
             wsEntryParams += "|__env=WINEHUA_PROCESS_EXIT_TELEMETRY=1";
 #ifdef __aarch64__
-        AppendCompatEnvToEntryParams(wsEntryParams, *p);
+        winehua::AppendCompatEnvToEntryParams(wsEntryParams, p->compatEnvStr, p->automationMode);
 #endif
         OH_LOG_WARN(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
         NativeChildProcess_Args wsArgs = {};
@@ -619,7 +472,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         }
         // 兼容模式全局档位 (wineboot Main 的 apply overrides 晚于 setup_wine_env)
 #ifdef __aarch64__
-        AppendCompatEnvToEntryParams(entryParams, *p);
+        winehua::AppendCompatEnvToEntryParams(entryParams, p->compatEnvStr, p->automationMode);
 #endif
         // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
         NativeChildProcess_Args childArgs = {};
@@ -697,7 +550,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
             "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir +
             "|__env=LANG=" + p->wineLang + ".UTF-8|__env=LC_ALL=" + p->wineLang + ".UTF-8";
 #ifdef __aarch64__
-        AppendCompatEnvToEntryParams(entryParams, *p);
+        winehua::AppendCompatEnvToEntryParams(entryParams, p->compatEnvStr, p->automationMode);
 #endif
         NativeChildProcess_Args childArgs = {};
         childArgs.entryParams = const_cast<char*>(entryParams.c_str());
@@ -783,16 +636,14 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd,
         snprintf(desktopArg, sizeof(desktopArg),
                  "/desktop=shell,%dx%d|C:\\windows\\system32\\winehua_keep.exe", dw, dh);
 
-        // 构造 env: 基线 + 刷新图形状态 + DXVK overlay + 桌面稳定性配置.
-        // 这相当于之前 AppendDesktopD3dEntryEnv 的逻辑，收敛到 broker env channel。
-        std::vector<std::string> explorerEnv = p->envStrs;
-        {
-            std::vector<std::string> freshGraphics;
-            winehua::GraphicsBroker::GetInstance().AppendWineEnv(freshGraphics);
-            for (const auto& line : freshGraphics) UpsertEnvLine(explorerEnv, line);
-        }
-        AppendD3dBackendEnv(explorerEnv, p->d3dBackend, p->dxvkBackend, p->winehuaBin);
-        AppendStableDesktopDxvkEnv(explorerEnv, *p);
+        // 会话 env 管线统一在 env_profiles (重构第 3 步): 桌面链 = 完整管线 +
+        // 稳定化 overlay。graphics broker 状态在此刻读取, 天然是刷新后的快照
+        // (替代旧逻辑: 先建 envStrs 再 Upsert freshGraphics 两段式)。
+        // WINE_OHOS_AUDIO_* fd 行会被序列化契约过滤 (fd 跨进程无效), broker
+        // 会为子进程自动创建 audio bootstrap fd。
+        winehua::SessionEnvPolicy explorerPolicy = SessionPolicyFromLaunch(*p, audioBootstrapFd);
+        explorerPolicy.stableDesktopOverlay = true;
+        std::vector<std::string> explorerEnv = winehua::BuildSessionEnv(explorerPolicy);
 
 #ifdef __aarch64__
         std::string exEntry = p->winehuaBin + "|__winehua_desktop__|explorer|" + std::string(desktopArg);
@@ -849,18 +700,11 @@ void LaunchThreadFunc(LaunchParams* p) {
     graphicsBroker.EnsureStarted(p->sockDir);
 
     int audioBootstrapFd = CreateAudioBootstrapFd(p->sockDir);
-    // Resolve VirGL/backend state before serializing the environment so NCP
-    // children inherit the active receiver rather than an early SHM snapshot.
+    // Resolve VirGL/backend state before the explorer session env is built so
+    // NCP children inherit the active receiver rather than an early SHM snapshot.
     PrepareDesktopSessionGraphicsEnv(*p);
-    p->envStrs = BuildWineEnv(p->sockDir, p->sockName, p->libPath, p->winehuaBin,
-                               audioBootstrapFd, p->homeDir, p->prefixDir, p->wineLang);
-    AppendD3dBackendEnv(p->envStrs, p->d3dBackend, p->dxvkBackend, p->winehuaBin);
-    // 兼容模式全局档位: 压过基线; WEAKBARRIER=0 clamp 在 explorerEnv 重放链尾
-    // (AppendStableDesktopDxvkEnv) 会再压回 — 档位不击穿 DXVK/desktop 约束
-#ifdef __aarch64__
-    AppendCompatEnvLines(p->envStrs, *p);
-#endif
-    const std::string serializedEnv = SerializeEnvToEntryParams(p->envStrs);
+    // 会话 env 不再预先构建: 唯一消费者是 explorer 桌面链, 它在 LaunchPadMode
+    // 内用 BuildSessionEnv (SessionPolicyFromLaunch) 现取现建, 图形状态更新鲜。
 
     mkdir(p->prefixDir.c_str(), 0755);
 
@@ -869,7 +713,7 @@ void LaunchThreadFunc(LaunchParams* p) {
 
     bool ok = false;
     bool desktopDegraded = false;
-    ok = LaunchPadMode(p, audioBootstrapFd, serializedEnv, &desktopDegraded);
+    ok = LaunchPadMode(p, audioBootstrapFd, &desktopDegraded);
 
     /* state:ready 前最后一次健康复查: explorer 桌面根等待可达 15s, 期间
      * wineserver 若已崩溃, 此前照样发 ready → UI 显示"已就绪"但引擎已死

@@ -22,8 +22,6 @@ struct LaunchParams {
     // 会话 env 经 UpsertEnvLine 压过基线, wineboot/wineserver 追加 __env= 段
     std::string compatEnvStr;
     bool automationMode = false;
-    std::vector<std::string> envStrs;
-    std::vector<char*> envp;
 };
 
 void LaunchThreadFunc(LaunchParams* p);

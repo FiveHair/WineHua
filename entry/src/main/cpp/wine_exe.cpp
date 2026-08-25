@@ -1,6 +1,7 @@
 #include "wine_exe.h"
 
 #include "broker.h"
+#include "env_profiles.h"
 #include "graphics_broker.h"
 #include "wayland_server.h"
 #include "wine_constants.h"
@@ -241,27 +242,33 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
         options.presentBackend == "venus_broker_present" ||
         options.presentBackend == "venus_direct_present");
 
-    std::vector<std::string> envStrs = BuildWineEnv(
-        sockDir, sockName, libPath, binDir, -1, homeDir, prefixDir);
-    /* Product defaults first, then per-run settings. Smoke and game launches
-     * must be able to select their own log directory and diagnostics. */
-    AppendD3dBackendEnv(envStrs, options.d3dBackend, options.dxvkBackend, binDir);
-    for (const std::string& line : options.environment) UpsertEnvLine(envStrs, line);
-    UpsertEnvLine(envStrs, "WINEHUA_D3D_BACKEND=" + options.d3dBackend);
-    UpsertEnvLine(envStrs, "WINEHUA_PRESENT_BACKEND=" + options.presentBackend);
-    UpsertEnvLine(envStrs, std::string("WINEHUA_AUTOMATION=") +
-                  (options.automationMode ? "1" : "0"));
+    // 声明式 env 管线 (env_profiles.cpp): 基线+D3D overlay 由 policy 字段声明,
+    // per-run 覆盖 (options.environment) 与进程标记经 extraEnv 最后写入
+    // (与旧顺序一致: 产品默认在前, per-run 设置可压过它们, 进程标记再后)。
+    winehua::SessionEnvPolicy policy;
+    policy.sockDir = sockDir;
+    policy.sockName = sockName;
+    policy.libPath = libPath;
+    policy.binDir = binDir;
+    policy.homeDir = homeDir;
+    policy.prefixDir = prefixDir;
+    policy.d3dBackend = options.d3dBackend;
+    policy.dxvkBackend = options.dxvkBackend;
+    policy.desktopShellFlag = WaylandServer::GetInstance()->IsDesktopMode();
+    policy.extraEnv = options.environment;
+    policy.extraEnv.push_back("WINEHUA_D3D_BACKEND=" + options.d3dBackend);
+    policy.extraEnv.push_back("WINEHUA_PRESENT_BACKEND=" + options.presentBackend);
+    policy.extraEnv.push_back(std::string("WINEHUA_AUTOMATION=") +
+                              (options.automationMode ? "1" : "0"));
     /* desktop 模式: 将进程接入 explorer 创建的 shell desktop, 使其窗口
      * 出现在任务栏 (与 RunWineExe 路径对称, 重构 runWineProgram 时遗漏). */
-    if (WaylandServer::GetInstance()->IsDesktopMode())
-        UpsertEnvLine(envStrs,"WINEHUA_DESKTOP=shell");
     /* DXVK is a managed WineHua runtime overlay, never a game-provided DLL. */
     if (options.d3dBackend.rfind("dxvk_", 0) == 0 ||
         options.d3dBackend == "vkd3d_limited_500k")
         OH_LOG_INFO(LOG_APP, "[WineProgram] managed D3D backend=%{public}s",
                     options.d3dBackend.c_str());
-    UpsertEnvLine(envStrs,"WINEHUA_WINE_UNIX_ARCH=x86_64");
-    UpsertEnvLine(envStrs,"WINEHUA_HOST_ARCH=" + std::string(
+    policy.extraEnv.push_back("WINEHUA_WINE_UNIX_ARCH=x86_64");
+    policy.extraEnv.push_back("WINEHUA_HOST_ARCH=" + std::string(
 #ifdef __aarch64__
         "aarch64"
 #else
@@ -269,7 +276,8 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
 #endif
     ));
     if (!options.workingDirectory.empty())
-        UpsertEnvLine(envStrs,"WINEHUA_WORKING_DIRECTORY=" + options.workingDirectory);
+        policy.extraEnv.push_back("WINEHUA_WORKING_DIRECTORY=" + options.workingDirectory);
+    std::vector<std::string> envStrs = winehua::BuildSessionEnv(policy);
 
 #ifdef __aarch64__
     std::string entryParams = binDir + "|" + exePath;
@@ -710,14 +718,20 @@ napi_value RunWineExe(napi_env env, napi_callback_info info)
     std::string sockDir = (pos == std::string::npos) ? "/tmp" : sockStr.substr(0, pos);
     std::string sockName = (pos == std::string::npos) ? sockStr : sockStr.substr(pos + 1);
 
-    int audioBootstrapFd = -1;  // broker 会为每个子进程创建 audio fd, 此处无需传递
-
-    std::vector<std::string> wineEnv = BuildWineEnv(sockDir, sockName, libPath, binDir, audioBootstrapFd, homeDir);
-
+    // 声明式 env 管线 (env_profiles.cpp)。d3dBackend 留空 = 不注入 D3D
+    // overlay: 此路径从 ArkTS 手动启动 Wine exe（如 explorer 文件管理器），
+    // D3D 后端由调用者通过 d3dLaunchEnvironment 单独指定；explorer 本身
+    // 不需要 DXVK overlay。
+    winehua::SessionEnvPolicy policy;
+    policy.sockDir = sockDir;
+    policy.sockName = sockName;
+    policy.libPath = libPath;
+    policy.binDir = binDir;
+    policy.homeDir = homeDir;
     // desktop 模式: 将进程接入 explorer 创建的 shell desktop,
     // 使其窗口出现在任务栏, 且能与其他 shell 进程互相访问
-    if (WaylandServer::GetInstance()->IsDesktopMode())
-        wineEnv.push_back("WINEHUA_DESKTOP=shell");
+    policy.desktopShellFlag = WaylandServer::GetInstance()->IsDesktopMode();
+    std::vector<std::string> wineEnv = winehua::BuildSessionEnv(policy);
 
     {
 #ifdef __aarch64__
@@ -725,9 +739,6 @@ napi_value RunWineExe(napi_env env, napi_callback_info info)
 #else
         std::string entryParams = std::string(binDir) + "|wine|" + exePath;
 #endif
-        // NOTE: RunWineExe 不调 AppendD3dBackendEnv —— 此路径从 ArkTS Index.ets
-        // 手动启动 Wine exe（如 explorer 文件管理器），D3D 后端由调用者通过
-        // d3dLaunchEnvironment 单独指定；explorer 本身不需要 DXVK overlay。
         // env 序列化由 SpawnViaBroker 内部完成（区别于旧代码在本函数内手动拼接）。
         OH_LOG_INFO(LOG_APP, "[Wine] runWineExe via broker: %{public}s|__env=...", entryParams.c_str());
 
