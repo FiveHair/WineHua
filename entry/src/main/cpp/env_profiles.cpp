@@ -42,17 +42,6 @@ void AppendCompatEnvLines(std::vector<std::string>& env,
     for (const std::string& line : FilterCompatLines(compatEnvStr))
         UpsertEnvLine(env, line);
 }
-
-void AppendCompatEnvToEntryParams(std::string& entryParams,
-                                  const std::string& compatEnvStr, bool automationMode)
-{
-    if (automationMode)
-        return;
-    for (const std::string& line : FilterCompatLines(compatEnvStr)) {
-        entryParams += "|__env=";
-        entryParams += line;
-    }
-}
 #endif // __aarch64__
 
 // 旧 FindLaunchEnvironmentValue: 后写胜出, 反向扫描取最后一个匹配

@@ -33,15 +33,11 @@ namespace winehua {
 // env 与 NCP entryParams 两条通道同一套行为 (原来源彼此漂移, 静默丢弃语义不一)
 std::vector<std::string> FilterCompatLines(const std::string& compatEnvStr);
 
-// 会话 env 注入 (smoke/automation 跳过: 隔离 prefix 回归必须跑出厂基线)
+// 会话 env / SpawnRequest.env 增量注入 (smoke/automation 跳过: 隔离 prefix
+// 回归必须跑出厂基线)。NCP 路线由 Spawner 经 EnvSpec 序列化为 __env= 段,
+// 子进程 apply 晚于进程内基线, 档位胜出。
 void AppendCompatEnvLines(std::vector<std::string>& env,
                           const std::string& compatEnvStr, bool automationMode);
-
-// wineboot/wineserver 走 NCP entryParams (不继承 app env), 把档位追加为
-// __env= 段 — 子进程 apply overrides 晚于进程内 SetBox64PerfEnv 基线,
-// 档位胜出 (WineserverMain 基线已前置, 见 wine_child.cpp)
-void AppendCompatEnvToEntryParams(std::string& entryParams,
-                                  const std::string& compatEnvStr, bool automationMode);
 #endif // __aarch64__
 
 // -- 桌面会话 DXVK 稳定化 overlay --

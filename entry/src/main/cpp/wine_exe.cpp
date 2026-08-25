@@ -2,6 +2,7 @@
 
 #include "broker.h"
 #include "env_profiles.h"
+#include "spawner.h"
 #include "graphics_broker.h"
 #include "wayland_server.h"
 #include "wine_constants.h"
@@ -279,14 +280,12 @@ static int SpawnWineProgramImpl(const ProgramOptions& options)
         policy.extraEnv.push_back("WINEHUA_WORKING_DIRECTORY=" + options.workingDirectory);
     std::vector<std::string> envStrs = winehua::BuildSessionEnv(policy);
 
-#ifdef __aarch64__
-    std::string entryParams = binDir + "|" + exePath;
-#else
-    std::string entryParams = binDir + "|wine|" + exePath;
-#endif
-    for (const std::string& arg : options.argv) entryParams += "|" + arg;
+    winehua::SpawnRequest req{winehua::SpawnKind::WineExe};
+    req.argv.push_back(exePath);
+    req.argv.insert(req.argv.end(), options.argv.begin(), options.argv.end());
+    req.env = std::move(envStrs);
 
-    const pid_t pid = SpawnViaBroker(entryParams, envStrs);
+    const pid_t pid = winehua::Spawner::Spawn(req);
     if (pid <= 0) return -1;
     AddProcess(pid, options.windowsExePath, -1);
     OH_LOG_INFO(LOG_APP,
@@ -368,10 +367,12 @@ static pid_t SpawnGuestProgram(const GuestProgramOptions& options)
         UpsertEnvLine(envStrs,"WINEHUA_WORKING_DIRECTORY=" + options.workingDirectory);
     for (const std::string& line : options.environment) UpsertEnvLine(envStrs,line);
 
-    std::string entryParams = binDir + "|__winehua_guest_elf__|" + options.executablePath;
-    for (const std::string& arg : options.argv) entryParams += "|" + arg;
+    winehua::SpawnRequest req{winehua::SpawnKind::GuestElf};
+    req.argv.push_back(options.executablePath);
+    req.argv.insert(req.argv.end(), options.argv.begin(), options.argv.end());
+    req.env = std::move(envStrs);
 
-    const pid_t pid = SpawnViaBroker(entryParams, envStrs);
+    const pid_t pid = winehua::Spawner::Spawn(req);
     if (pid <= 0) return -1;
     AddProcess(pid, options.executablePath, -1);
     OH_LOG_INFO(LOG_APP, "[GuestProgram] pid=%{public}d elf=%{public}s icd=%{public}s",
@@ -422,11 +423,12 @@ static pid_t SpawnHostProgram(const HostProgramOptions& options)
     if (!options.workingDirectory.empty())
         UpsertEnvLine(envStrs,"WINEHUA_WORKING_DIRECTORY=" + options.workingDirectory);
 
-    std::string entryParams = std::string(WINE_RUNTIME_BIN) +
-        "|__winehua_host_elf__|" + executablePath;
-    for (const std::string& arg : options.argv) entryParams += "|" + arg;
+    winehua::SpawnRequest req{winehua::SpawnKind::HostElf};
+    req.argv.push_back(executablePath);
+    req.argv.insert(req.argv.end(), options.argv.begin(), options.argv.end());
+    req.env = std::move(envStrs);
 
-    const pid_t pid = SpawnViaBroker(entryParams, envStrs);
+    const pid_t pid = winehua::Spawner::Spawn(req);
     if (pid <= 0) return -1;
     AddProcess(pid, executablePath, -1);
     OH_LOG_INFO(LOG_APP, "[HostProgram] pid=%{public}d elf=%{public}s",
@@ -437,8 +439,8 @@ static pid_t SpawnHostProgram(const HostProgramOptions& options)
 } // namespace
 
 // 经 broker Unix socket 发送 SPAWN 请求, 返回子进程 pid, <= 0 表示失败。
-// 全局作用域 (wine_exe.h 声明): wine_exe.cpp 内部与 wine_launch.cpp
-// (explorer 桌面模式) 共用同一实现, 避免复制第二份 broker 协议代码。
+// 调用方收口在 spawner.cpp (SpawnKind::DesktopShell/WineExe/GuestElf/HostElf);
+// 保留全局函数只因 broker 协议实现不应复制第二份。
 pid_t SpawnViaBroker(const std::string& entryParams,
                      const std::vector<std::string>& environment)
 {
@@ -734,15 +736,15 @@ napi_value RunWineExe(napi_env env, napi_callback_info info)
     std::vector<std::string> wineEnv = winehua::BuildSessionEnv(policy);
 
     {
-#ifdef __aarch64__
-        std::string entryParams = std::string(binDir) + "|" + exePath;
-#else
-        std::string entryParams = std::string(binDir) + "|wine|" + exePath;
-#endif
-        // env 序列化由 SpawnViaBroker 内部完成（区别于旧代码在本函数内手动拼接）。
-        OH_LOG_INFO(LOG_APP, "[Wine] runWineExe via broker: %{public}s|__env=...", entryParams.c_str());
+        // ArkTS 显式传的 binDir 经 SpawnRequest.binDir 透传 (不依赖会话默认);
+        // env 序列化由 broker 通道内部完成。
+        winehua::SpawnRequest req{winehua::SpawnKind::WineExe};
+        req.binDir = binDir;
+        req.argv.push_back(exePath);
+        req.env = std::move(wineEnv);
+        OH_LOG_INFO(LOG_APP, "[Wine] runWineExe via broker: %{public}s|...", exePath.c_str());
 
-        pid_t pid = SpawnViaBroker(entryParams, wineEnv);
+        pid_t pid = winehua::Spawner::Spawn(req);
         if (pid <= 0) {
             OH_LOG_ERROR(LOG_APP, "[Wine] broker spawn failed");
             if (gStateTsfn) napi_call_threadsafe_function(gStateTsfn, strdup("evt:launch-failed"), napi_tsfn_blocking);

@@ -31,6 +31,7 @@ add_library(entry SHARED
     wine_env.cpp
     env_spec.cpp
     env_profiles.cpp
+    spawner.cpp
     wine_launch.cpp
     wine_exe.cpp
     host_vulkan_probe.cpp

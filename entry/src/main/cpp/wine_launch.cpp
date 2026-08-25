@@ -3,6 +3,7 @@
 #include "wine_process.h"
 #include "wine_env.h"
 #include "env_profiles.h"
+#include "spawner.h"
 #include "wine_constants.h"
 #include "wayland_server.h"
 #include "audio_ipc_protocol.h"
@@ -33,7 +34,8 @@
 #include "broker.h"
 #include "wait_utils.h"
 
-#include <AbilityKit/native_child_process.h>
+// NCP 直启细节已收口到 spawner.cpp (重构第 4 步), 本文件不再直接触碰
+// AbilityKit NCP 接口。
 
 // -- prefix 初始化检测辅助函数 --
 static bool FileHasData(const char* path) {
@@ -339,10 +341,13 @@ static winehua::SessionEnvPolicy SessionPolicyFromLaunch(const LaunchParams& p, 
     return s;
 }
 
-// broker SPAWN 请求统一走 wine_exe.h 的 SpawnViaBroker (与手动启动共用),
-// 避免在 wine_launch.cpp 复制第二份 broker 协议实现。
+// 进程启动统一走 winehua::Spawner (spawner.cpp, 重构第 4 步):
+// kind 推导路由 (NCP 直启 / broker) + token 布局, 本文件只声明意图。
 
 static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDegraded) {
+    // 会话上下文: NCP 路线 (wineserver/wineboot) 的 homeDir/prefix 权威来源
+    // (wineserver 先于 broker 启动, 不能依赖 broker 的 gBroker* 全局)
+    winehua::Spawner::ConfigureSession(p->homeDir, p->winehuaBin, p->prefixDir);
 
     // Prefix registry and user data survive runtime upgrades, while the
     // syswow64 PE files are managed copies. Validate them before wineserver
@@ -357,26 +362,16 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDe
 
     // -- wineserver via NCP --
     // NCP does not inherit the app environment. WineserverMain parses
-    // __env=, so pass the selected prefix explicitly; otherwise a clean smoke
-    // wineserver can fall back to the normal .wine prefix.
+    // __env=; Spawner 尾部追加会话 WINEPREFIX 权威 (clean smoke 的
+    // .wine-smoke 不会回落到默认 .wine), smoke prefix 自动带退出遥测。
     {
-        std::string wsEntryParams = p->homeDir + "|" + p->winehuaBin +
-            "|wineserver|-f|-p|__env=WINEPREFIX=" + p->prefixDir;
-        if (p->prefixDir == WINE_SMOKE_PREFIX)
-            wsEntryParams += "|__env=WINEHUA_PROCESS_EXIT_TELEMETRY=1";
+        winehua::SpawnRequest wsReq{winehua::SpawnKind::Wineserver};
 #ifdef __aarch64__
-        winehua::AppendCompatEnvToEntryParams(wsEntryParams, p->compatEnvStr, p->automationMode);
+        winehua::AppendCompatEnvLines(wsReq.env, p->compatEnvStr, p->automationMode);
 #endif
-        OH_LOG_WARN(LOG_APP, "[Launch-Async] wineserver args=%{public}s", wsEntryParams.c_str());
-        NativeChildProcess_Args wsArgs = {};
-        wsArgs.entryParams = const_cast<char*>(wsEntryParams.c_str());
-        NativeChildProcess_Options wsOpts = {};
-        wsOpts.isolationMode = NCP_ISOLATION_MODE_NORMAL;
-        int32_t wsChildPid = -1;
-        auto wsRet = OH_Ability_StartNativeChildProcess(
-            "libwine_child.so:WineserverMain", wsArgs, wsOpts, &wsChildPid);
-        if (wsRet != NCP_NO_ERROR) {
-            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineserver StartNativeChildProcess FAILED ret=%{public}d", (int)wsRet);
+        const pid_t wsChildPid = winehua::Spawner::Spawn(wsReq);
+        if (wsChildPid <= 0) {
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineserver spawn FAILED");
             if (gStateTsfn)
                 napi_call_threadsafe_function(gStateTsfn, strdup("state:failed:wineserver"), napi_tsfn_blocking);
             return false;
@@ -452,38 +447,27 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDe
         // requested test starts. Give only those helpers desktop-root routing.
         const bool bootstrapNeedsDesktopSurfaces =
             p->automationMode && p->prefixDir == WINE_SMOKE_PREFIX;
-        const char* desktopTag =
-            (ws->IsDesktopMode() || bootstrapNeedsDesktopSurfaces) ?
-                "__winehua_desktop__|" : "";
-        const std::string wbLangEnv = "|__env=LANG=" + p->wineLang + ".UTF-8" +
-            "|__env=LC_ALL=" + p->wineLang + ".UTF-8";
-#ifdef __aarch64__
-        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag +
-            "wineboot|--init|__env=WINEPREFIX=" + p->prefixDir + wbLangEnv;
-#else
-        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" + desktopTag +
-            "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir + wbLangEnv;
-#endif
+        // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
+        // (argv/兼容档位由 Spawner 按 kind 注入; aarch64 归一为不带 wine 加载器
+        // token — Main 的 box64 路径自注 binDir/wine ELF, 与旧 reseed 路径的
+        // "wine|wineboot" 布局等价)
+        winehua::SpawnRequest wbReq{winehua::SpawnKind::Wineboot};
+        wbReq.desktopSurface = ws->IsDesktopMode() || bootstrapNeedsDesktopSurfaces;
+        wbReq.env = {"LANG=" + p->wineLang + ".UTF-8",
+                     "LC_ALL=" + p->wineLang + ".UTF-8"};
         if (p->automationMode && p->prefixDir == WINE_SMOKE_PREFIX) {
             // A clean, headless verification prefix has no use for optional
             // .NET/HTML components. Avoid their interactive download dialogs.
-            entryParams += "|__env=WINEDLLOVERRIDES=mscoree,mshtml=";
-            entryParams += "|__env=WINEHUA_BOOTSTRAP_PHASE=clean-automation";
+            wbReq.env.push_back("WINEDLLOVERRIDES=mscoree,mshtml=");
+            wbReq.env.push_back("WINEHUA_BOOTSTRAP_PHASE=clean-automation");
         }
         // 兼容模式全局档位 (wineboot Main 的 apply overrides 晚于 setup_wine_env)
 #ifdef __aarch64__
-        winehua::AppendCompatEnvToEntryParams(entryParams, p->compatEnvStr, p->automationMode);
+        winehua::AppendCompatEnvLines(wbReq.env, p->compatEnvStr, p->automationMode);
 #endif
-        // 注意: wineboot --init 只需要初始化 prefix, 不传完整环境变量以节省 entryParams 长度
-        NativeChildProcess_Args childArgs = {};
-        childArgs.entryParams = const_cast<char*>(entryParams.c_str());
-        NativeChildProcess_Options options = {};
-        options.isolationMode = NCP_ISOLATION_MODE_NORMAL;
-        int32_t childPid = -1;
-        auto ret = OH_Ability_StartNativeChildProcess(
-            "libwine_child.so:Main", childArgs, options, &childPid);
-        if (ret != NCP_NO_ERROR) {
-            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot FAILED ret=%{public}d", (int)ret);
+        const pid_t childPid = winehua::Spawner::Spawn(wbReq);
+        if (childPid <= 0) {
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot spawn FAILED");
             if (gStateTsfn)
                 napi_call_threadsafe_function(gStateTsfn, strdup("state:failed:wineboot"), napi_tsfn_blocking);
             return false;
@@ -546,22 +530,15 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDe
          * 无条件重装 wine.inf 并弹出 "Setting up Wine" 等待窗; --init 传
          * force=false, 仅当 wine.inf 时间戳变化 (升级) 才重装。 */
         OH_LOG_WARN(LOG_APP, "[Launch-Async] prefix ready; seeding wineboot boot event (--init)...");
-        std::string entryParams = p->homeDir + "|" + p->winehuaBin + "|" +
-            "wine|wineboot|--init|__env=WINEPREFIX=" + p->prefixDir +
-            "|__env=LANG=" + p->wineLang + ".UTF-8|__env=LC_ALL=" + p->wineLang + ".UTF-8";
+        winehua::SpawnRequest wbReq{winehua::SpawnKind::Wineboot};
+        wbReq.env = {"LANG=" + p->wineLang + ".UTF-8",
+                     "LC_ALL=" + p->wineLang + ".UTF-8"};
 #ifdef __aarch64__
-        winehua::AppendCompatEnvToEntryParams(entryParams, p->compatEnvStr, p->automationMode);
+        winehua::AppendCompatEnvLines(wbReq.env, p->compatEnvStr, p->automationMode);
 #endif
-        NativeChildProcess_Args childArgs = {};
-        childArgs.entryParams = const_cast<char*>(entryParams.c_str());
-        NativeChildProcess_Options options = {};
-        options.isolationMode = NCP_ISOLATION_MODE_NORMAL;
-        int32_t childPid = -1;
-        auto ret = OH_Ability_StartNativeChildProcess(
-            "libwine_child.so:Main", childArgs, options, &childPid);
-        if (ret != NCP_NO_ERROR) {
-            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot --init FAILED ret=%{public}d",
-                         (int)ret);
+        const pid_t childPid = winehua::Spawner::Spawn(wbReq);
+        if (childPid <= 0) {
+            OH_LOG_ERROR(LOG_APP, "[Launch-Async] wineboot --init spawn FAILED");
             /* 播种失败必须上报, 不能再只记日志放行: 缺少这次 wineboot,
              * explorer 的 run_wineboot 永远等不到 boot 事件, 桌面出不来但
              * 状态机曾照样发 state:ready (静默失败)。注意 NCP 子进程由
@@ -629,12 +606,11 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDe
         int dh = ws->outputH_ > 0 ? ws->outputH_ : 720;
         OH_LOG_WARN(LOG_APP, "[Launch-Async] explorer desktop size: outputW=%{public}d outputH=%{public}d → %{public}dx%{public}d",
                     ws->outputW_, ws->outputH_, dw, dh);
-        char desktopArg[128];
         /* 附带 winehua_keep.exe: 加入 shell desktop 并持久运行,
          * 避免最后一个用户应用退出后 wineserver 自动关闭桌面.
          * 仅 Pad 桌面模式需要, Phone 模式走单窗口, 无需此逻辑. */
-        snprintf(desktopArg, sizeof(desktopArg),
-                 "/desktop=shell,%dx%d|C:\\windows\\system32\\winehua_keep.exe", dw, dh);
+        char desktopSize[64];
+        snprintf(desktopSize, sizeof(desktopSize), "/desktop=shell,%dx%d", dw, dh);
 
         // 会话 env 管线统一在 env_profiles (重构第 3 步): 桌面链 = 完整管线 +
         // 稳定化 overlay。graphics broker 状态在此刻读取, 天然是刷新后的快照
@@ -645,13 +621,11 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDe
         explorerPolicy.stableDesktopOverlay = true;
         std::vector<std::string> explorerEnv = winehua::BuildSessionEnv(explorerPolicy);
 
-#ifdef __aarch64__
-        std::string exEntry = p->winehuaBin + "|__winehua_desktop__|explorer|" + std::string(desktopArg);
-#else
-        std::string exEntry = p->winehuaBin + "|__winehua_desktop__|wine|explorer|" + std::string(desktopArg);
-#endif
-        // broker 自动添加 homeDir 前缀、序列化 env、创建 audio bootstrap fd
-        int32_t exPid = SpawnViaBroker(exEntry, explorerEnv);
+        winehua::SpawnRequest exReq{winehua::SpawnKind::DesktopShell};
+        exReq.argv = {desktopSize, "C:\\windows\\system32\\winehua_keep.exe"};
+        exReq.env = std::move(explorerEnv);
+        // broker 自动添加 homeDir 前缀、WINEPREFIX 权威、创建 audio bootstrap fd
+        const pid_t exPid = winehua::Spawner::Spawn(exReq);
         OH_LOG_WARN(LOG_APP, "[Launch-Async] explorer desktop pid=%{public}d (via broker)", exPid);
         if (exPid <= 0) {
             // desktop shell spawn 失败: root 永远不会出现, 白等 15s 也是降级 —
