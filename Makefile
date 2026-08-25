@@ -422,6 +422,11 @@ test:
 	    $(ROOT)/host_tests/blit_scaled_test.cpp \
 	    $(ROOT)/entry/src/main/cpp/compositor/compositor_blit.cpp
 	$(HOST_TEST_DIR)/blit_scaled_test
+	g++ -std=c++17 -Wall -Wextra -I $(ROOT)/entry/src/main/cpp \
+	    -o $(HOST_TEST_DIR)/env_spec_test \
+	    $(ROOT)/host_tests/env_spec_test.cpp \
+	    $(ROOT)/entry/src/main/cpp/env_spec.cpp
+	$(HOST_TEST_DIR)/env_spec_test
 
 
 # ============================================================

@@ -98,8 +98,7 @@ void UpsertEnvLine(std::vector<std::string>& env, const std::string& line);
 int CreateAudioBootstrapFd(const std::string& runtimeDir);
 
 // -- entryParams 序列化 --
-size_t AppendMissingEntryParamsEnvOverrides(std::string& entryParams,
-                                            const std::vector<std::string>& env);
+// 迁移期 shim, 内部转发到 winehua::EnvSpec (env_spec.h); 新代码直接用 EnvSpec
 std::string SerializeEnvToEntryParams(const std::vector<std::string>& env);
 
 // -- Graphics 辅助 --

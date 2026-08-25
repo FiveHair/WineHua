@@ -2,6 +2,7 @@
 #include "wine_constants.h"
 #include "audio_broker.h"
 #include "audio_ipc_protocol.h"
+#include "env_spec.h"
 #include "graphics_broker.h"
 #include "wayland_server.h"
 
@@ -10,7 +11,6 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#include <unordered_set>
 
 #undef LOG_TAG
 #undef LOG_DOMAIN
@@ -373,78 +373,11 @@ void AppendD3dBackendEnv(std::vector<std::string>& env,
     for (const std::string& line : legacyCompatibility) UpsertEnvLine(env, line);
 }
 
-static bool ShouldSerializeEntryParamEnv(const std::string& envLine) {
-    return envLine.rfind("WINE_OHOS_AUDIO_ENABLE=", 0) != 0 &&
-           envLine.rfind("WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 0) != 0 &&
-           envLine.rfind("WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 0) != 0 &&
-           envLine.rfind("WINESERVERSOCKET=", 0) != 0;
-}
-
-static std::string EnvKey(const std::string& envLine) {
-    size_t sep = envLine.find('=');
-    return sep == std::string::npos ? envLine : envLine.substr(0, sep);
-}
-
-static bool IsBrokerSessionAuthoritativeKey(const std::string& key) {
-    // Explorer may start before VirGL is ready. Replace its early Box64 path
-    // with the finalized path, where guest graphics libraries are a fallback.
-    return key == "BOX64_LD_LIBRARY_PATH";
-}
-
-size_t AppendMissingEntryParamsEnvOverrides(std::string& entryParams,
-                                            const std::vector<std::string>& env) {
-    std::unordered_set<std::string> existingKeys;
-    size_t pos = 0;
-
-    while ((pos = entryParams.find("|__env=", pos)) != std::string::npos) {
-        pos += strlen("|__env=");
-        size_t end = entryParams.find('|', pos);
-        std::string key = EnvKey(entryParams.substr(pos, end == std::string::npos
-                                                          ? std::string::npos
-                                                          : end - pos));
-        if (!key.empty()) existingKeys.insert(std::move(key));
-        if (end == std::string::npos) break;
-        pos = end;
-    }
-
-    size_t appended = 0;
-    for (const std::string& envLine : env) {
-        if (!ShouldSerializeEntryParamEnv(envLine) ||
-            envLine.find('|') != std::string::npos ||
-            envLine.find('\n') != std::string::npos)
-            continue;
-        // 过滤 per-process fd 变量: 子进程会从 fdList 拿到自己的值
-        if (envLine.rfind("WINESERVERSOCKET=", 0) == 0 ||
-            envLine.rfind("WINE_OHOS_AUDIO_ENABLE=", 0) == 0 ||
-            envLine.rfind("WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 0) == 0 ||
-            envLine.rfind("WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 0) == 0)
-            continue;
-        const std::string key = EnvKey(envLine);
-        if (key.empty() ||
-            (existingKeys.count(key) && !IsBrokerSessionAuthoritativeKey(key)))
-            continue;
-        entryParams += "|__env=";
-        entryParams += envLine;
-        existingKeys.insert(key);
-        ++appended;
-    }
-    return appended;
-}
-
+// 迁移期 shim: 新代码请直接用 winehua::EnvSpec (env_spec.h)。
+// 序列化规则 (fd 变量禁入 / 不可编码字符过滤) 已收口到 env_spec.cpp;
+// fromLines 对同 key 行取最后值, 与子进程逐条 setenv 覆盖语义一致。
 std::string SerializeEnvToEntryParams(const std::vector<std::string>& env) {
-    std::string result;
-    for (const std::string& e : env) {
-        if (e.find('|') != std::string::npos || e.find('\n') != std::string::npos)
-            continue;
-        if (e.rfind("WINESERVERSOCKET=", 0) == 0 ||
-            e.rfind("WINE_OHOS_AUDIO_ENABLE=", 0) == 0 ||
-            e.rfind("WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 0) == 0 ||
-            e.rfind("WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 0) == 0)
-            continue;
-        result += "|__env=";
-        result += e;
-    }
-    return result;
+    return winehua::EnvSpec::fromLines(env).serializeEntryParams();
 }
 
 void LogGraphicsBackendStateForLaunch(const char* tag) {
