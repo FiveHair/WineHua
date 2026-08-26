@@ -106,7 +106,12 @@ static void HandleRequest(int conn_fd)
 
     ssize_t n = recvmsg(conn_fd, &msg, 0);
     if (n <= 0) {
-        OH_LOG_ERROR(LOG_APP, "[Broker] recvmsg failed: %{public}s", strerror(errno));
+        // n==0: 对端 connect 后立即 close (StartBrokerServer 的就绪探测),
+        // 属正常探测流量, 非错误; n<0 才是真的 recvmsg 失败
+        if (n == 0)
+            OH_LOG_INFO(LOG_APP, "[Broker] probe connection (readiness check), ignoring");
+        else
+            OH_LOG_ERROR(LOG_APP, "[Broker] recvmsg failed: %{public}s", strerror(errno));
         close(conn_fd);
         return;
     }
@@ -318,8 +323,21 @@ int StartBrokerServer()
     gBrokerRunning.store(true, std::memory_order_release);
     std::thread(BrokerThreadFunc).detach();
 
-    // 等待 broker socket 文件创建 (避免盲等)
-    if (!WaitFor("broker socket", []() { return access(kBrokerSocketPath, F_OK) == 0; }, 2000, 50)) {
+    // 就绪判定必须真实 connect: bind() 一成功 socket 文件就存在, 但 listen()
+    // 尚未完成时 connect 会拿 ECONNREFUSED — 曾致紧随其后的 wineserver
+    // broker spawn 失败 (state:failed:wineserver → "启动失败")。探测连接在
+    // HandleRequest 的 recvmsg 处拿 EOF 被忽略, 无副作用。
+    if (!WaitFor("broker socket", []() {
+            int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+            if (fd < 0) return false;
+            struct sockaddr_un addr;
+            memset(&addr, 0, sizeof(addr));
+            addr.sun_family = AF_UNIX;
+            strcpy(addr.sun_path, kBrokerSocketPath);
+            const bool ok = connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0;
+            close(fd);
+            return ok;
+        }, 2000, 50)) {
         OH_LOG_WARN(LOG_APP, "[Broker] socket creation slow, continuing anyway");
     }
     return 0;

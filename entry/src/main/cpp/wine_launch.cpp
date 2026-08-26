@@ -293,9 +293,9 @@ static bool UsesVulkanD3dBackend(const std::string& backend)
            backend == "vkd3d_limited_500k";
 }
 
-// 兼容模式全局档位三函数 (FilterCompatLines / AppendCompatEnvLines /
-// AppendCompatEnvToEntryParams) 与 AppendStableDesktopDxvkEnv
-// 已迁入 env_profiles.cpp, 签名从 LaunchParams 解耦 (重构第 3 步)
+// 兼容模式全局档位 (FilterCompatLines / AppendCompatEnvLines) 与
+// AppendStableDesktopDxvkEnv 已迁入 env_profiles.cpp, 签名从 LaunchParams 解耦
+// (重构第 3 步); 第 5 步起档位统一经 SpawnRequest.env 下发
 
 static void PrepareDesktopSessionGraphicsEnv(const LaunchParams& params)
 {
@@ -341,12 +341,11 @@ static winehua::SessionEnvPolicy SessionPolicyFromLaunch(const LaunchParams& p, 
     return s;
 }
 
-// 进程启动统一走 winehua::Spawner (spawner.cpp, 重构第 4 步):
-// kind 推导路由 (NCP 直启 / broker) + token 布局, 本文件只声明意图。
+// 进程启动统一走 winehua::Spawner (spawner.cpp, 重构第 4-5 步):
+// kind 推导 token 布局, 全部 kind 经 broker 单一通道 spawn, 本文件只声明意图。
 
 static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDegraded) {
-    // 会话上下文: NCP 路线 (wineserver/wineboot) 的 homeDir/prefix 权威来源
-    // (wineserver 先于 broker 启动, 不能依赖 broker 的 gBroker* 全局)
+    // 会话上下文: binDir 默认 + prefix (smoke 遥测判定)
     winehua::Spawner::ConfigureSession(p->homeDir, p->winehuaBin, p->prefixDir);
 
     // Prefix registry and user data survive runtime upgrades, while the
@@ -360,10 +359,19 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDe
         return false;
     }
 
-    // -- wineserver via NCP --
-    // NCP does not inherit the app environment. WineserverMain parses
-    // __env=; Spawner 尾部追加会话 WINEPREFIX 权威 (clean smoke 的
-    // .wine-smoke 不会回落到默认 .wine), smoke prefix 自动带退出遥测。
+    // -- broker 先于 wineserver 启动 (重构第 5 步) --
+    // broker 是主进程内的线程, 启动不依赖 wineserver; 自此所有进程
+    // (wineserver/wineboot/explorer/exe) 统一经 broker 单一通道 spawn,
+    // homeDir 前缀 / WINEPREFIX 权威 / audio fd 由 broker 服务端补齐。
+    gBrokerHomeDir = p->homeDir;
+    gBrokerPrefixDir = p->prefixDir;
+    StartBrokerServer();
+    setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
+
+    // -- wineserver via broker --
+    // broker → wine_child Main → 截获 argv[0]=="wineserver" 转入本体
+    // (wineserver 是纯 Unix ELF, 不能走 wine loader 的 PE 解析)。
+    // smoke prefix 的退出遥测由 Spawner 自动附加。
     {
         winehua::SpawnRequest wsReq{winehua::SpawnKind::Wineserver};
 #ifdef __aarch64__
@@ -376,7 +384,7 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDe
                 napi_call_threadsafe_function(gStateTsfn, strdup("state:failed:wineserver"), napi_tsfn_blocking);
             return false;
         }
-        OH_LOG_WARN(LOG_APP, "[Launch-Async] wineserver pid=%{public}d (via appspawn)", wsChildPid);
+        OH_LOG_WARN(LOG_APP, "[Launch-Async] wineserver pid=%{public}d (via broker)", wsChildPid);
         // 登记主 wineserver 为会话锚点: 入进程注册表 (PC 窗口 / Pad 桌面两条
         // 路径共用此唯一 spawn 点, 一处登记全覆盖) → ProcMon 监视其存活,
         // 非预期死亡上报 state:failed:wineserver; KillAllProcesses 也能杀到它
@@ -389,11 +397,6 @@ static bool LaunchPadMode(LaunchParams* p, int audioBootstrapFd, bool* desktopDe
 
     if (gStateTsfn)
         napi_call_threadsafe_function(gStateTsfn, strdup("state:starting:wineboot"), napi_tsfn_blocking);
-
-    gBrokerHomeDir = p->homeDir;
-    gBrokerPrefixDir = p->prefixDir;
-    StartBrokerServer();
-    setenv("PROCESSBROKER", WINE_BROKER_SOCKET, 1);
 
     // -- wineboot --init --
     const std::string initMarker = p->prefixDir + "/.winehua-init-in-progress";
