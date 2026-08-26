@@ -80,19 +80,23 @@ ArkTS 侧**无任何** `spawn`/`child_process`/`@ohos.process` 调用,全部汇�
 
 | 功能 | ArkTS 入口 | napi 方法 | native 实现 |
 |---|---|---|---|
-| 启动/重启引擎 | `WineEnvService.ets:999/1004` (doInit) | `startServer` + `launchClient` | `napi_init.cpp:318` → `LaunchThreadFunc`(`:412`) |
+| 启动/重启引擎 | `WineEnvService.ets:857` (startSession) | `startServer` + `launchClient` | `napi_init.cpp:318` → `LaunchThreadFunc`(`:412`) |
 | 启动任意 exe(应用库/文件页/内建) | `AppLibraryService.ets:549` launch() | `runWineProgram` | `wine_exe.cpp:492` |
 | 在 Wine 中打开目录 | `AppLibraryService.ets:586` | `runWineProgram`(explorer.exe &lt;dir&gt;) | 同上 |
 | 自动化烟测 guest ELF | `SmokeRunner.ets:1178` | `runGuestProgram` | `wine_exe.cpp:529` |
 | host replay 工具 | `SmokeRunner.ets:925` | `runHostReplay` | `wine_exe.cpp:579` |
-| 恢复出厂 | `WineEnvService.ets:1014` doReset | stopAll → resetWinePrefix → doInit | — |
+| 恢复出厂 | `WineEnvService.ets:986` doReset | stopAll → resetWinePrefix → launchClient | — |
 
-上层编排入口(均汇聚到 doInit → launchClient):
+上层编排(三原语组合, 均汇聚到 startSession → launchClient):
 
-- `WineEnvService.ets:1063` restartEngine —— "重启引擎"(Index 失败重试 / EngineGuide 首启引导 / SettingsView 环境页)
-- `WineEnvService.ets:1094` ensureEngineReady —— 启动 exe 前的懒拉起
-- `WineEnvService.ets:1122` ensureDesktop —— 桌面模式下补 spawn explorer
-- `WineEnvService.ets:445/462` —— 自动化/game 模式自动拉起、二次进入自动拉起
+- 原语: `startSession(foreground)`(:857, 幂等确保就绪, 内部按磁盘状态走首启/二启分支)、
+  `stopSession`(:958, 无条件 stopAll → 等 state:stopped, 无会话也杀主 wineserver — 
+  重启语义=全新引擎, 不走 wine 单实例热重连)、`wipeEnvironment`(:978, 删运行时+清 prefix)
+- `WineEnvService.ets:1030` restartEngine = stop + start —— "重启引擎"(Index 失败重试 / EngineGuide 首启引导 / SettingsView 环境页)
+- `WineEnvService.ets:987` doReset = stop + wipe + start —— 恢复出厂
+- `WineEnvService.ets:1049` ensureEngineReady —— 启动 exe 前的懒拉起
+- `WineEnvService.ets:1077` ensureDesktop —— 桌面模式下补 spawn explorer
+- `WineEnvService.ets:611` autoStartIfIdle —— 二次进入后台自动拉起 (startSession(后台))
 
 已注册但 ArkTS 未调用的遗留通道: `runWineExe`(`napi_init.cpp:1247`)、`runHostProgram`(`:1250`)。
 
@@ -157,7 +161,7 @@ wine 内 `CreateProcess` → `ohos_broker_spawn_child`(`ohos_broker.c:192`): 把
 
 **⑥ ArkTS 侧参数注入**
 
-- 引擎级(launchClient 参数,设置页 → preferences/AppStorage → `WineEnvService.ets:1004` doInit 组装): `lang` → LANG/LC_ALL;`d3d`/`dxvk` → AppendD3dBackendEnv 分支;`compatEnvStr` → 兼容档位;`prefixMode`/`automation` → 行为开关
+- 引擎级(launchClient 参数,设置页 → preferences/AppStorage → `WineEnvService.ets:857` startSession 组装): `lang` → LANG/LC_ALL;`d3d`/`dxvk` → AppendD3dBackendEnv 分支;`compatEnvStr` → 兼容档位;`prefixMode`/`automation` → 行为开关
 - per-app(runWineProgram 的 `environment: Record<string,string>` 对象,`AppLibraryService.ets:549` launch()): LANG、11 个 BOX64_DYNAREC_* 档位(键清单/取值唯一来源 `Box64Dynarec.ets`,native 仅 `FilterCompatLines` 前缀门,不持键表)、`WINEHUA_WINDOWS_VERSION`(winver)、d3d/graphics 覆盖;native 端 `UpsertEnvLine` 压过基线(wine_exe.cpp:244-249)
 - 自动化: SmokeRunner 每用例构造 smokeEnvironment(WINEDEBUG/WINEHUA_SMOKE_*/VN_PERF 等);game 模式 `d3dLaunchEnvironment`(WineEnvService.ets:1317)注入 perf profile 整组
 

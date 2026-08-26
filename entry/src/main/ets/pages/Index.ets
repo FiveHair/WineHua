@@ -226,8 +226,8 @@ struct Index {
       this.desktopActive = wm.desktopActive;
       this.desktopWindowActive = wm.isDesktopWindowActive();
     });
-    // 引擎初始化 (幂等): automation/game 模式自动 doInit; prefix 就绪自动
-    // 拉起 (含升级检测拦截); 首启无 prefix 自动 doInit (与 master 一致)
+    // 引擎初始化 (幂等): automation/game 模式自动 startSession; prefix 就绪自动
+    // 拉起 (含升级检测拦截); 首启无 prefix 自动 startSession (与 master 一致)
     env.init(getContext(this));
     mirror();
   }
@@ -1013,8 +1013,8 @@ struct Index {
         Row({ space: 12 }) {
           Button('重试')
             .layoutWeight(1)
-            // 走编排重启而非裸 doInit: 失败时可能已有半个会话
-            // (explorer 已起但 prefix 轮询超时等), 裸 doInit 会双开桌面
+            // 走编排重启而非裸 startSession: 失败时可能已有半个会话
+            // (explorer 已起但 prefix 轮询超时等), 裸 startSession 会双开桌面
             .onClick(() => this.env.restartEngine())
           Button('重置环境')
             .layoutWeight(1)

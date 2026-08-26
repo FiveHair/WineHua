@@ -299,7 +299,7 @@ export default class EntryAbility extends UIAbility {
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
-    // 手机走 fork-shim，必须在 Index.doInit 的首次 NCP 调用前设置。
+    // 手机走 fork-shim，必须在 WineEnvService.startSession 的首次 NCP 调用前设置。
     testNapi.setPhoneMode(deviceInfo.deviceType === 'phone');
 
     // Phone desktop is rendered in a full-window XComponent. Let the system
