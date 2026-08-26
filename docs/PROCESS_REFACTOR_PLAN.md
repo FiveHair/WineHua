@@ -113,8 +113,15 @@ virgl host **不进这套体系**(独立进程、独立安全边界、IPC parcel
 
 ## 进度记录
 
-- [ ] 第 1 步: EnvSpec
-- [ ] 第 2 步: 基线单源
-- [ ] 第 3 步: Profile 管线
-- [ ] 第 4 步: SpawnRequest/Spawner
-- [ ] 第 5 步: (可选) broker 统一 / ArkTS 单源
+- [x] 第 1 步: EnvSpec (b04e341)
+- [x] 第 2 步: 基线单源 (18b6f5a)
+- [x] 第 3 步: Profile 管线 (f3370b0)
+- [x] 第 4 步: SpawnRequest/Spawner (fed07ec)
+- [x] 第 5 步: wineserver/wineboot 走 broker(仅 native 侧;ArkTS 11 键清单单源化未做)
+  - 连带修复: broker 就绪竞态 — StartBrokerServer 原以 socket 文件存在为就绪,
+    但 bind 先于 listen,connect 会拿 ECONNREFUSED 致紧随的 wineserver spawn 失败
+    ("启动失败");改为真实 connect 探测 (HandleRequest 对探测 EOF 降 INFO)。
+  - 连带修复: wine loader 自启 wineserver (ohos_broker_spawn_wineserver) 此前
+    走 `binDir|wineserver|-f|-p` 经 Main 会被当 wine loader argv 错解析,现由
+    Main 截获 argv[0]=="wineserver" 转入本体,该兜底路径首次真正可用。
+  - 已知副作用: wineboot 经 broker 登记会短暂出现在任务列表 (可接受)。
