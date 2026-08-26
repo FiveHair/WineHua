@@ -21,8 +21,9 @@
 namespace winehua {
 
 // -- 兼容模式全局档位 (设置页 → launchClient compatEnvStr 分号串) --
-// ArkTS 侧按 BOX64_DYNAREC_PRESETS 拼 "K=V;K=V;..."; 此处只放行
-// BOX64_DYNAREC_* 行 (纯档位参数, 防注入其它 key), 空串 = 出厂基线不注入。
+// 键清单与各档取值的唯一来源在 ArkTS Box64Dynarec.ets (policy 归 ArkTS,
+// 供 UI 档位/未来逐键微调演进); 本侧只是机制层前缀门: 放行
+// BOX64_DYNAREC_* 行 (防注入其它 key), 不认识档位名, 空串 = 出厂基线不注入。
 // 会话 env 经 UpsertEnvLine 压过基线 (每 key 最后写入者胜出);
 // DXVK/desktop 的 WEAKBARRIER=0 clamp 在 AppendStableDesktopDxvkEnv 尾,
 // 只会重新压回, 不会被档位击穿 (该 clamp 是 Venus 图形 ring 约束, 只

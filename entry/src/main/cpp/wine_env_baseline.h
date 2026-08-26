@@ -28,6 +28,9 @@ namespace winehua {
 // -- Box64 性能调优表 (单源, 仅 ARM64 有内容) --
 // 历史: 曾是 SetBox64PerfEnv (setenv 版) 与 AppendBox64PerfStrings (字符串版)
 // 两份手写拷贝, 增删键时容易只改一侧。现在键值只在这张表出现一次。
+// 定位: 本表只是"出厂默认值需要偏离 box64 编译默认"的安全底 (automation/
+// broker 等无 ArkTS 参与路径也靠它); 兼容档位的键清单与取值唯一来源是
+// ArkTS Box64Dynarec.ets, DYNAREC 可调键默认不进本表。
 #ifdef __aarch64__
 inline const std::vector<std::pair<std::string, std::string>>& Box64PerfTable() {
     static const std::vector<std::pair<std::string, std::string>> kTable = {

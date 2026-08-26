@@ -107,7 +107,7 @@ virgl host **不进这套体系**(独立进程、独立安全边界、IPC parcel
 | 2 | 基线表单源化,删 setup_wine_env 重复与 WineserverMain 重放 hack | 中 | Pad+PC 双设备回归(含游戏启动) |
 | 3 | Profile 管线: 策略集中,spawn 点改用 BuildSessionEnv | 中 | 同上 + dxvk/vkd3d 后端各跑一次 |
 | 4 | SpawnRequest/Spawner,四个 spawn 点收口 | 中 | 同上 + wine→wine 子进程(launcher 类) |
-| 5 | (可选,独立评估) wineserver/wineboot 走 broker;ArkTS 11 键清单改 native 单源 | 中高 | 冷启动/重启/恢复出厂全流程 |
+| 5 | (可选,独立评估) wineserver/wineboot 走 broker;ArkTS 11 键清单单源化 | 中高 | 冷启动/重启/恢复出厂全流程 |
 
 构建: `make NATIVE_ARCH=arm64-v8a`(唯一合法手段);回归设备: Pad(192.168.1.6)+ PC 2in1(192.168.1.8)。
 
@@ -117,7 +117,7 @@ virgl host **不进这套体系**(独立进程、独立安全边界、IPC parcel
 - [x] 第 2 步: 基线单源 (18b6f5a)
 - [x] 第 3 步: Profile 管线 (f3370b0)
 - [x] 第 4 步: SpawnRequest/Spawner (fed07ec)
-- [x] 第 5 步: wineserver/wineboot 走 broker(仅 native 侧;ArkTS 11 键清单单源化未做)
+- [x] 第 5 步: wineserver/wineboot 走 broker (native 侧)
   - 连带修复: broker 就绪竞态 — StartBrokerServer 原以 socket 文件存在为就绪,
     但 bind 先于 listen,connect 会拿 ECONNREFUSED 致紧随的 wineserver spawn 失败
     ("启动失败");改为真实 connect 探测 (HandleRequest 对探测 EOF 降 INFO)。
@@ -125,3 +125,13 @@ virgl host **不进这套体系**(独立进程、独立安全边界、IPC parcel
     走 `binDir|wineserver|-f|-p` 经 Main 会被当 wine loader argv 错解析,现由
     Main 截获 argv[0]=="wineserver" 转入本体,该兜底路径首次真正可用。
   - 已知副作用: wineboot 经 broker 登记会短暂出现在任务列表 (可接受)。
+- [x] ArkTS 11 键清单单源化: 采用 "policy 归 ArkTS / native 只留机制" 方案
+  (而非原设想的预设表搬 native — 保留 UI 档位/未来逐键微调的灵活性):
+  - Box64Dynarec.ets 为可调键清单与各档取值唯一来源, 头部注释写明所有权;
+  - native 只保留出厂基线 (Box64PerfTable, "偏离 box64 编译默认"的安全底)
+    + 前缀门 (FilterCompatLines), 两侧注释明确不复制档位表;
+  - EntryAbility d3d_env 白名单删 6 键枚举, 改 BOX64_DYNAREC_ 前缀正则
+    (与 native 前缀门同一约定) — Box64 键清单不再有两处列举;
+  - WEAKBARRIER 散落拷贝 (Index/WineEnvService/SmokeRunner) 保留不动: 那是
+    runWineProgram 直启链 (native 桌面 clamp 覆盖不到) 的同款约束, 属另一
+    路径的 policy 而非重复真相, 各处已带 Venus ring 定序注释。

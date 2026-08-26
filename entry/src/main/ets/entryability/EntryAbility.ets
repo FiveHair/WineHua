@@ -129,17 +129,10 @@ export default class EntryAbility extends UIAbility {
     const d3dEnvKeys: string[] = [];
     const d3dEnvValues: string[] = [];
     const appendD3dEnvironment = (key: string, envValue: string): void => {
-      const allowedBox64Keys = [
-        'BOX64_DYNAREC_SAFEFLAGS',
-        'BOX64_DYNAREC_BIGBLOCK',
-        'BOX64_DYNAREC_CALLRET',
-        'BOX64_DYNAREC_FORWARD',
-        'BOX64_DYNAREC_STRONGMEM',
-        'BOX64_AVX'
-      ];
-      const allowedKey = key === 'VKD3D_DEBUG' ||
-        /^(WINEDEBUG|DXVK_|VKD3D_TEST_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_)[A-Za-z0-9_]*$/.test(key) ||
-        allowedBox64Keys.indexOf(key) >= 0;
+      // Box64 可调键不逐枚列举: 前缀门与 native FilterCompatLines 同一约定,
+      // dynarec 键清单唯一来源是 Box64Dynarec.ets, 新增键此处自动放行
+      const allowedKey = key === 'VKD3D_DEBUG' || key === 'BOX64_AVX' ||
+        /^(WINEDEBUG|DXVK_|VKD3D_TEST_|VN_|VKR_|WINEHUA_DXVK_|WINEHUA_VKR_|BOX64_DYNAREC_)[A-Za-z0-9_]*$/.test(key);
       if (!allowedKey ||
         envValue.length > 1024 || d3dEnvKeys.length >= 32) {
         hilog.warn(DOMAIN, 'GameTest',

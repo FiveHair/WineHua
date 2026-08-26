@@ -158,7 +158,7 @@ wine 内 `CreateProcess` → `ohos_broker_spawn_child`(`ohos_broker.c:192`): 把
 **⑥ ArkTS 侧参数注入**
 
 - 引擎级(launchClient 参数,设置页 → preferences/AppStorage → `WineEnvService.ets:1004` doInit 组装): `lang` → LANG/LC_ALL;`d3d`/`dxvk` → AppendD3dBackendEnv 分支;`compatEnvStr` → 兼容档位;`prefixMode`/`automation` → 行为开关
-- per-app(runWineProgram 的 `environment: Record<string,string>` 对象,`AppLibraryService.ets:549` launch()): LANG、11 个 BOX64_DYNAREC_* 档位、`WINEHUA_WINDOWS_VERSION`(winver)、d3d/graphics 覆盖;native 端 `UpsertEnvLine` 压过基线(wine_exe.cpp:244-249)
+- per-app(runWineProgram 的 `environment: Record<string,string>` 对象,`AppLibraryService.ets:549` launch()): LANG、11 个 BOX64_DYNAREC_* 档位(键清单/取值唯一来源 `Box64Dynarec.ets`,native 仅 `FilterCompatLines` 前缀门,不持键表)、`WINEHUA_WINDOWS_VERSION`(winver)、d3d/graphics 覆盖;native 端 `UpsertEnvLine` 压过基线(wine_exe.cpp:244-249)
 - 自动化: SmokeRunner 每用例构造 smokeEnvironment(WINEDEBUG/WINEHUA_SMOKE_*/VN_PERF 等);game 模式 `d3dLaunchEnvironment`(WineEnvService.ets:1317)注入 perf profile 整组
 
 ### fd 变量的统一约定
