@@ -1,0 +1,31 @@
+From 1882de66331d7a2c8fd058e08201f24acb4ed063 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sun, 9 Aug 2026 22:40:16 +0800
+Subject: [PATCH 099/104] =?UTF-8?q?fix(ui):=20explorer=20=E8=8F=9C?=
+ =?UTF-8?q?=E5=8D=95=20Start=20=E7=BF=BB=E8=AF=91=E3=80=8C=E8=B5=B7?=
+ =?UTF-8?q?=E7=82=B9=E3=80=8D=E4=BF=AE=E6=AD=A3=E4=B8=BA=E3=80=8C=E5=BC=80?=
+ =?UTF-8?q?=E5=A7=8B=E3=80=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+与 wine 中文 UI 两步根因方案配套: 构建产物需编 po 翻译,
+此处修正菜单项措辞, 使其与 Windows 中文版一致。
+---
+ po/zh_CN.po | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/po/zh_CN.po b/po/zh_CN.po
+index fb4de2053876..8c66a5b7326e 100644
+--- a/po/zh_CN.po
++++ b/po/zh_CN.po
+@@ -15376,7 +15376,7 @@ msgstr "Wine 资源管理器"
+ 
+ #: programs/explorer/explorer.rc:34
+ msgid "Start"
+-msgstr "起点"
++msgstr "开始"
+ 
+ #: programs/explorer/explorer.rc:35 programs/winefile/winefile.rc:36
+ msgid "&Run..."
+

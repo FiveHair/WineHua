@@ -1,0 +1,39 @@
+From ecfd429e7517bcaf25ae2bdb418eb744c7c006b9 Mon Sep 17 00:00:00 2001
+From: yifengling0 <liufengpmp@outlook.com>
+Date: Sat, 4 Jul 2026 23:52:17 +0800
+Subject: [PATCH 024/104] fix(wineohos.drv): add EXTRADEFS/MODULE to
+ Makefile.in, add wineohos.spec
+
+---
+ dlls/wineohos.drv/Makefile.in   | 8 ++++----
+ dlls/wineohos.drv/wineohos.spec | 4 ++++
+ 2 files changed, 8 insertions(+), 4 deletions(-)
+ create mode 100644 dlls/wineohos.drv/wineohos.spec
+
+diff --git a/dlls/wineohos.drv/Makefile.in b/dlls/wineohos.drv/Makefile.in
+index 521f373d1cbf..cc8564d4b99e 100644
+--- a/dlls/wineohos.drv/Makefile.in
++++ b/dlls/wineohos.drv/Makefile.in
+@@ -1,7 +1,7 @@
+-EXTRAINCL    = -I$(srcdir)/../../../../shared
+-
+-UNIXLIB       = wineohos.so
+-UNIX_LIBS     = $(PTHREAD_LIBS)
++EXTRADEFS    = -D_NTSYSTEM_ -D__WINESRC__
++MODULE       = wineohos.drv
++UNIXLIB      = wineohos.so
++UNIX_LIBS    = $(PTHREAD_LIBS)
+ 
+ SOURCES = \
+ 	ohos_audio_client.c \
+diff --git a/dlls/wineohos.drv/wineohos.spec b/dlls/wineohos.drv/wineohos.spec
+new file mode 100644
+index 000000000000..b16365d0c9fc
+--- /dev/null
++++ b/dlls/wineohos.drv/wineohos.spec
+@@ -0,0 +1,4 @@
++@ stdcall -private DllCanUnloadNow()
++@ stdcall -private DllGetClassObject(ptr ptr ptr)
++@ stdcall -private DllRegisterServer()
++@ stdcall -private DllUnregisterServer()
+

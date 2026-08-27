@@ -100,6 +100,42 @@ DXVK_BUILD_ROOT="$BUILD_DIR/dxvk/legacy"
 DXVK_MODERN_BUILD_ROOT="$BUILD_DIR/dxvk/modern-2.6"
 VKD3D_PROTON_BUILD_ROOT="$BUILD_DIR/vkd3d-proton"
 
+# ── 引擎 flavor (wine | proton) ──
+# Proton 版本 = 同一 app / 同一设备端契约 (files/wine 布局, .wine prefix,
+# wine-data.zip payload), 仅构建源换为 ValveSoftware/wine + WineHua OHOS
+# 补丁系列。运行时 ArkTS/C++ 代码不区分引擎; x86_64 上引擎 Unix .so 必须
+# 落 entry/libs (el2 dlopen 被拒), 同名 .so 无法双引擎并存 — 故 Proton 是
+# 构建 flavor 而非运行时可切换引擎。
+ENGINE="${ENGINE:-wine}"
+case "$ENGINE" in
+    wine)
+        # winehua/wine fork 本身就是 OHOS 适配源, 直接构建
+        ENGINE_SRC="$WINE_SRC"
+        ;;
+    proton)
+        # 打补丁后的暂存源 (build_proton.sh 维护, 见该脚本)
+        ENGINE_SRC="$BUILD_DIR/proton-source"
+        ;;
+    *)
+        echo "ERROR: 不支持的 ENGINE: $ENGINE (可选: wine, proton)" >&2
+        exit 1
+        ;;
+esac
+export ENGINE
+
+# 引擎产物目录 (按 flavor 隔离, 互不污染增量状态)
+ENGINE_NATIVE_BUILD="$BUILD_DIR/${ENGINE}-native"   # host 工具 (winegcc 等)
+ENGINE_BUILD="$BUILD_DIR/${ENGINE}-ohos"             # OHOS 交叉编译
+ENGINE_SERVER_BUILD="$BUILD_DIR/${ENGINE}_server"    # wineserver
+ENGINE_CONFIGURE="$BUILD_DIR/configure-${ENGINE}"    # autoconf 产物 (per-engine)
+ENGINE_OPT_PREFIX="/opt/${ENGINE}hua"                 # --prefix (仅影响默认路径回退)
+
+# Proton bootstrap 配置 (fork 缺位时从上游拉取 + 应用补丁系列)
+PROTON_SRC="$ROOT/thirdparty/proton"                 # winehua/proton fork (可选)
+PROTON_PATCH_ROOT="$ROOT/patches/wine-ohos"          # WineHua OHOS 补丁系列
+PROTON_UPSTREAM_URL="${PROTON_UPSTREAM_URL:-https://github.com/ValveSoftware/wine.git}"
+PROTON_UPSTREAM_REF="${PROTON_UPSTREAM_REF:-proton_11.0}"
+
 # sysroot-ext 目录结构
 SYSROOT_EXT_INC="$SYSROOT_EXT/usr/include"
 SYSROOT_EXT_LIB="$SYSROOT_EXT/usr/lib/x86_64-linux-ohos"

@@ -1,0 +1,120 @@
+From 7ee8f1b9571958b6b72f7920847c4b0fae646603 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sun, 14 Jun 2026 02:03:10 +0800
+Subject: [PATCH 006/104] =?UTF-8?q?feat:=20Wayland=20rendering=20chain=20?=
+ =?UTF-8?q?=E2=80=94=20compositor=20connects,=20=E7=AA=97=E5=8F=A3?=
+ =?UTF-8?q?=E4=B8=8A=E5=B1=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- win32u/driver.c: OHOS Wayland 驱动绕过 PnP 直接加载
+- winewayland.drv/waylanddrv_main.c: 驱动 init 诊断日志
+- winewayland.drv/wayland.c: compositor 连接/协议绑定诊断日志
+---
+ dlls/win32u/driver.c                   | 20 ++++++++++++++++++++
+ dlls/winewayland.drv/wayland.c         | 10 ++++++++--
+ dlls/winewayland.drv/waylanddrv_main.c | 11 ++++++++++-
+ 3 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/win32u/driver.c b/dlls/win32u/driver.c
+index 9bb0fd72600b..1d3f6006987e 100644
+--- a/dlls/win32u/driver.c
++++ b/dlls/win32u/driver.c
+@@ -25,6 +25,7 @@
+ 
+ #include <assert.h>
+ #include <pthread.h>
++#include <stdlib.h>
+ 
+ #include "ntstatus.h"
+ #include "ntgdi_private.h"
+@@ -1011,6 +1012,25 @@ static void load_display_driver(void)
+ 
+     if (is_service_process() || !load_desktop_driver( get_desktop_window() ) || user_driver == &lazy_load_driver)
+     {
++#ifdef __OHOS__
++        /* OHOS: services.exe cannot start, PnP enumeration doesn't work.
++         * When WAYLAND_DISPLAY is set, try loading the Wayland driver
++         * directly, bypassing the registry/PnP mechanism. */
++        if (getenv("WAYLAND_DISPLAY"))
++        {
++            static const WCHAR winewaylandW[] = {'w','i','n','e','w','a','y','l','a','n','d','.','d','r','v',0};
++            void *ret_ptr;
++            ULONG ret_len;
++            ERR("OHOS: attempting direct Wayland driver load (bypass PnP)\n");
++            if (!KeUserModeCallback( NtUserLoadDriver, winewaylandW, sizeof(winewaylandW),
++                                     &ret_ptr, &ret_len ))
++            {
++                ERR("OHOS: Wayland driver loaded successfully via bypass\n");
++                return;
++            }
++            ERR("OHOS: Wayland driver bypass FAILED, falling back to null driver\n");
++        }
++#endif
+         winstation = NtUserGetProcessWindowStation();
+         if (!NtUserGetObjectInformation( winstation, UOI_FLAGS, &flags, sizeof(flags), NULL )
+             || (flags.dwFlags & WSF_VISIBLE))
+diff --git a/dlls/winewayland.drv/wayland.c b/dlls/winewayland.drv/wayland.c
+index b3d6b3c89e76..2bb6815420f2 100644
+--- a/dlls/winewayland.drv/wayland.c
++++ b/dlls/winewayland.drv/wayland.c
+@@ -254,11 +254,17 @@ BOOL wayland_process_init(void)
+ {
+     struct wl_display *wl_display_wrapper;
+ 
++    ERR("WAYLANDDRV: connecting to compositor (WAYLAND_DISPLAY=%s)\n",
++        getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(unset)");
++
+     process_wayland.wl_display = wl_display_connect(NULL);
+     if (!process_wayland.wl_display)
++    {
++        ERR("WAYLANDDRV: wl_display_connect FAILED\n");
+         return FALSE;
++    }
+ 
+-    TRACE("wl_display=%p\n", process_wayland.wl_display);
++    ERR("WAYLANDDRV: connected, wl_display=%p\n", process_wayland.wl_display);
+ 
+     if (!(process_wayland.wl_event_queue = wl_display_create_queue(process_wayland.wl_display)))
+     {
+@@ -339,6 +345,6 @@ BOOL wayland_process_init(void)
+         ERR("Wayland compositor doesn't support xdg_toplevel_icon_manager_v1 (window icons will not be supported)\n");
+ 
+     process_wayland.initialized = TRUE;
+-
++    ERR("WAYLANDDRV: process init SUCCESS (all required protocols bound)\n");
+     return TRUE;
+ }
+diff --git a/dlls/winewayland.drv/waylanddrv_main.c b/dlls/winewayland.drv/waylanddrv_main.c
+index b7a8a29be70c..72467db99d5d 100644
+--- a/dlls/winewayland.drv/waylanddrv_main.c
++++ b/dlls/winewayland.drv/waylanddrv_main.c
+@@ -30,6 +30,9 @@
+ 
+ #include "waylanddrv.h"
+ 
++#include "wine/debug.h"
++WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
++
+ char *process_name = NULL;
+ 
+ static const struct user_driver_funcs waylanddrv_funcs =
+@@ -92,9 +95,15 @@ static NTSTATUS waylanddrv_unix_init(void *arg)
+     __wine_set_user_driver(&waylanddrv_funcs, WINE_GDI_DRIVER_VERSION);
+ 
+     wayland_init_process_name();
++    ERR("WAYLANDDRV: initializing driver for process '%s'\n",
++        process_name ? process_name : "(null)");
+ 
+-    if (!wayland_process_init()) goto err;
++    if (!wayland_process_init()) {
++        ERR("WAYLANDDRV: wayland_process_init FAILED\n");
++        goto err;
++    }
+ 
++    ERR("WAYLANDDRV: driver init SUCCESS\n");
+     return 0;
+ 
+ err:
+

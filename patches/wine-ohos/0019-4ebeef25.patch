@@ -1,0 +1,38 @@
+From 4ebeef255c76a14ab6ded07741d0601919a1ed0c Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Thu, 25 Jun 2026 02:49:34 +0800
+Subject: [PATCH 019/104] =?UTF-8?q?fixup:=20virtual.c=20anon=5Fmmap=20?=
+ =?UTF-8?q?=E5=9B=9E=E9=80=80=20=E2=80=94=20=E6=95=B4=E5=9D=97=20else=20?=
+ =?UTF-8?q?=E8=80=8C=E9=9D=9E=E4=BB=85=E5=86=85=E5=AE=B9=E5=8C=85=E8=A3=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ dlls/ntdll/unix/virtual.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 1c6bcf62b7a8..eac7183afb50 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4197,15 +4197,15 @@ struct thread_data *virtual_alloc_thread_data(void)
+     {
+         data = view->base;
+     }
++#ifdef __OHOS__
++    /* OHOS: Box64 不支持 map_view, 回退到 anon_mmap */
+     else
+     {
+-#ifdef __OHOS__
+-        /* OHOS: fallback to anon_mmap for Box64 compatibility */
+         data = anon_mmap_alloc( size, PROT_READ | PROT_WRITE );
+         if (data != MAP_FAILED)
+             status = 0;
+-#endif
+     }
++#endif
+     if (!status)
+     {
+         data->request_fd = -1;
+

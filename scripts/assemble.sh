@@ -8,9 +8,11 @@ source "$SCRIPT_DIR/env.sh"
 # 文件分流到 libs/ + rawfile/
 # ============================================================
 assemble_pad() {
-    log "=== 组装布局 ($NATIVE_ARCH) ==="
+    log "=== 组装布局 ($NATIVE_ARCH, engine=$ENGINE) ==="
 
-    local wine_data="$STAGING_DIR/wine-data"
+    # 引擎 flavor (wine|proton): 设备端契约一致 (wine-data.zip / files/wine),
+    # 仅暂存目录名与取源目录随 ENGINE 切换
+    local wine_data="$STAGING_DIR/${ENGINE}-data"
     local guest_arch="${GUEST_ARCH:-x86_64}"
     rm -rf "$STAGING_DIR"
     rm -rf "$wine_data"
@@ -40,10 +42,10 @@ assemble_pad() {
         log "  → Wine .so → libs/x86_64/"
 
         # 所有 Wine Unix .so → libs/x86_64/ (系统 linker 通过文件名搜索)
-        for so in "$BUILD_DIR/wine-ohos/dlls/"*/*.so; do
+        for so in "$ENGINE_BUILD/dlls/"*/*.so; do
             cp "$so" "$NATIVE_LIBS/"
         done
-        log "    Wine .so: $(ls "$BUILD_DIR/wine-ohos/dlls/"*/*.so 2>/dev/null | wc -l) files"
+        log "    Wine .so: $(ls "$ENGINE_BUILD/dlls/"*/*.so 2>/dev/null | wc -l) files"
 
         # 交叉编译依赖 → libs/x86_64/
         # (系统 linker 自动搜索此路径, 无需 x86_64-unix 子目录)
@@ -97,11 +99,11 @@ assemble_pad() {
         # libfreetype 已由 _pick_lib_pad 放入 libs/x86_64/，系统 linker 可直接找到
 
         # libwineserver.so (Pad fork+dlopen 入口)
-        if [ -f "$BUILD_DIR/wine_server/libwineserver.so" ]; then
-            cp "$BUILD_DIR/wine_server/libwineserver.so" "$NATIVE_LIBS/"
+        if [ -f "$ENGINE_SERVER_BUILD/libwineserver.so" ]; then
+            cp "$ENGINE_SERVER_BUILD/libwineserver.so" "$NATIVE_LIBS/"
             log "    libwineserver.so → libs/x86_64/"
         else
-            warn "libwineserver.so 未找到！请先执行: bash scripts/build_wine.sh"
+            warn "libwineserver.so 未找到！请先执行: bash scripts/build_$(if [ "$ENGINE" = proton ]; then echo proton; else echo wine; fi).sh"
         fi
     elif [ "$NATIVE_ARCH" = "arm64-v8a" ]; then
         # arm64 Pad: Wine .so 是 x86_64, 不放 libs/, 放 rawfile zip
@@ -142,10 +144,10 @@ assemble_pad() {
         fi
 
         # ntdll.so → rawfile
-        cp "$BUILD_DIR/wine-ohos/dlls/ntdll/ntdll.so" "$wine_data/bin/"
+        cp "$ENGINE_BUILD/dlls/ntdll/ntdll.so" "$wine_data/bin/"
 
         # x86_64-unix/ .so → rawfile
-        for so in "$BUILD_DIR/wine-ohos/dlls/"*/*.so; do
+        for so in "$ENGINE_BUILD/dlls/"*/*.so; do
             [ "$(basename "$so")" = "ntdll.so" ] && continue
             cp "$so" "$wine_data/bin/x86_64-unix/"
         done
@@ -230,11 +232,11 @@ assemble_pad() {
         cp "$SYSROOT/usr/lib/x86_64-linux-ohos/libc.so" "$wine_data/bin/x86_64-unix/"
 
         # wine + wineserver (x86_64 ELF, 由 box64 加载)
-        cp "$BUILD_DIR/wine-ohos/loader/wine" "$wine_data/bin/"
-        if [ -f "$BUILD_DIR/wine_server/wineserver" ]; then
-            cp "$BUILD_DIR/wine_server/wineserver" "$wine_data/bin/"
-        elif [ -f "$BUILD_DIR/wine-ohos/server/wineserver" ]; then
-            cp "$BUILD_DIR/wine-ohos/server/wineserver" "$wine_data/bin/"
+        cp "$ENGINE_BUILD/loader/wine" "$wine_data/bin/"
+        if [ -f "$ENGINE_SERVER_BUILD/wineserver" ]; then
+            cp "$ENGINE_SERVER_BUILD/wineserver" "$wine_data/bin/"
+        elif [ -f "$ENGINE_BUILD/server/wineserver" ]; then
+            cp "$ENGINE_BUILD/server/wineserver" "$wine_data/bin/"
         fi
     fi
 
@@ -252,7 +254,7 @@ assemble_pad() {
         pe_exts="$pe_exts cpl"
     fi
     for ext in $pe_exts; do
-        for f in "$BUILD_DIR/wine-ohos/dlls/"*/x86_64-windows/*.$ext; do
+        for f in "$ENGINE_BUILD/dlls/"*/x86_64-windows/*.$ext; do
             [ -f "$f" ] && cp "$f" "$wine_data/bin/x86_64-windows/"
         done
     done
@@ -276,7 +278,7 @@ assemble_pad() {
     mkdir -p "$wine_data/bin/i386-windows"
     # 与 x86_64 一致: cpl 仅当 BUILD_WINE_MONO=1 时打包 (见上方 pe_exts 注释)
     for ext in $pe_exts; do
-        for f in "$BUILD_DIR/wine-ohos/dlls/"*/i386-windows/*.$ext; do
+        for f in "$ENGINE_BUILD/dlls/"*/i386-windows/*.$ext; do
             [ -f "$f" ] && cp "$f" "$wine_data/bin/i386-windows/"
         done
     done
@@ -284,7 +286,7 @@ assemble_pad() {
 
     # 32-bit exe stubs, 放在 bin/i386-windows/.
     # Wine 通过 WINEARCH 或 exe header 判断 32/64, 自动加载对应 DLL.
-    for exe in "$BUILD_DIR/wine-ohos/programs/"*/i386-windows/*.exe; do
+    for exe in "$ENGINE_BUILD/programs/"*/i386-windows/*.exe; do
         [ -f "$exe" ] && cp "$exe" "$wine_data/bin/i386-windows/"
     done
     log "  i386 exe stubs → $(ls "$wine_data/bin/i386-windows"/*.exe 2>/dev/null | wc -l) files"
@@ -300,12 +302,12 @@ assemble_pad() {
     fi
 
     # *.exe stubs → rawfile
-    for exe in "$BUILD_DIR/wine-ohos/programs/"*/x86_64-windows/*.exe; do
+    for exe in "$ENGINE_BUILD/programs/"*/x86_64-windows/*.exe; do
         cp "$exe" "$wine_data/bin/"
     done
     # graphics smoke test (OHOS 交叉编译产物, 不在 build-native/)
-    if [ -f "$BUILD_DIR/wine-ohos/programs/winehua_graphics_smoke/x86_64-windows/winehua_graphics_smoke.exe" ]; then
-        cp "$BUILD_DIR/wine-ohos/programs/winehua_graphics_smoke/x86_64-windows/winehua_graphics_smoke.exe" "$wine_data/bin/x86_64-windows/"
+    if [ -f "$ENGINE_BUILD/programs/winehua_graphics_smoke/x86_64-windows/winehua_graphics_smoke.exe" ]; then
+        cp "$ENGINE_BUILD/programs/winehua_graphics_smoke/x86_64-windows/winehua_graphics_smoke.exe" "$wine_data/bin/x86_64-windows/"
         log "  winehua_graphics_smoke.exe → x86_64-windows/"
     fi
 
@@ -324,8 +326,8 @@ assemble_pad() {
     # The primary Wine build uses --enable-archs=i386,x86_64.  Its PE import
     # libraries are both emitted under wine-ohos; wine-i386-pe is an obsolete
     # standalone build directory and does not exist in a clean CI checkout.
-    local vulkan_import_x64="$BUILD_DIR/wine-ohos/dlls/vulkan-1/x86_64-windows/libvulkan-1.a"
-    local vulkan_import_x86="$BUILD_DIR/wine-ohos/dlls/vulkan-1/i386-windows/libvulkan-1.a"
+    local vulkan_import_x64="$ENGINE_BUILD/dlls/vulkan-1/x86_64-windows/libvulkan-1.a"
+    local vulkan_import_x86="$ENGINE_BUILD/dlls/vulkan-1/i386-windows/libvulkan-1.a"
     [ -s "$vulkan_import_x64" ] || err "Wine x64 Vulkan import library missing: $vulkan_import_x64"
     [ -s "$vulkan_import_x86" ] || err "Wine x86 Vulkan import library missing: $vulkan_import_x86"
     local diagnostics_source="$WINEHUA/smoke/winehua_gpu_diagnostics.c"
@@ -425,10 +427,10 @@ assemble_pad() {
     # WINEDLLPATH for the selected DXVK or mixed VKD3D backend.
     local smoke_program
     for smoke_program in winehua_audio_smoke winehua_graphics_smoke winehua_vulkan_smoke winehua_d3d11_smoke; do
-        local smoke64="$BUILD_DIR/wine-ohos/programs/$smoke_program/x86_64-windows/$smoke_program.exe"
+        local smoke64="$ENGINE_BUILD/programs/$smoke_program/x86_64-windows/$smoke_program.exe"
         local smoke32="$BUILD_DIR/wine-i386-pe/programs/$smoke_program/i386-windows/$smoke_program.exe"
         if [ ! -f "$smoke32" ]; then
-            smoke32="$BUILD_DIR/wine-ohos/programs/$smoke_program/i386-windows/$smoke_program.exe"
+            smoke32="$ENGINE_BUILD/programs/$smoke_program/i386-windows/$smoke_program.exe"
         fi
         [ -f "$smoke64" ] || err "managed smoke x64 artifact missing: $smoke64"
         [ -f "$smoke32" ] || err "managed smoke x86 artifact missing: $smoke32"
@@ -564,16 +566,16 @@ EOF
     log "  managed smoke payload → smoke/{x64,x86}"
     log "  VKD3D-Proton 2.6 limited-500K (default mixed D3D12 profile) → vkd3d/limited-500k/x64 (sha256=$vkd3d64_d3d12_sha)"
 
-    # fonts
-    cp "$WINE_SRC/fonts/"*.ttf "$wine_data/share/wine/fonts/"
+    # fonts (引擎源字体; proton flavor 取自打补丁后的 build/proton-source)
+    cp "$ENGINE_SRC/fonts/"*.ttf "$wine_data/share/wine/fonts/"
     # NLS
-    cp "$BUILD_DIR/wine-ohos/nls/"*.nls "$wine_data/share/wine/nls/"
+    cp "$ENGINE_BUILD/nls/"*.nls "$wine_data/share/wine/nls/"
     # winmd
-    cp "$BUILD_DIR/wine-ohos/include/"*.winmd "$wine_data/share/wine/winmd/"
+    cp "$ENGINE_BUILD/include/"*.winmd "$wine_data/share/wine/winmd/"
     # Wine Mono (.NET 运行时). Default builds require the exact MSI expected
     # by mscoree/appwiz; an empty directory would otherwise leave wineboot in
     # an interactive installer forever on first launch.
-    local wine_mono_msi="$BUILD_DIR/wine-ohos/share/wine/mono/wine-mono-11.1.0-x86.msi"
+    local wine_mono_msi="$ENGINE_BUILD/share/wine/mono/wine-mono-11.1.0-x86.msi"
     if [ "${BUILD_WINE_MONO:-1}" = "1" ]; then
         [ -s "$wine_mono_msi" ] || err "Wine Mono MSI missing: $wine_mono_msi"
         cp "$wine_mono_msi" "$wine_data/share/wine/mono/"
@@ -582,7 +584,7 @@ EOF
         log "    Wine Mono: SKIP (BUILD_WINE_MONO=0)"
     fi
     # wine.inf (含 OHOS font substitutes)
-    cp "$BUILD_DIR/wine-ohos/loader/wine.inf" "$wine_data/share/wine/"
+    cp "$ENGINE_BUILD/loader/wine.inf" "$wine_data/share/wine/"
     sed_i '/^\[MCI\]$/i\
 ;; OHOS font substitutes\
 HKLM,%FontSubStr%,"System",,"HarmonyOS Sans SC"\
@@ -716,6 +718,7 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
     cat > "$rawfile_dir/wine-runtime-manifest.json" <<EOF
 {
   "schemaVersion": 1,
+  "engine": "$ENGINE",
   "payload": "wine-data.zip",
   "payloadSha256": "$payload_sha",
   "smokeSuiteVersion": "$smoke_suite_version"
@@ -723,14 +726,14 @@ HKLM,%FontSubStr%,"Lucida Console",,"Noto Sans Mono"' "$wine_data/share/wine/win
 EOF
     log "  $zip_name → rawfile/ ($(du -h "$rawfile_dir/$zip_name" | cut -f1))"
 
-    log "Pad 布局组装完成 ($NATIVE_ARCH)"
+    log "Pad 布局组装完成 ($NATIVE_ARCH, engine=$ENGINE)"
     echo ""
     echo "  libs/$NATIVE_ARCH/"
     ls -la "$NATIVE_LIBS/" 2>/dev/null || echo "    (empty)"
     echo "  rawfile/$zip_name"
 }
 
-log "=== 组装布局 ($NATIVE_ARCH) ==="
+log "=== 组装布局 ($NATIVE_ARCH, engine=$ENGINE) ==="
 
 # 统一使用 rawfile zip 布局
 assemble_pad

@@ -1,0 +1,195 @@
+From 6572449d993c5cdc08c0a287c4e4ca45dc42b870 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Fri, 19 Jun 2026 11:46:55 +0800
+Subject: [PATCH 009/104] =?UTF-8?q?=E4=BF=AE=E5=A4=8D:=20OHOS=20=E4=B8=8D?=
+ =?UTF-8?q?=E6=94=AF=E6=8C=81=20symlink()=20=E5=AF=BC=E8=87=B4=20explorer?=
+ =?UTF-8?q?=20=E6=97=A0=E6=B3=95=E6=9E=9A=E4=B8=BE=E7=9B=98=E7=AC=A6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+wineserver 初始化时在 \??\ 目录预创建 C: 和 Z: 命名事件对象。
+OHOS NAPI 沙箱不支持 symlink(), mountmgr.sys 无法从 dosdevices/
+读取符号链接目标来创建 NT 命名空间条目。GetLogicalDrives() 通过
+NtQueryDirectoryObject(\DosDevices\) 枚举盘符, 而 \DosDevices\
+是指向 \??\ 的 symlink, 直接在 \??\ 下创建 X: 命名对象即可
+被枚举到。任何类型的 NT 对象(事件、symlink 等)都能被枚举, 只按
+名称 (X:) 过滤。
+
+ntdll/unix/file.c 和 mountmgr.sys/unixlib.c 配合提供路径解析
+fallback, 在 readlink() 失败时使用硬编码的盘符→Unix 路径映射。
+---
+ dlls/mountmgr.sys/unixlib.c | 40 ++++++++++++++++++++++++++++++++++++
+ dlls/ntdll/unix/file.c      | 41 +++++++++++++++++++++++++++++++++----
+ server/directory.c          | 26 +++++++++++++++++++++++
+ 3 files changed, 103 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/mountmgr.sys/unixlib.c b/dlls/mountmgr.sys/unixlib.c
+index 575a26e9a1c0..b30578f8362d 100644
+--- a/dlls/mountmgr.sys/unixlib.c
++++ b/dlls/mountmgr.sys/unixlib.c
+@@ -26,6 +26,7 @@
+ 
+ #include <errno.h>
+ #include <fcntl.h>
++#include <limits.h>
+ #include <stdarg.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -290,6 +291,45 @@ static NTSTATUS get_dosdev_symlink( void *args )
+ 
+     ret = readlink( path, params->dest, params->size );
+     free( path );
++#ifdef __OHOS__
++    /* OHOS: symlink() not available in NAPI sandbox. For known drive
++     * letters, return hardcoded default mount points, but ONLY if the
++     * target directory actually exists (avoids creating phantom drives).
++     * c: → $WINEPREFIX/drive_c, z: → /
++     * :: (block device) variants are skipped (no real device). */
++    if (ret == -1)
++    {
++        const char *dev = params->dev;
++        if (dev[0] && dev[1] == ':' && !dev[2])
++        {
++            struct stat st;
++            if (dev[0] == 'z')
++            {
++                const char *home = getenv( "HOME" );
++                if (!home) home = "/storage/Users/currentUser";
++                lstrcpynA( params->dest, home, params->size );
++                if (params->size > 0) params->dest[params->size - 1] = 0;
++                return STATUS_SUCCESS;
++            }
++            else if (dev[0] >= 'c' && dev[0] <= 'y')
++            {
++                const char *prefix = getenv( "WINEPREFIX" );
++                if (!prefix) prefix = getenv( "HOME" );
++                if (prefix)
++                {
++                    char alt[PATH_MAX];
++                    snprintf( alt, sizeof(alt), "%s/drive_%c", prefix, dev[0] );
++                    if (!stat( alt, &st ))
++                    {
++                        strncpy( params->dest, alt, params->size );
++                        if (params->size > 0) params->dest[params->size - 1] = 0;
++                        return STATUS_SUCCESS;
++                    }
++                }
++            }
++        }
++    }
++#endif
+     if (ret == -1) return STATUS_NO_SUCH_DEVICE;
+     if (ret == params->size) return STATUS_BUFFER_TOO_SMALL;
+     params->dest[ret] = 0;
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index cb383f9c6cb7..d3f5ee1b7da7 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -2350,6 +2350,33 @@ static unsigned int get_drives_info( struct file_identity info[MAX_DOS_DRIVES] )
+                 }
+                 else
+                 {
++#ifdef __OHOS__
++                    /* OHOS: symlink not available, try hardcoded drive paths.
++                     * c:→$WINEPREFIX/drive_c, z:→/ */
++                    char alt_path[PATH_MAX];
++                    if (i == 'z' - 'a')
++                    {
++                        const char *home = getenv( "HOME" );
++                        if (!home) home = "/storage/Users/currentUser";
++                        snprintf( alt_path, sizeof(alt_path), "%s", home );
++                    }
++                    else if (i >= 'c' - 'a' && i <= 'y' - 'a')
++                    {
++                        snprintf( alt_path, sizeof(alt_path), "%s/drive_%c",
++                                  config_dir, 'a' + i );
++                    }
++                    else
++                    {
++                        alt_path[0] = 0;
++                    }
++                    if (alt_path[0] && !stat( alt_path, &st ))
++                    {
++                        cache[i].dev = st.st_dev;
++                        cache[i].ino = st.st_ino;
++                        nb_drives++;
++                        continue;
++                    }
++#endif
+                     cache[i].dev = 0;
+                     cache[i].ino = 0;
+                 }
+@@ -3362,7 +3389,11 @@ static NTSTATUS get_dos_device( char **unix_name, int start_pos )
+         if (!new_name && dev[1] == ':')
+         {
+             if (dev[0] == 'z')
+-                new_name = strdup( "/" );
++            {
++                const char *home = getenv( "HOME" );
++                if (!home) home = "/storage/Users/currentUser";
++                new_name = strdup( home );
++            }
+             else if (dev[0] >= 'c' && dev[0] <= 'y')
+                 asprintf( &new_name, "%s/drive_%c", config_dir, dev[0] );
+         }
+@@ -3805,7 +3836,7 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
+ #ifdef __OHOS__
+     /* OHOS: symlink() not available in NAPI sandbox. For drive letter
+      * prefixes, fall back to hardcoded default directory paths.
+-     * c: → $WINEPREFIX/drive_c, ..., z: → / */
++     * c: → $WINEPREFIX/drive_c, ..., z: → $HOME */
+     if (prefix_len == 2 && prefix[1] == ':')
+     {
+         unix_name[pos] = 0;  /* null-terminate the prefix for lstat */
+@@ -3813,8 +3844,10 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
+         {
+             if (prefix[0] == 'z')
+             {
+-                strcpy( unix_name, "/" );
+-                pos = 1;
++                const char *home = getenv( "HOME" );
++                if (!home) home = "/storage/Users/currentUser";
++                strcpy( unix_name, home );
++                pos = strlen( home );
+             }
+             else if (prefix[0] >= 'c' && prefix[0] <= 'y')
+             {
+diff --git a/server/directory.c b/server/directory.c
+index 091ceb84c719..6631f724c686 100644
+--- a/server/directory.c
++++ b/server/directory.c
+@@ -509,6 +509,32 @@ void init_directories( struct fd *intl_fd )
+     set_user_atom_table( atom_table );
+     release_object( atom_table );
+ 
++#ifdef __OHOS__
++    /* OHOS NAPI 沙箱不支持 symlink()，导致 $WINEPREFIX/dosdevices/ 下
++     * 无法创建符号链接。mountmgr.sys 依赖这些 symlink 在 NT 命名空间中
++     * 创建 \??\C: 和 \??\Z: 条目。没有这些条目，explorer 的 My Computer
++     * 视图通过 GetLogicalDrives() → NtQueryDirectoryObject(\DosDevices\)
++     * 枚举不到任何盘符。
++     *
++     * 解决思路：直接在 wineserver 初始化时往 \??\ 目录 (dir_global) 创建
++     * C: 和 Z: 命名事件对象。上方的 create_obj_symlink() 已将 \DosDevices\
++     * 链接到 \??\，所以 NtOpenDirectoryObject("\DosDevices\") 实际打开的
++     * 就是 dir_global。GetLogicalDrives 只按名称 (X:) 过滤，任何类型的
++     * 命名对象都可以，不需要必须是符号链接。 */
++    {
++        static const WCHAR c_driveW[] = {'C',':'};
++        static const WCHAR z_driveW[] = {'Z',':'};
++        static const struct unicode_str c_str = {c_driveW, sizeof(c_driveW)};
++        static const struct unicode_str z_str = {z_driveW, sizeof(z_driveW)};
++        struct event *ev;
++
++        ev = create_event( &dir_global->obj, &c_str, OBJ_PERMANENT, 1, 0, NULL );
++        if (ev) release_object( ev );
++        ev = create_event( &dir_global->obj, &z_str, OBJ_PERMANENT, 1, 0, NULL );
++        if (ev) release_object( ev );
++    }
++#endif
++
+     release_object( named_pipe_device );
+     release_object( mailslot_device );
+     release_object( null_device );
+

@@ -1,0 +1,272 @@
+From 85e8d3f2f90ff582c108a699527f25e2be553baf Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sat, 25 Jul 2026 14:37:49 +0800
+Subject: [PATCH 069/104] =?UTF-8?q?refactor(win32u):=20=E6=8F=90=E5=8F=96?=
+ =?UTF-8?q?=20opengl=20diag=20=E6=A1=86=E6=9E=B6=E5=88=B0=20opengl=5Fdiag.?=
+ =?UTF-8?q?c/h?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- opengl_diag.c: winehua_opengl_diag() + preload_guest_egl_deps()
+- opengl_diag.h: #ifdef __OHOS__ 有实现, 非 OHOS 空 static inline
+- opengl.c: -59 行, 只留 #include
+---
+ dlls/win32u/Makefile.in   |   1 +
+ dlls/win32u/opengl.c      |  60 +-------------------
+ dlls/win32u/opengl_diag.c | 113 ++++++++++++++++++++++++++++++++++++++
+ dlls/win32u/opengl_diag.h |  36 ++++++++++++
+ 4 files changed, 151 insertions(+), 59 deletions(-)
+ create mode 100644 dlls/win32u/opengl_diag.c
+ create mode 100644 dlls/win32u/opengl_diag.h
+
+diff --git a/dlls/win32u/Makefile.in b/dlls/win32u/Makefile.in
+index 454fb2555bc8..a632674daea0 100644
+--- a/dlls/win32u/Makefile.in
++++ b/dlls/win32u/Makefile.in
+@@ -39,6 +39,7 @@ SOURCES = \
+ 	menu.c \
+ 	message.c \
+ 	opengl.c \
++	opengl_diag.c \
+ 	opentype.c \
+ 	painting.c \
+ 	palette.c \
+diff --git a/dlls/win32u/opengl.c b/dlls/win32u/opengl.c
+index 240f1c56d6dc..a74eeaf6c3a4 100644
+--- a/dlls/win32u/opengl.c
++++ b/dlls/win32u/opengl.c
+@@ -36,70 +36,12 @@
+ #include "ntuser_private.h"
+ 
+ #include "wine/opengl_driver.h"
++#include "opengl_diag.h"
+ 
+ #include "dibdrv/dibdrv.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(wgl);
+ 
+-static BOOL winehua_opengl_diag_enabled(void)
+-{
+-    static int cached = -1;
+-    const char *value;
+-
+-    if (cached != -1) return cached;
+-
+-    value = getenv( "WINEHUA_OPENGL_DIAG" );
+-    cached = !!(value && value[0] && strcmp( value, "0" ));
+-    return cached;
+-}
+-
+-static void winehua_opengl_diag( const char *fmt, ... )
+-{
+-    va_list args;
+-
+-    if (!winehua_opengl_diag_enabled()) return;
+-
+-    fprintf( stderr, "winehua_opengl_diag: " );
+-    va_start( args, fmt );
+-    vfprintf( stderr, fmt, args );
+-    va_end( args );
+-    fputc( '\n', stderr );
+-    fflush( stderr );
+-}
+-
+-static void winehua_preload_guest_egl_deps( const char *egl_path )
+-{
+-    static const char *deps[] =
+-    {
+-        "libffi.so.8",
+-        "libdrm.so.2",
+-        "libwayland-client.so.0",
+-        "libwayland-server.so.0",
+-        "libwayland-egl.so.1",
+-        "libgallium-25.0.1.so",
+-        "libGLESv2.so.2",
+-        "libGLESv1_CM.so.1",
+-    };
+-    const char *slash;
+-    char dir[4096], path[4096];
+-    size_t len;
+-    unsigned int i;
+-
+-    if (!egl_path || !(slash = strrchr( egl_path, '/' ))) return;
+-    len = slash - egl_path;
+-    if (!len || len >= sizeof(dir)) return;
+-    memcpy( dir, egl_path, len );
+-    dir[len] = 0;
+-
+-    for (i = 0; i < ARRAY_SIZE(deps); i++)
+-    {
+-        if (snprintf( path, sizeof(path), "%s/%s", dir, deps[i] ) >= sizeof(path)) continue;
+-        if (access( path, R_OK )) continue;
+-        if (!dlopen( path, RTLD_NOW | RTLD_GLOBAL ))
+-            winehua_opengl_diag( "preload %s failed: %s", path, dlerror() );
+-    }
+-}
+-
+ struct pbuffer
+ {
+     struct opengl_drawable *drawable;
+diff --git a/dlls/win32u/opengl_diag.c b/dlls/win32u/opengl_diag.c
+new file mode 100644
+index 000000000000..f35638a74ffe
+--- /dev/null
++++ b/dlls/win32u/opengl_diag.c
+@@ -0,0 +1,113 @@
++/*
++ * WineHua OpenGL diagnostic helpers
++ *
++ * Copyright 2025-2026 WineHua contributors
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifdef __OHOS__
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <dlfcn.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "windef.h"
++#include "opengl_diag.h"
++
++/* WINEHUA_OPENGL_DIAG env var guard — cached for fast path */
++static BOOL winehua_opengl_diag_enabled(void)
++{
++    static int cached = -1;
++    const char *value;
++
++    if (cached != -1) return cached;
++
++    value = getenv( "WINEHUA_OPENGL_DIAG" );
++    cached = !!(value && value[0] && strcmp( value, "0" ));
++    return cached;
++}
++
++
++/***********************************************************************
++ *           winehua_opengl_diag
++ *
++ * Print diagnostic output to stderr when WINEHUA_OPENGL_DIAG is set.
++ */
++void winehua_opengl_diag( const char *fmt, ... )
++{
++    va_list args;
++
++    if (!winehua_opengl_diag_enabled()) return;
++
++    fprintf( stderr, "winehua_opengl_diag: " );
++    va_start( args, fmt );
++    vfprintf( stderr, fmt, args );
++    va_end( args );
++    fputc( '\n', stderr );
++    fflush( stderr );
++}
++
++
++/***********************************************************************
++ *           winehua_preload_guest_egl_deps
++ *
++ * Preload guest Mesa shared libraries from the same directory as the
++ * guest EGL/GL library.  This ensures dependencies are resolved before
++ * dlopen'ing the main EGL library (needed for VirGL in-box64 setups).
++ */
++void winehua_preload_guest_egl_deps( const char *egl_path )
++{
++    static const char *deps[] =
++    {
++        "libffi.so.8",
++        "libdrm.so.2",
++        "libwayland-client.so.0",
++        "libwayland-server.so.0",
++        "libwayland-egl.so.1",
++        "libgallium-25.0.1.so",
++        "libGLESv2.so.2",
++        "libGLESv1_CM.so.1",
++    };
++    const char *slash;
++    char dir[4096], path[4096];
++    size_t len;
++    unsigned int i;
++
++    if (!egl_path || !(slash = strrchr( egl_path, '/' ))) return;
++    len = slash - egl_path;
++    if (!len || len >= sizeof(dir)) return;
++    memcpy( dir, egl_path, len );
++    dir[len] = 0;
++
++    for (i = 0; i < ARRAY_SIZE(deps); i++)
++    {
++        if (snprintf( path, sizeof(path), "%s/%s", dir, deps[i] ) >= sizeof(path)) continue;
++        if (access( path, R_OK )) continue;
++        if (!dlopen( path, RTLD_NOW | RTLD_GLOBAL ))
++            winehua_opengl_diag( "preload %s failed: %s", path, dlerror() );
++    }
++}
++
++#endif /* __OHOS__ */
+diff --git a/dlls/win32u/opengl_diag.h b/dlls/win32u/opengl_diag.h
+new file mode 100644
+index 000000000000..df75c1a1961f
+--- /dev/null
++++ b/dlls/win32u/opengl_diag.h
+@@ -0,0 +1,36 @@
++/*
++ * WineHua OpenGL diagnostic helpers
++ *
++ * Copyright 2025-2026 WineHua contributors
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifndef __WINE_WIN32U_OPENGL_DIAG_H
++#define __WINE_WIN32U_OPENGL_DIAG_H
++
++#ifdef __OHOS__
++
++void winehua_opengl_diag( const char *fmt, ... ) __attribute__((format(printf, 1, 2)));
++void winehua_preload_guest_egl_deps( const char *egl_path );
++
++#else
++
++static inline void winehua_opengl_diag( const char *fmt, ... ) { (void)fmt; }
++static inline void winehua_preload_guest_egl_deps( const char *egl_path ) { (void)egl_path; }
++
++#endif /* __OHOS__ */
++
++#endif /* __WINE_WIN32U_OPENGL_DIAG_H */
+

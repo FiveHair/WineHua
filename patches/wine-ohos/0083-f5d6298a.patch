@@ -1,0 +1,24 @@
+From f5d6298a54f69da6bdfa7e7a14b99e43ae4bd860 Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Tue, 28 Jul 2026 14:07:55 +0800
+Subject: [PATCH 083/104] fix(ntdll): preserve executable section mapping
+ extent
+
+---
+ dlls/ntdll/unix/ohos_virtual.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/ohos_virtual.c b/dlls/ntdll/unix/ohos_virtual.c
+index 11dc7a3ad2e8..a810526628f4 100644
+--- a/dlls/ntdll/unix/ohos_virtual.c
++++ b/dlls/ntdll/unix/ohos_virtual.c
+@@ -64,7 +64,7 @@ int ohos_map_exec_section( void *view_base, int fd,
+ {
+     char *sec_addr = (char *)view_base + virtual_address;
+     size_t sec_offset = virtual_address & host_page_mask;
+-    size_t sec_map_size = (virtual_address + file_size + host_page_mask) & ~host_page_mask;
++    size_t sec_map_size = (file_size + sec_offset + host_page_mask) & ~host_page_mask;
+ 
+     ohos_jit_enable();
+     if (mmap( sec_addr - sec_offset, sec_map_size + sec_offset,
+

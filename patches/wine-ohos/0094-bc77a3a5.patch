@@ -1,0 +1,29 @@
+From bc77a3a5ff03ad791dd6e8d7134aa36fb14274ed Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 23:55:37 +0800
+Subject: [PATCH 094/104] fix(ohos): allow transfer destination for isolated
+ vkd3d swapchain
+
+---
+ dlls/win32u/vulkan.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 7951f44155bd..aba7fdc10c75 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -2125,7 +2125,12 @@ static VkResult winehua_swapchain_create(struct vulkan_device *device,
+         .arrayLayers = create_info->imageArrayLayers ? create_info->imageArrayLayers : 1,
+         .samples = VK_SAMPLE_COUNT_1_BIT,
+         .tiling = VK_IMAGE_TILING_OPTIMAL,
+-        .usage = create_info->imageUsage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
++        /* The private Host presenter normally only reads these images. Keep
++         * TRANSFER_DST available for the isolated VKD3D Maleoon compatibility
++         * profile, which copies the real D3D12 back buffer into the private
++         * swapchain image without changing the default DXVK path. */
++        .usage = create_info->imageUsage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
++                 VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+     };
+

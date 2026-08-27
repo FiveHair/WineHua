@@ -1,0 +1,114 @@
+From dd1cbdf0d786de1ec5a90e8a7f60e9cfc70798a2 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sat, 25 Jul 2026 15:12:52 +0800
+Subject: [PATCH 074/104] =?UTF-8?q?refactor:=20M3=20=E2=80=94=20env.c=20Dl?=
+ =?UTF-8?q?lPath=20=E5=8A=A0=20#ifdef=20=5F=5FOHOS=5F=5F=20=E5=AE=88?=
+ =?UTF-8?q?=E5=8D=AB=E5=87=8F=E5=B0=91=20diff?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+env.c 是 Unix 目标编译，__OHOS__ 宏存在，#ifdef 安全。
+mountmgr.sys/unixlib.c: 仅注释清理（#ifdef 已存在，不变）。
+
+M4 (client.c) 和 M8 (queue.c) 撤回：PE 目标编译不定义 __OHOS__，
+加 #ifdef 会导致 OHOS 代码被移除，引发功能缺陷。
+---
+ dlls/mountmgr.sys/unixlib.c |  8 +++-----
+ dlls/ntdll/unix/env.c       | 31 ++++++++++++++++++-------------
+ 2 files changed, 21 insertions(+), 18 deletions(-)
+
+diff --git a/dlls/mountmgr.sys/unixlib.c b/dlls/mountmgr.sys/unixlib.c
+index 33f436e4abd3..e0a6179ab4c0 100644
+--- a/dlls/mountmgr.sys/unixlib.c
++++ b/dlls/mountmgr.sys/unixlib.c
+@@ -292,11 +292,9 @@ static NTSTATUS get_dosdev_symlink( void *args )
+     ret = readlink( path, params->dest, params->size );
+     free( path );
+ #ifdef __OHOS__
+-    /* OHOS: symlink() not available in NAPI sandbox. For known drive
+-     * letters, return hardcoded default mount points, but ONLY if the
+-     * target directory actually exists (avoids creating phantom drives).
+-     * c: → $WINEPREFIX/drive_c, z: → /storage/Users/currentUserstorage/Users/currentUser
+-     * :: (block device) variants are skipped (no real device). */
++    /* OHOS: symlink unavailable, fall back to default drive mapping.
++     * z: → /storage/Users/currentUser, c-y: → $WINEPREFIX/drive_X
++     * (only if dir exists). */
+     if (ret == -1)
+     {
+         const char *dev = params->dev;
+diff --git a/dlls/ntdll/unix/env.c b/dlls/ntdll/unix/env.c
+index 37a7f0f4bc21..467c38c261c9 100644
+--- a/dlls/ntdll/unix/env.c
++++ b/dlls/ntdll/unix/env.c
+@@ -986,10 +986,7 @@ static void add_path_var( WCHAR **env, SIZE_T *pos, SIZE_T *size, const char *na
+ {
+     WCHAR *nt_name = NULL;
+ 
+-    if (path && unix_to_nt_file_name( path, &nt_name, FILE_OPEN ))
+-    {
+-        return;
+-    }
++    if (path && unix_to_nt_file_name( path, &nt_name, FILE_OPEN )) return;
+     append_envW( env, pos, size, name, nt_name );
+     free( nt_name );
+ }
+@@ -1960,26 +1957,32 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
+     TRACE( "image %s cmdline %s dir %s\n",
+            debugstr_w(main_wargv[0]), debugstr_w(cmdline), debugstr_w(curdir) );
+ 
++#ifdef __OHOS__
+     /* OHOS: build DllPath from WINEDLLPATH for PE DLL search */
+     DWORD dllpath_len = 0;
+     WCHAR *dllpath_w = NULL;
+-    const char *winedllpath = getenv("WINEDLLPATH");
+-    if (winedllpath)
+     {
+-        DWORD ulen = strlen(winedllpath);
+-        dllpath_w = malloc((ulen + 2) * sizeof(WCHAR));
+-        if (dllpath_w)
++        const char *winedllpath = getenv("WINEDLLPATH");
++        if (winedllpath)
+         {
+-            for (const char *s = winedllpath; *s; s++)
+-                dllpath_w[dllpath_len++] = (*s == ':') ? ';' : *s;
+-            dllpath_w[dllpath_len] = 0;
+-            dllpath_len = (dllpath_len + 1) * sizeof(WCHAR);
++            DWORD ulen = strlen(winedllpath);
++            dllpath_w = malloc((ulen + 2) * sizeof(WCHAR));
++            if (dllpath_w)
++            {
++                for (const char *s = winedllpath; *s; s++)
++                    dllpath_w[dllpath_len++] = (*s == ':') ? ';' : *s;
++                dllpath_w[dllpath_len] = 0;
++                dllpath_len = (dllpath_len + 1) * sizeof(WCHAR);
++            }
+         }
+     }
++#endif
+ 
+     size = (sizeof(*params)
+             + MAX_PATH * sizeof(WCHAR)  /* curdir */
++#ifdef __OHOS__
+             + dllpath_len               /* dll path */
++#endif
+             + (wcslen( cmdline ) + 1) * sizeof(WCHAR)  /* command line */
+             + (wcslen( main_wargv[0] ) + 1) * sizeof(WCHAR) * 2 /* image path + window title */
+             + env_pos * sizeof(WCHAR));
+@@ -2003,6 +2006,7 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
+     put_unicode_string( main_wargv[0], &dst, &params->ImagePathName );
+     put_unicode_string( cmdline, &dst, &params->CommandLine );
+     put_unicode_string( main_wargv[0], &dst, &params->WindowTitle );
++#ifdef __OHOS__
+     if (dllpath_w)
+     {
+         memcpy(dst, dllpath_w, dllpath_len);
+@@ -2012,6 +2016,7 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
+         dst += dllpath_len / sizeof(WCHAR);
+         free(dllpath_w);
+     }
++#endif
+     free( nt_name.Buffer );
+     free( cmdline );
+     free( curdir );
+

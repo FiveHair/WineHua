@@ -1,0 +1,38 @@
+From 87a93f896e48a0c7e73d68677f74c11e422e11b6 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Fri, 19 Jun 2026 12:19:14 +0800
+Subject: [PATCH 010/104] =?UTF-8?q?=E4=BF=AE=E5=A4=8D:=20OHOS=20=E6=97=A0?=
+ =?UTF-8?q?=20fontconfig=20=E6=97=B6=E5=8A=A0=E8=BD=BD=E7=B3=BB=E7=BB=9F?=
+ =?UTF-8?q?=E5=AD=97=E4=BD=93=20/system/fonts/?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+OHOS 编译时带了 SONAME_LIBFONTCONFIG, 但设备上无 libfontconfig.so。
+dlopen 静默失败后字体列表为空, 只有 Wine 内置的 10KB fixedsys.ttf
+等字体, 导致 notepad 等宽字体字符间距不均。
+
+修复: freetype_load_fonts() 中 fontconfig 加载失败后, 额外
+扫描 /system/fonts/ 加载 HarmonyOS/Noto 系统字体。
+---
+ dlls/win32u/freetype.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/dlls/win32u/freetype.c b/dlls/win32u/freetype.c
+index 832043abaa34..052e0275003f 100644
+--- a/dlls/win32u/freetype.c
++++ b/dlls/win32u/freetype.c
+@@ -1543,6 +1543,12 @@ static void freetype_load_fonts(void)
+ {
+ #ifdef SONAME_LIBFONTCONFIG
+     load_fontconfig_fonts();
++#ifdef __OHOS__
++    /* OHOS: libfontconfig.so 不在设备上, fontconfig 加载会静默失败.
++     * 此时需要额外扫描 /system/fonts/ 来使用系统的 HarmonyOS 字体. */
++    if (!fontconfig_enabled)
++        ReadFontDir("/system/fonts", TRUE);
++#endif
+ #elif defined(__APPLE__)
+     load_mac_fonts();
+ #elif defined(__ANDROID__)
+

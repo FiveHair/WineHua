@@ -14,6 +14,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 declare -A UPSTREAMS=(
   [wine]="https://github.com/wine-mirror/wine.git"
+  [proton]="https://github.com/ValveSoftware/wine.git"
   [box64]="https://github.com/ptitSeb/box64.git"
   [dxvk]="https://github.com/doitsujin/dxvk.git"
   [libepoxy]="https://github.com/anholt/libepoxy.git"

@@ -1,0 +1,45 @@
+From d9f1fd599f78b5928d78f9208aab2aebee0cd763 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sat, 25 Jul 2026 15:52:26 +0800
+Subject: [PATCH 075/104] =?UTF-8?q?docs:=20PE=20=E7=9B=AE=E6=A0=87?=
+ =?UTF-8?q?=E6=96=87=E4=BB=B6=E6=A0=87=E6=B3=A8=20#ifdef=20=5F=5FOHOS=5F?=
+ =?UTF-8?q?=5F=20=E4=B8=8D=E5=8F=AF=E7=94=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+client.c 和 queue.c 是 PE 目标编译（mingw32/64），__OHOS__ 宏不存在。
+加注释警告后续维护者避免再犯同样错误。
+---
+ dlls/mmdevapi/client.c | 3 +++
+ dlls/setupapi/queue.c  | 2 ++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/dlls/mmdevapi/client.c b/dlls/mmdevapi/client.c
+index 6e4e13bdab36..f635e3803b15 100644
+--- a/dlls/mmdevapi/client.c
++++ b/dlls/mmdevapi/client.c
+@@ -374,6 +374,9 @@ HRESULT validate_fmt(const WAVEFORMATEXTENSIBLE *fmt, BOOL compatible)
+     return ret;
+ }
+ 
++/* NOTE: This file is compiled as a PE target (x86_64-windows / i386-windows).
++ * __OHOS__ is NOT defined here — do NOT wrap OHOS-specific code with
++ * #ifdef __OHOS__, or it will be silently dropped from the PE DLL. */
+ static BOOL backend_allows_shared_mode_conversion(void)
+ {
+     static const WCHAR wineohos_driverW[] = L"wineohos.drv";
+diff --git a/dlls/setupapi/queue.c b/dlls/setupapi/queue.c
+index 6f2c3de41af1..8861f2c0dbfe 100644
+--- a/dlls/setupapi/queue.c
++++ b/dlls/setupapi/queue.c
+@@ -1467,6 +1467,8 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
+                     op->src_path = NULL;
+                 }
+ 
++                /* NOTE: This file is compiled as a PE target — __OHOS__
++                 * is NOT defined. Do NOT wrap OHOS code with #ifdef. */
+                 {
+                     int needmedia_retries = 0;
+                     for (;;)
+

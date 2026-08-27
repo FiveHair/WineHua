@@ -1,0 +1,72 @@
+From 035725cc5bc5cd37a484a51528b1a5063c83152e Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sun, 26 Jul 2026 23:35:48 +0800
+Subject: [PATCH 078/104] =?UTF-8?q?fix(shell32):=20desktop.ini=20CLSID=20?=
+ =?UTF-8?q?=E8=A7=A3=E6=9E=90=E5=A4=B1=E8=B4=A5=E6=97=B6=E5=9B=9E=E9=80=80?=
+ =?UTF-8?q?=E5=88=B0=E9=BB=98=E8=AE=A4=20folder=20handler?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+  当文件夹的 desktop.ini 包含无法实例化的 CLSID（COM 类未注册或不存在）
+  时，SHELL32_BindToChild 此前会直接失败，导致用户双击文件夹后 UI 无反应。
+
+  现在：
+  - CLSID 格式无效 → ERR 日志 + 忽略
+  - CLSID 有效但无法实例化 → ERR 日志 + 回退到默认文件系统 handler
+  - CLSID 正常或不存在 → 行为不变
+---
+ dlls/shell32/shlfolder.c | 29 ++++++++++++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/shell32/shlfolder.c b/dlls/shell32/shlfolder.c
+index 492116c43f2e..5e17292ee965 100644
+--- a/dlls/shell32/shlfolder.c
++++ b/dlls/shell32/shlfolder.c
+@@ -276,6 +276,7 @@ HRESULT SHELL32_BindToChild (LPCITEMIDLIST pidlRoot, const CLSID *clsidChild,
+     } else {
+         /* file system folder */
+         CLSID clsidFolder = *clsidChild;
++        BOOL hasCustomClsid = FALSE;
+         WCHAR wszCLSIDValue[CHARS_IN_GUID], wszFolderPath[MAX_PATH], *pwszPathTail = wszFolderPath;
+ 
+         /* see if folder CLSID should be overridden by desktop.ini file */
+@@ -288,10 +289,36 @@ HRESULT SHELL32_BindToChild (LPCITEMIDLIST pidlRoot, const CLSID *clsidChild,
+ 
+         if (SHELL32_GetCustomFolderAttributeFromPath (wszFolderPath,
+             L".ShellClassInfo", L"CLSID", wszCLSIDValue, CHARS_IN_GUID))
+-            CLSIDFromString (wszCLSIDValue, &clsidFolder);
++        {
++            CLSID clsidCustom;
++            if (SUCCEEDED(CLSIDFromString(wszCLSIDValue, &clsidCustom)))
++            {
++                if (!IsEqualGUID(&clsidCustom, clsidChild))
++                {
++                    clsidFolder = clsidCustom;
++                    hasCustomClsid = TRUE;
++                }
++            }
++            else
++                ERR("desktop.ini has unparsable CLSID=%s in %s, ignoring\n",
++                    debugstr_w(wszCLSIDValue), debugstr_w(wszFolderPath));
++        }
+ 
+         hr = SHELL32_CoCreateInitSF (pidlRoot, pathRoot, pidlChild,
+                                      &clsidFolder, (LPVOID *)&pSF);
++
++        /* If the desktop.ini CLSID cannot be instantiated, fall back to the
++         * default file system folder handler.  desktop.ini customization is
++         * optional — a missing or unregistered CLSID should not prevent the
++         * user from browsing the folder. */
++        if (FAILED(hr) && hasCustomClsid)
++        {
++            ERR("Failed to bind folder using desktop.ini CLSID %s (hr=0x%08lx), "
++                "falling back to default file system folder handler\n",
++                debugstr_w(wszCLSIDValue), hr);
++            hr = SHELL32_CoCreateInitSF (pidlRoot, pathRoot, pidlChild,
++                                         clsidChild, (LPVOID *)&pSF);
++        }
+     }
+     ILFree (pidlChild);
+ 
+

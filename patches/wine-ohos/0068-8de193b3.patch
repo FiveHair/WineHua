@@ -1,0 +1,274 @@
+From 8de193b356d53962936b3a3a5d6739678d7e2bc9 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sat, 25 Jul 2026 14:32:10 +0800
+Subject: [PATCH 068/104] =?UTF-8?q?refactor(ntdll):=20=E6=8F=90=E5=8F=96?=
+ =?UTF-8?q?=20spawn=20=E9=AB=98=E5=B1=82=E6=8E=A5=E5=8F=A3=E5=88=B0=20ohos?=
+ =?UTF-8?q?=5Fbroker.c=EF=BC=8C=E8=BF=9B=E4=B8=80=E6=AD=A5=E6=94=B6?=
+ =?UTF-8?q?=E7=BC=A9=E6=B3=A8=E5=85=A5=E7=82=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- ohos_broker_spawn_wineserver(): 封装 binDir 解析+硬编码 wineserver args
+- ohos_broker_spawn_child(): 封装 argv→entryParams+env过滤+fd收集
+- loader.c: 注入点从 7 行 → 2 行
+- process.c: 注入点从 72 行 → 8 行 (-64 行)
+- env_forwardable(): 提取黑名单过滤为独立函数
+---
+ dlls/ntdll/unix/loader.c      | 14 ++---
+ dlls/ntdll/unix/ohos_broker.c | 99 +++++++++++++++++++++++++++++++++++
+ dlls/ntdll/unix/ohos_broker.h | 11 ++++
+ dlls/ntdll/unix/process.c     | 71 +------------------------
+ 4 files changed, 115 insertions(+), 80 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 6191ba9c814c..51486703f90a 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -597,17 +597,9 @@ void start_server( BOOL debug )
+ 
+         if (!socket_alive)
+         {
+-            const char *binDir = getenv("WINEBINDIR");
+-            if (!binDir) binDir = "/data/storage/el2/base/files/wine/bin";
+-
+-            {
+-                char entryParams[1024];
+-                snprintf(entryParams, sizeof(entryParams), "%s|wineserver|-f|-p", binDir);
+-
+-                int child_pid;
+-                if (ohos_broker_spawn(entryParams, NULL, NULL, 0, &child_pid) == 0)
+-                    started = TRUE;
+-            }
++            int child_pid;
++            if (ohos_broker_spawn_wineserver(&child_pid) == 0)
++                started = TRUE;
+ 
+             if (started)
+             {
+diff --git a/dlls/ntdll/unix/ohos_broker.c b/dlls/ntdll/unix/ohos_broker.c
+index 4f0603fdb4a9..3e8a79ffc4d6 100644
+--- a/dlls/ntdll/unix/ohos_broker.c
++++ b/dlls/ntdll/unix/ohos_broker.c
+@@ -25,6 +25,7 @@
+ #include "config.h"
+ 
+ #include <errno.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/socket.h>
+@@ -140,3 +141,101 @@ int ohos_broker_spawn(const char *entry_params,
+     close(broker_fd);
+     return ret;
+ }
++
++
++/* Resolve binDir from WINEBINDIR env or fallback. */
++static const char *resolve_bindir(void)
++{
++    const char *dir = getenv("WINEBINDIR");
++    return dir ? dir : "/data/storage/el2/base/files/wine/bin";
++}
++
++
++/* Check if an env var should be forwarded to the child.
++ * Blacklist: per-process fd/handle vars that the child gets via fdList. */
++static int env_forwardable(const char *env)
++{
++    if (strchr(env, '|') || strchr(env, '\n')) return 0;
++    if (!strncmp(env, "WINESERVERSOCKET=", 17) ||
++        !strncmp(env, "WINE_OHOS_AUDIO_ENABLE=", 23) ||
++        !strncmp(env, "WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 29) ||
++        !strncmp(env, "WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 33))
++        return 0;
++    return 1;
++}
++
++
++/***********************************************************************
++ *           ohos_broker_spawn_wineserver
++ *
++ * Convenience wrapper to spawn wineserver via the Process Broker.
++ * Resolves binDir and sends entry_params "binDir|wineserver|-f|-p".
++ */
++int ohos_broker_spawn_wineserver( int *child_pid )
++{
++    const char *binDir = resolve_bindir();
++    char entryParams[1024];
++    snprintf(entryParams, sizeof(entryParams), "%s|wineserver|-f|-p", binDir);
++    return ohos_broker_spawn(entryParams, NULL, NULL, 0, child_pid);
++}
++
++
++/***********************************************************************
++ *           ohos_broker_spawn_child
++ *
++ * Spawn a Wine child process via the Process Broker.
++ * Builds entryParams from argv array + filtered environ, and passes
++ * socketfd as "wineserver_sock" via SCM_RIGHTS.
++ */
++int ohos_broker_spawn_child( char **argv, int socketfd, int *child_pid )
++{
++    const char *binDir = resolve_bindir();
++    extern char **environ;
++    char *entryParams = NULL;
++    const char *fd_names[4];
++    int fds[4];
++    int n_send_fds = 0;
++    int i, j, len;
++    int ret;
++
++    /* Compute entryParams buffer size */
++    len = strlen(binDir) + 1;
++    if (!getenv("USE_LIBBOX64"))
++        len += 5; /* + "|wine" */
++    for (i = 0; argv[i]; i++) len += strlen(argv[i]) + 1;
++    if (environ) {
++        for (j = 0; environ[j]; j++) {
++            if (!env_forwardable(environ[j])) continue;
++            len += strlen(environ[j]) + 7; /* "|__env=" prefix */
++        }
++    }
++
++    entryParams = malloc(len + 1);
++    if (!entryParams) return -1;
++
++    /* Build entryParams: "binDir[|wine]|arg0|arg1|...|__env=K=V|..." */
++    {
++        char *p = entryParams;
++        if (getenv("USE_LIBBOX64"))
++            p += snprintf(p, len + 1, "%s", binDir);
++        else
++            p += snprintf(p, len + 1, "%s|wine", binDir);
++        for (i = 0; argv[i]; i++)
++            p += snprintf(p, len + 1 - (p - entryParams), "|%s", argv[i]);
++        if (environ) {
++            for (j = 0; environ[j]; j++) {
++                if (!env_forwardable(environ[j])) continue;
++                p += snprintf(p, len + 1 - (p - entryParams), "|__env=%s", environ[j]);
++            }
++        }
++    }
++
++    /* Collect fds */
++    fd_names[n_send_fds] = "wineserver_sock";
++    fds[n_send_fds] = socketfd;
++    n_send_fds++;
++
++    ret = ohos_broker_spawn(entryParams, fd_names, fds, n_send_fds, child_pid);
++    free(entryParams);
++    return ret;
++}
+diff --git a/dlls/ntdll/unix/ohos_broker.h b/dlls/ntdll/unix/ohos_broker.h
+index 476a81d39f85..2846572e5c7e 100644
+--- a/dlls/ntdll/unix/ohos_broker.h
++++ b/dlls/ntdll/unix/ohos_broker.h
+@@ -41,6 +41,17 @@ int ohos_broker_spawn(const char *entry_params,
+                       const char **fd_names, const int *fds, int n_fds,
+                       int *child_pid);
+ 
++/* Convenience: spawn wineserver via broker.
++ * Resolves binDir from WINEBINDIR env, sends "binDir|wineserver|-f|-p".
++ * Returns 0 on success (sets *child_pid), -1 on failure. */
++int ohos_broker_spawn_wineserver( int *child_pid );
++
++/* Convenience: spawn a Wine child process via broker.
++ * Builds entryParams from argv + environ (blacklist-filtered),
++ * and passes socketfd as "wineserver_sock" via SCM_RIGHTS.
++ * Returns 0 on success (sets *child_pid), -1 on failure. */
++int ohos_broker_spawn_child( char **argv, int socketfd, int *child_pid );
++
+ #endif /* __OHOS__ */
+ 
+ #endif /* __WINE_OHOS_BROKER_H */
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index 3e5c8898bbfc..47f1e3e84bbd 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -432,82 +432,15 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+      * Broker 在主进程上下文（非 appspawn 子进程）调用 StartNativeChildProcess，
+      * 并通过 SCM_RIGHTS 传递 wineserver socket fd 给子进程。 */
+     {
+-        const char *binDir = getenv("WINEBINDIR");
+-        if (!binDir) binDir = "/data/storage/el2/base/files/wine/bin";
+-        extern char **environ;
+-        char *entryParams = NULL;
+-        int i, j, len;
+-        /* 要传给子进程的命名 fd —— 目前仅 wineserver 通信 socket。
+-         * 未来的宿主 fd 桥(GPU/剪贴板等)在此 append 即可, 协议无需再改。 */
+-        const char *fd_names[4];
+-        int fds[4];
+-        int n_send_fds = 0;
+-
+         argv = build_argv( &params->CommandLine, 0 );
+-
+-        /* 构建 entryParams: "binDir|arg0|arg1|..."
+-         * ARM64 Box64 in-process 模式下不需要 "|wine" 前缀，因为 Box64
+-         * 已将目标 ELF 路径设为 guest argv[0]。x86_64 Pad 仍需前缀。 */
+-        len = strlen(binDir) + 1;
+-        if (!getenv("USE_LIBBOX64"))
+-            len += 5; /* + "|wine" */
+-        for (i = 0; argv[i]; i++) len += strlen(argv[i]) + 1;
+-
+-        /* 预留环境变量空间: 每项 +7 为 "|__env=" 前缀。
+-         * 过滤 per-process fd 变量: 子进程会从 fdList 拿到自己的值。 */
+-        if (environ) {
+-            for (j = 0; environ[j]; j++) {
+-                if (strchr(environ[j], '|') || strchr(environ[j], '\n')) continue;
+-                if (!strncmp(environ[j], "WINESERVERSOCKET=", 17) ||
+-                    !strncmp(environ[j], "WINE_OHOS_AUDIO_ENABLE=", 23) ||
+-                    !strncmp(environ[j], "WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 29) ||
+-                    !strncmp(environ[j], "WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 33))
+-                    continue;
+-                len += strlen(environ[j]) + 7;
+-            }
+-        }
+-
+-        entryParams = malloc(len + 1);
+-        if (entryParams)
+-        {
+-            char *p = entryParams;
+-            if (getenv("USE_LIBBOX64"))
+-                p += snprintf(p, len + 1, "%s", binDir);
+-            else
+-                p += snprintf(p, len + 1, "%s|wine", binDir);
+-            for (i = 0; argv[i]; i++)
+-                p += snprintf(p, len + 1 - (p - entryParams), "|%s", argv[i]);
+-            /* 序列化父进程 environ 为 |__env=K=V| 段 (等价 fork+exec 继承) */
+-            if (environ) {
+-                for (j = 0; environ[j]; j++) {
+-                    if (strchr(environ[j], '|') || strchr(environ[j], '\n')) continue;
+-                    if (!strncmp(environ[j], "WINESERVERSOCKET=", 17) ||
+-                        !strncmp(environ[j], "WINE_OHOS_AUDIO_ENABLE=", 23) ||
+-                        !strncmp(environ[j], "WINE_OHOS_AUDIO_BOOTSTRAP_FD=", 29) ||
+-                        !strncmp(environ[j], "WINE_OHOS_AUDIO_PROTOCOL_VERSION=", 33))
+-                        continue;
+-                    p += snprintf(p, len + 1 - (p - entryParams), "|__env=%s", environ[j]);
+-                }
+-            }
+-        }
+-
+-        /* 收集要传给子进程的命名 fd (目前仅 wineserver 通信 socket) */
+-        fd_names[n_send_fds] = "wineserver_sock";
+-        fds[n_send_fds] = socketfd;
+-        n_send_fds++;
+-
+-        /* 通过 Process Broker 创建子进程 */
+         {
+             int child_pid = -1;
+-            if (ohos_broker_spawn(entryParams, fd_names, fds, n_send_fds, &child_pid) == 0)
++            if (ohos_broker_spawn_child( argv, socketfd, &child_pid ) == 0)
+                 pid = child_pid;
+             else
+-                pid = -1;
+-            if (pid <= 0) status = STATUS_UNSUCCESSFUL;
++                status = STATUS_UNSUCCESSFUL;
+         }
+-
+         free(argv);
+-        free(entryParams);
+     }
+ #else
+     if (!(pid = fork()))  /* child */
+

@@ -1,0 +1,48 @@
+From c6a3b72c29803c806c67731aa35b9fedc85c6822 Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 18:19:05 +0800
+Subject: [PATCH 093/104] fix(probe): register and build dinput diagnostic
+
+---
+ configure.ac                         | 1 +
+ programs/winehua_dinput_probe/main.c | 6 +++---
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index 620d85ba031a..d19e5afd8eb8 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -3663,6 +3663,7 @@ WINE_CONFIG_MAKEFILE(programs/winemenubuilder)
+ WINE_CONFIG_MAKEFILE(programs/winemine)
+ WINE_CONFIG_MAKEFILE(programs/winemsibuilder)
+ WINE_CONFIG_MAKEFILE(programs/winehua_audio_smoke)
++WINE_CONFIG_MAKEFILE(programs/winehua_dinput_probe)
+ WINE_CONFIG_MAKEFILE(programs/winehua_graphics_smoke)
+ WINE_CONFIG_MAKEFILE(programs/winehua_d3d11_smoke)
+ WINE_CONFIG_MAKEFILE(programs/winehua_vulkan_smoke)
+diff --git a/programs/winehua_dinput_probe/main.c b/programs/winehua_dinput_probe/main.c
+index f98324116fc2..cda9b4989430 100644
+--- a/programs/winehua_dinput_probe/main.c
++++ b/programs/winehua_dinput_probe/main.c
+@@ -212,7 +212,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
+ 
+     wc.lpfnWndProc = WndProc;
+     wc.hInstance = inst;
+-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
++    wc.hCursor = LoadCursorA(NULL, (LPCSTR)IDC_ARROW);
+     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+     wc.lpszClassName = "DinputClickProbe";
+     RegisterClassA(&wc);
+@@ -235,9 +235,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
+     plog("==== probe start, pump=%d ====", g_pump);
+     th = CreateThread(NULL, 0, PollThread, NULL, 0, NULL);
+ 
+-    while (GetMessage(&msg, NULL, 0, 0) > 0) {
++    while (GetMessageA(&msg, NULL, 0, 0) > 0) {
+         TranslateMessage(&msg);
+-        DispatchMessage(&msg);
++        DispatchMessageA(&msg);
+     }
+     InterlockedExchange(&g_quit, 1);
+     WaitForSingleObject(th, 2000);
+

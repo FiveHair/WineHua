@@ -1,0 +1,465 @@
+From a09da08d384c43aaec56ab83bf686e378f1f0845 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sat, 25 Jul 2026 09:32:51 +0800
+Subject: [PATCH 063/104] =?UTF-8?q?chore:=20=E6=B8=85=E7=90=86=E6=97=A0?=
+ =?UTF-8?q?=E6=84=8F=E4=B9=89=E7=9A=84=E4=B8=8A=E6=B8=B8=E5=B7=AE=E5=BC=82?=
+ =?UTF-8?q?=20=E2=80=94=20=E7=A7=BB=E9=99=A4=E7=BA=AF=E8=B0=83=E8=AF=95?=
+ =?UTF-8?q?=E6=97=A5=E5=BF=97=E5=92=8C=E6=A0=BC=E5=BC=8F=E5=8C=96=E5=8F=98?=
+ =?UTF-8?q?=E6=9B=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- programs/wineboot/wineboot.c: 移除 OHOS-WB MESSAGE 日志
+- server/process.c: 移除 OHOS-WS write 调试日志
+- dlls/ntdll/loader.c: 恢复上游格式化
+- server/main.c: 移除 OHOS-WS fprintf/write 日志 (保留 --no-auto-close)
+- dlls/ntdll/unix/server.c: 移除 OHOS-LOADER MESSAGE 日志 (保留 symlink 失败诊断)
+- dlls/ntdll/unix/loader.c: 移除 start_server/build_path/exec_wineserver MESSAGE 日志
+---
+ dlls/ntdll/loader.c          | 13 +++++--------
+ dlls/ntdll/unix/loader.c     | 36 +++---------------------------------
+ dlls/ntdll/unix/server.c     | 12 +-----------
+ programs/wineboot/wineboot.c | 32 ++------------------------------
+ server/main.c                | 15 +--------------
+ server/process.c             |  8 --------
+ 6 files changed, 12 insertions(+), 104 deletions(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 32aa9cde34f3..443b98411707 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -1700,6 +1700,7 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
+     }
+     else TRACE("(%p %s,%s,%p) - CALL\n", module, debugstr_w(wm->ldr.BaseDllName.Buffer),
+                reason_names[reason], lpReserved );
++
+     __TRY
+     {
+         retv = call_dll_entry_point( entry, module, reason, lpReserved );
+@@ -3245,10 +3246,7 @@ static NTSTATUS search_dll_file( LPCWSTR paths, LPCWSTR search, UNICODE_STRING *
+         wcscpy( name + len, search );
+ 
+         nt_name->Buffer = NULL;
+-        if ((status = RtlDosPathNameToNtPathName_U_WithStatus( name, nt_name, NULL, NULL )))
+-        {
+-            goto done;
+-        }
++        if ((status = RtlDosPathNameToNtPathName_U_WithStatus( name, nt_name, NULL, NULL ))) goto done;
+ 
+         status = open_dll_file( nt_name, pwm, mapping, image_info, id );
+         if (status == STATUS_NOT_SUPPORTED) found_image = TRUE;
+@@ -3345,6 +3343,7 @@ static NTSTATUS load_dll( const WCHAR *load_path, const WCHAR *libname, DWORD fl
+     NTSTATUS nts = STATUS_DLL_NOT_FOUND;
+     BOOL redirected;
+     void *prev;
++
+     TRACE( "looking for %s in %s\n", debugstr_w(libname), debugstr_w(load_path) );
+ 
+     if (system && system_dll_path.Buffer)
+@@ -4554,10 +4553,8 @@ void loader_init( CONTEXT *context, void **entry )
+         if (wm->ldr.ActivationContext)
+             RtlActivateActivationContext( 0, wm->ldr.ActivationContext, &cookie );
+ 
+-        status = process_attach( node_ntdll, context );
+-        if (!status)
+-            status = process_attach( node_kernel32, context );
+-        if (status)
++        if ((status = process_attach( node_ntdll, context ))
++             || (status = process_attach( node_kernel32, context )))
+         {
+             ERR( "Initializing system dll for %s failed, status %lx\n",
+                  debugstr_w(NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer), status );
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 2d3ee6e422bb..f96e9e928f19 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -255,8 +255,6 @@ static int build_path_and_exec( pid_t *pid, const char *dir, const char *name, c
+ 
+     argv[0] = build_path( dir, name );
+     ret = posix_spawn( pid, argv[0], NULL, NULL, argv, environ );
+-    MESSAGE( "[OHOS-LOADER] build_path_and_exec dir=%s name=%s path=%s ret=%d errno=%d\n",
+-             dir, name, argv[0], ret, ret ? errno : 0 );
+     free( argv[0] );
+     return ret;
+ }
+@@ -317,10 +315,7 @@ static void set_dll_path(void)
+         free( path );
+     }
+ 
+-    for (i = 0; i < count; i++)
+-    {
+-        dll_path_maxlen = max( dll_path_maxlen, strlen(dll_paths[i]) );
+-    }
++    for (i = 0; i < count; i++) dll_path_maxlen = max( dll_path_maxlen, strlen(dll_paths[i]) );
+     dll_paths[count] = NULL;
+ }
+ 
+@@ -531,9 +526,6 @@ static int exec_wineserver( pid_t *pid, char **argv )
+ {
+     char *path;
+ 
+-    MESSAGE( "[OHOS-LOADER] exec_wineserver called, bin_dir=%s build_dir=%s\n",
+-             bin_dir ? bin_dir : "(null)", build_dir ? build_dir : "(null)" );
+-
+     if (!is_win64 && alt_build_dir)  /* look for 64-bit server */
+         return build_path_and_exec( pid, alt_build_dir, "server/wineserver", argv );
+ 
+@@ -548,7 +540,6 @@ static int exec_wineserver( pid_t *pid, char **argv )
+         for (path = strtok( strdup( path ), ":" ); path; path = strtok( NULL, ":" ))
+             if (!build_path_and_exec( pid, path, "wineserver", argv )) return 0;
+     }
+-    MESSAGE( "[OHOS-LOADER] exec_wineserver FAILED all paths, last try BINDIR=%s\n", BINDIR );
+     return build_path_and_exec( pid, BINDIR, "wineserver", argv );
+ }
+ 
+@@ -562,7 +553,6 @@ void start_server( BOOL debug )
+ {
+     static BOOL started;  /* we only try once */
+ 
+-    MESSAGE( "[OHOS-LOADER] start_server called, started=%d debug=%d\n", started, debug );
+     if (!started)
+     {
+ #ifdef __OHOS__
+@@ -624,7 +614,6 @@ void start_server( BOOL debug )
+                 {
+                     char entryParams[1024];
+                     snprintf(entryParams, sizeof(entryParams), "%s|wineserver|-f|-p", binDir);
+-                    MESSAGE( "[OHOS-LOADER] start_server broker request: %s\n", entryParams );
+ 
+                     char req[2048];
+                     int reqlen = snprintf(req, sizeof(req), "SPAWN\n%s\n", entryParams);
+@@ -643,8 +632,6 @@ void start_server( BOOL debug )
+                         ssize_t n = recv(broker_fd, response, sizeof(response), MSG_WAITALL);
+                         if (n == sizeof(response))
+                         {
+-                            MESSAGE( "[OHOS-LOADER] start_server broker replied childPid=%d status=%d\n",
+-                                     response[0], response[1] );
+                             if (response[1] == 0 && response[0] > 0)
+                                 started = TRUE;
+                         }
+@@ -656,7 +643,6 @@ void start_server( BOOL debug )
+             if (started)
+             {
+                 /* poll socket 直到就绪（最多 5 秒） */
+-                MESSAGE( "[OHOS-LOADER] start_server waiting for wineserver socket...\n" );
+                 int found = 0;
+                 for (int wait = 0; wait < 25; wait++)
+                 {
+@@ -674,7 +660,6 @@ void start_server( BOOL debug )
+                                 snprintf(sub, sizeof(sub), "%s/%s/socket", sockdir_check, de->d_name);
+                                 if (stat(sub, &st) == 0 && S_ISSOCK(st.st_mode))
+                                 {
+-                                    MESSAGE( "[OHOS-LOADER] start_server socket ready at %s\n", sub );
+                                     found = 1;
+                                     break;
+                                 }
+@@ -685,19 +670,14 @@ void start_server( BOOL debug )
+                     }
+                     usleep(200000);
+                 }
+-                if (found)
+-                    MESSAGE( "[OHOS-LOADER] start_server wineserver socket ready\n" );
+-                else
+-                    MESSAGE( "[OHOS-LOADER] start_server timeout waiting for socket\n" );
+             }
+             else
+-                MESSAGE( "[OHOS-LOADER] start_server broker spawn failed, will retry\n" );
++                /* broker spawn failed, will retry next time */;
+         }
+         else
+         {
+             /* socket 已存在，但可能是即将退出的 wineserver 残留。
+              * 短暂 poll 确认 socket 稳定存在（2 秒），消失则 fall through 去 spawn。 */
+-            MESSAGE( "[OHOS-LOADER] start_server socket found, verifying stability...\n" );
+             int stable = 1;
+             for (int wait = 0; wait < 10; wait++)
+             {
+@@ -725,11 +705,8 @@ void start_server( BOOL debug )
+             }
+             if (stable)
+             {
+-                MESSAGE( "[OHOS-LOADER] start_server socket stable, skipping spawn\n" );
+                 started = TRUE;
+             }
+-            else
+-                MESSAGE( "[OHOS-LOADER] start_server socket vanished, will spawn\n" );
+         }
+ #else
+         /* 标准 Linux: posix_spawn wineserver */
+@@ -740,16 +717,9 @@ void start_server( BOOL debug )
+ 
+         argv[1] = debug ? debug_flag : NULL;
+         argv[2] = NULL;
+-        if (exec_wineserver( &pid, argv ))
+-        {
+-            MESSAGE( "[OHOS-LOADER] start_server FAILED exec_wineserver returned error\n" );
+-            fatal_error( "could not exec wineserver\n" );
+-        }
+-        MESSAGE( "[OHOS-LOADER] start_server waitpid pid=%d...\n", (int)pid );
++        if (exec_wineserver( &pid, argv )) fatal_error( "could not exec wineserver\n" );
+         waitpid( pid, &status, 0 );
+         status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+-        MESSAGE( "[OHOS-LOADER] start_server waitpid done, pid=%d status=%d WIFEXITED=%d\n",
+-                 (int)pid, status, WIFEXITED(status) );
+         if (status == 2) return;  /* server lock held by someone else, will retry later */
+         if (status) exit(status);  /* server failed */
+         started = TRUE;
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index a03bb26b7003..48444e70b189 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1415,8 +1415,6 @@ static int server_connect(void)
+     /* chdir to the server directory */
+     if (chdir( server_dir ) == -1)
+     {
+-        MESSAGE( "[OHOS-LOADER] server_connect chdir(%s) failed errno=%d (ENOENT=%d), calling start_server\n",
+-                 server_dir, errno, ENOENT );
+         if (errno != ENOENT) fatal_perror( "chdir to %s", server_dir );
+         start_server( TRACE_ON(server) );
+         if (chdir( server_dir ) == -1) fatal_perror( "chdir to %s", server_dir );
+@@ -1433,14 +1431,11 @@ static int server_connect(void)
+         if (retry)
+         {
+             usleep( 100000 * retry * retry );
+-            MESSAGE( "[OHOS-LOADER] server_connect retry=%d, calling start_server\n", retry );
+             start_server( TRACE_ON(server) );
+             if (lstat( SOCKETNAME, &st ) == -1) continue;  /* still no socket, wait a bit more */
+         }
+         else if (lstat( SOCKETNAME, &st ) == -1) /* check for an already existing socket */
+         {
+-            MESSAGE( "[OHOS-LOADER] server_connect no socket at %s/%s, errno=%d, calling start_server\n",
+-                     server_dir, SOCKETNAME, errno );
+             if (errno != ENOENT) fatal_perror( "lstat %s/%s", server_dir, SOCKETNAME );
+             start_server( TRACE_ON(server) );
+             if (lstat( SOCKETNAME, &st ) == -1) continue;  /* still no socket, wait a bit more */
+@@ -1626,7 +1621,6 @@ size_t server_init_process(void)
+     server_pid = -1;
+     if (env_socket)
+     {
+-        MESSAGE( "[OHOS-LOADER] server_init WINESERVERSOCKET=%s, using fd directly\n", env_socket );
+         fd_socket = atoi( env_socket );
+ 
+ #ifdef __OHOS__
+@@ -1638,9 +1632,6 @@ size_t server_init_process(void)
+             ssize_t peek = recv( fd_socket, &dummy, 1, MSG_PEEK | MSG_DONTWAIT );
+             if (peek == 0 || (peek == -1 && errno != EAGAIN && errno != EWOULDBLOCK))
+             {
+-                MESSAGE( "[OHOS-LOADER] server_init WINESERVERSOCKET fd=%d dead (peek=%zd errno=%d), "
+-                         "falling back to server_connect\n",
+-                         fd_socket, peek, peek == -1 ? errno : 0 );
+                 close( fd_socket );
+                 goto server_connect_fallback;
+             }
+@@ -1654,7 +1645,6 @@ size_t server_init_process(void)
+     else
+     {
+     server_connect_fallback:
+-        MESSAGE( "[OHOS-LOADER] server_init NO WINESERVERSOCKET, calling server_connect()\n" );
+         {
+             const char *arch = getenv( "WINEARCH" );
+ 
+@@ -1664,7 +1654,6 @@ size_t server_init_process(void)
+                 fatal_error( "WINEARCH set to invalid value '%s', it must be win32, win64, or wow64.\n", arch );
+ 
+             fd_socket = server_connect();
+-            MESSAGE( "[OHOS-LOADER] server_connect returned fd=%d\n", fd_socket );
+         }
+     }
+ 
+@@ -1796,6 +1785,7 @@ void server_init_process_done(void)
+      * is sent by init_process_done */
+     signal_init_process( data->teb );
+     init_teb_data( data );
++
+     /* Signal the parent process to continue */
+     SERVER_START_REQ( init_process_done )
+     {
+diff --git a/programs/wineboot/wineboot.c b/programs/wineboot/wineboot.c
+index 16e0b52f228c..aa91d01c92f2 100644
+--- a/programs/wineboot/wineboot.c
++++ b/programs/wineboot/wineboot.c
+@@ -1661,18 +1661,13 @@ static void update_wineprefix( BOOL force )
+     int fd;
+     struct stat st;
+ 
+-    MESSAGE("OHOS-WB: update_wineprefix force=%d config_dir=%s inf_path=%s\n",
+-        force, debugstr_w(config_dir), debugstr_w(inf_path));
+-
+     if (!inf_path)
+     {
+-        MESSAGE("OHOS-WB: wine.inf not found!\n");
+         WINE_MESSAGE( "wine: failed to update %s, wine.inf not found\n", debugstr_w( config_dir ));
+         return;
+     }
+     if ((fd = _wopen( inf_path, O_RDONLY )) == -1)
+     {
+-        MESSAGE("OHOS-WB: cannot open wine.inf: %s\n", strerror(errno));
+         WINE_MESSAGE( "wine: failed to update %s with %s: %s\n",
+                       debugstr_w(config_dir), debugstr_w(inf_path), strerror(errno) );
+         goto done;
+@@ -1685,7 +1680,6 @@ static void update_wineprefix( BOOL force )
+         HANDLE process;
+         DWORD count = 0;
+ 
+-        MESSAGE("OHOS-WB: starting rundll32 PreInstall...\n");
+         if ((process = start_rundll32( inf_path, L"PreInstall", IMAGE_FILE_MACHINE_TARGET_HOST )))
+         {
+             HWND hwnd = show_wait_window();
+@@ -1710,15 +1704,11 @@ static void update_wineprefix( BOOL force )
+                 count++;
+             }
+             DestroyWindow( hwnd );
+-            MESSAGE("OHOS-WB: rundll32 loop complete\n");
+-        } else {
+-            MESSAGE("OHOS-WB: start_rundll32 PreInstall FAILED\n");
+         }
+-        MESSAGE("OHOS-WB: calling install_root_pnp_devices...\n");
+         install_root_pnp_devices();
+         update_user_profile();
+-        MESSAGE("OHOS-WB: pnp + user_profile done\n");
+ 
++        TRACE( "wine: configuration in %s has been updated.\n", debugstr_w(prettyprint_configdir()) );
+     }
+ 
+ done:
+@@ -1830,7 +1820,6 @@ int __cdecl main( int argc, char *argv[] )
+     BOOL is_wow64;
+ 
+     end_session = force = init = kill = restart = shutdown = update = FALSE;
+-    MESSAGE("OHOS-WB: MAIN entry argc=%d argv[0]=%s\n", argc, argv[0] ? argv[0] : "(null)");
+     GetWindowsDirectoryW( windowsdir, MAX_PATH );
+     if( !SetCurrentDirectoryW( windowsdir ) )
+         WINE_ERR("Cannot set the dir to %s (%ld)\n", wine_dbgstr_w(windowsdir), GetLastError() );
+@@ -1914,39 +1903,23 @@ int __cdecl main( int argc, char *argv[] )
+     NtCreateEvent( &event, EVENT_ALL_ACCESS, &attr, NotificationEvent, 0 );
+ 
+     ResetEvent( event );  /* in case this is a restart */
+-    MESSAGE("OHOS-WB: event created, proceeding with init...\n");
+ 
+     create_user_shared_data();
+-    MESSAGE("OHOS-WB: create_user_shared_data done\n");
+     create_hardware_registry_keys();
+-    MESSAGE("OHOS-WB: create_hardware_registry_keys done\n");
+     create_dynamic_registry_keys();
+-    MESSAGE("OHOS-WB: create_dynamic_registry_keys done\n");
+     create_computer_name_keys();
+-    MESSAGE("OHOS-WB: create_computer_name_keys done\n");
+     wininit();
+-    MESSAGE("OHOS-WB: wininit done\n");
+     pendingRename();
+-    MESSAGE("OHOS-WB: pendingRename done\n");
+ 
+     ProcessWindowsFileProtection();
+-    MESSAGE("OHOS-WB: ProcessWindowsFileProtection done\n");
+     ProcessRunKeys( HKEY_LOCAL_MACHINE, L"RunServicesOnce", TRUE, FALSE );
+-    MESSAGE("OHOS-WB: ProcessRunKeys RunServicesOnce done\n");
+ 
+     if (init || (kill && !restart))
+     {
+         ProcessRunKeys( HKEY_LOCAL_MACHINE, L"RunServices", FALSE, FALSE );
+-        MESSAGE("OHOS-WB: ProcessRunKeys RunServices done\n");
+         start_services_process();
+-        MESSAGE("OHOS-WB: start_services_process done\n");
+-    }
+-    MESSAGE("OHOS-WB: INIT=%d UPD=%d about to update_wineprefix(update=%d)\n", init, update, update);
+-    if (init || update) {
+-        MESSAGE("OHOS-WB: calling update_wineprefix...\n");
+-        update_wineprefix( update );
+-        MESSAGE("OHOS-WB: update_wineprefix done\n");
+     }
++    if (init || update) update_wineprefix( update );
+ 
+     create_volatile_environment_registry_key();
+     create_known_dlls();
+@@ -1963,7 +1936,6 @@ int __cdecl main( int argc, char *argv[] )
+     }
+ 
+     WINE_TRACE("Operation done\n");
+-    MESSAGE("OHOS-WB: all init done, signaling event and exiting\n");
+ 
+     SetEvent( event );
+     return 0;
+diff --git a/server/main.c b/server/main.c
+index a0dc46512fd2..724c7f08e623 100644
+--- a/server/main.c
++++ b/server/main.c
+@@ -249,10 +249,8 @@ static void init_limits(void)
+ 
+ int main( int argc, char *argv[] )
+ {
+-    write(2, "OHOS-WS: main() ENTER\n", 22);
+     setvbuf( stderr, NULL, _IOLBF, 0 );
+     server_argv0 = argv[0];
+-    write(2, "OHOS-WS: parse_options...\n", 26);
+     parse_options( argc, argv, "d::fhk::p::vw", long_options, option_callback );
+ 
+     /* setup temporary handlers before the real signal initialization is done */
+@@ -264,27 +262,16 @@ int main( int argc, char *argv[] )
+     signal( SIGABRT, sigterm_handler );
+     init_limits();
+ 
+-    fprintf(stderr, "OHOS-WS: sock_init...\n");
+     sock_init();
+-    fprintf(stderr, "OHOS-WS: open_master_socket...\n");
+     open_master_socket();
+ 
+-    fprintf(stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
++    if (debug_level) fprintf( stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
+     set_current_time();
+-    fprintf(stderr, "OHOS-WS: init_signals...\n");
+     init_signals();
+-    fprintf(stderr, "OHOS-WS: init_memory...\n");
+     init_memory();
+-    fprintf(stderr, "OHOS-WS: init_directories...\n");
+     init_directories( load_intl_file() );
+-    fprintf(stderr, "OHOS-WS: init_threading...\n");
+     init_threading();
+-    fprintf(stderr, "OHOS-WS: init_registry...\n");
+     init_registry();
+-    fprintf(stderr, "OHOS-WS: master_socket_timeout=%lld (TIMEOUT_INFINITE=%lld)\n",
+-            (long long)master_socket_timeout, (long long)TIMEOUT_INFINITE);
+-    write(2, "OHOS-WS: entering main_loop\n", 29);
+     main_loop();
+-    write(2, "OHOS-WS: main_loop RETURNED!\n", 30);
+     return 0;
+ }
+diff --git a/server/process.c b/server/process.c
+index 8b48a683dca3..f3aa6797662c 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -574,11 +574,9 @@ static void set_process_startup_state( struct process *process, enum startup_sta
+ /* callback for server shutdown */
+ static void server_shutdown_timeout( void *arg )
+ {
+-    write(2, "OHOS-WS: server_shutdown_timeout FIRED\n", 39);
+     shutdown_timeout = NULL;
+     if (!running_processes)
+     {
+-        write(2, "OHOS-WS: no running_processes, closing master socket\n", 53);
+         close_master_socket( 0 );
+         return;
+     }
+@@ -616,10 +614,7 @@ static void process_died( struct process *process )
+     if (!process->is_system)
+     {
+         if (!--user_processes && !shutdown_stage && master_socket_timeout != TIMEOUT_INFINITE)
+-        {
+-            write(2, "OHOS-WS: user_processes->0, scheduling shutdown timeout\n", 55);
+             shutdown_timeout = add_timeout_user( master_socket_timeout, server_shutdown_timeout, NULL );
+-        }
+     }
+     release_object( process );
+     if (!--running_processes && shutdown_stage) close_master_socket( 0 );
+@@ -1854,10 +1849,7 @@ DECL_HANDLER(make_process_system)
+             release_thread_desktop( thread, 0 );
+         process->is_system = 1;
+         if (!--user_processes && !shutdown_stage && master_socket_timeout != TIMEOUT_INFINITE)
+-        {
+-            write(2, "OHOS-WS: user_processes->0 (detach), scheduling shutdown timeout\n", 61);
+             shutdown_timeout = add_timeout_user( master_socket_timeout, server_shutdown_timeout, NULL );
+-        }
+     }
+     release_object( process );
+ }
+

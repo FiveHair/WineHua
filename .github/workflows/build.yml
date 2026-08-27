@@ -442,6 +442,207 @@ jobs:
           retention-days: 7
 
   # ============================================================
+  # Proton 引擎 flavor: wine-data.zip 内是 ValveSoftware/wine +
+  # patches/wine-ohos 补丁系列构建的引擎, 设备端契约与 wine flavor 一致。
+  # 门控: 补丁系列未生成 (patches/wine-ohos/*.patch 不存在) 时整 job 跳过 —
+  # 系列由维护者本地运行 scripts/gen-wine-ohos-patches.sh 生成后提交。
+  # ============================================================
+  build-proton:
+    name: make NATIVE_ARCH=arm64-v8a ENGINE=proton hap
+    runs-on: ubuntu-26.04
+    timeout-minutes: 240
+    if: ${{ hashFiles('patches/wine-ohos/*.patch') != '' }}
+
+    defaults:
+      run:
+        shell: bash
+
+    container:
+      image: ghcr.io/panedioic/winehua-buildenv:test
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Configure git for private submodules
+        run: |
+          git config --global --add safe.directory '*'
+          git config --global \
+            url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf \
+            "git@github.com:"
+          git config --global --add \
+            url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf \
+            "https://github.com/"
+
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure nested graphics submodules
+        run: |
+          set -euo pipefail
+          git submodule update --init --recursive
+          test -f thirdparty/vkd3d-proton/subprojects/Vulkan-Headers/include/vulkan/vulkan.h
+
+      - name: Stub sign.py (unsigned build)
+        run: |
+          cat > sign.py <<'PY'
+          #!/usr/bin/env python3
+          import shutil, sys, os
+          src, dst = sys.argv[1], sys.argv[2]
+          os.makedirs(os.path.dirname(dst), exist_ok=True)
+          shutil.copy(src, dst)
+          print(f"[sign-stub] copied {src} -> {dst} (UNSIGNED)")
+          PY
+          chmod +x sign.py
+
+      - name: Provision unsigned build-profile.json5
+        run: |
+          cat > build-profile.json5 <<'JSON5'
+          {
+            "app": {
+              "signingConfigs": [],
+              "products": [
+                {
+                  "name": "default",
+                  "targetSdkVersion": "6.1.0(23)",
+                  "compatibleSdkVersion": "6.1.0(23)",
+                  "runtimeOS": "HarmonyOS",
+                  "buildOption": {
+                    "nativeCompiler": "BiSheng",
+                    "strictMode": {
+                      "caseSensitiveCheck": true,
+                      "useNormalizedOHMUrl": true
+                    }
+                  }
+                }
+              ],
+              "buildModeSet": [
+                { "name": "debug" },
+                { "name": "release" }
+              ]
+            },
+            "modules": [
+              {
+                "name": "entry",
+                "srcPath": "./entry",
+                "targets": [
+                  {
+                    "name": "default",
+                    "applyToProducts": ["default"]
+                  }
+                ]
+              }
+            ]
+          }
+          JSON5
+          echo "[ci] wrote unsigned build-profile.json5 (signingConfigs empty)"
+
+      - name: Build Proton HAP
+        env:
+          NATIVE_ARCH: arm64-v8a
+          ENGINE: proton
+          BUILD_GUEST_GFX: '1'
+          BUILD_GUEST_VULKAN: '1'
+          BUILD_WINE_MONO: '1'
+        run: |
+          set -euxo pipefail
+          make NATIVE_ARCH=arm64-v8a ENGINE=proton hap
+
+      - name: Locate artifacts
+        id: art
+        run: |
+          set -eux
+          out_dir=entry/build/default/outputs/default
+          ls -lh "$out_dir"
+          if [ -f "$out_dir/entry-default-unsigned.hap" ]; then
+            echo "hap=$out_dir/entry-default-unsigned.hap" >> "$GITHUB_OUTPUT"
+          else
+            echo "hap=$out_dir/entry-default-signed.hap" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 与 wine job 同一套 payload 契约校验, 另断言 manifest engine=proton
+      # (防止 ENGINE 路由失效、HAP 里装进 wine 引擎而不自知)。
+      - name: Verify embedded Proton runtime in HAP
+        env:
+          HAP_PATH: ${{ steps.art.outputs.hap }}
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import io
+          import json
+          import os
+          import struct
+          import zipfile
+
+          hap_path = os.environ["HAP_PATH"]
+          with zipfile.ZipFile(hap_path) as hap:
+              payload = hap.read("resources/rawfile/wine-data.zip")
+              runtime_manifest = json.loads(
+                  hap.read("resources/rawfile/wine-runtime-manifest.json")
+              )
+
+          assert runtime_manifest["engine"] == "proton", runtime_manifest
+          payload_sha = hashlib.sha256(payload).hexdigest()
+          assert runtime_manifest["payloadSha256"] == payload_sha, (
+              runtime_manifest["payloadSha256"], payload_sha
+          )
+
+          with zipfile.ZipFile(io.BytesIO(payload)) as wine_data:
+              # OHOS 适配关键件必须在 Proton 引擎产物中同样存在:
+              # wayland 驱动 / ohos 音频驱动 / 私有 swapchain 的 win32u /
+              # 加载器与 wineserver 入口
+              for name in (
+                  "bin/x86_64-unix/winewayland.so",
+                  "bin/x86_64-unix/wineohos.so",
+                  "bin/x86_64-unix/win32u.so",
+                  "bin/ntdll.so",
+                  "share/wine/wine.inf",
+              ):
+                  blob = wine_data.read(name)
+                  assert blob, name
+                  print(f"[proton] {name}: size={len(blob)}")
+              for name, expected_machine in (
+                  ("bin/x86_64-windows/d3d11.dll", 0x8664),
+                  ("bin/i386-windows/d3d11.dll", 0x014C),
+              ):
+                  image = wine_data.read(name)
+                  assert len(image) > 4096, (name, len(image))
+                  assert image[:2] == b"MZ", name
+                  pe_offset = struct.unpack_from("<I", image, 0x3C)[0]
+                  assert image[pe_offset:pe_offset + 4] == b"PE\0\0", name
+                  machine = struct.unpack_from("<H", image, pe_offset + 4)[0]
+                  assert machine == expected_machine, (name, hex(machine))
+                  print(f"[proton] {name}: machine={machine:#06x} size={len(image)}")
+          print(f"[proton] wine-data.zip sha256={payload_sha}")
+          PY
+
+      - name: Upload HAP
+        uses: actions/upload-artifact@v4
+        with:
+          name: WineHua-proton-arm64-v8a-unsigned-${{ github.sha }}
+          path: ${{ steps.art.outputs.hap }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proton-build-logs-${{ github.sha }}
+          path: |
+            build/**/meson-logs/**
+            build/**/CMakeFiles/CMakeOutput.log
+            build/**/CMakeFiles/CMakeError.log
+            build/**/config.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ============================================================
   # Release job: 仅在推 tag 或手动指定 release_tag 时运行
   # ============================================================
   release:

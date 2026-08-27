@@ -31,6 +31,7 @@
 
 ### 构建
 - **[BUILD_GUIDE.md](BUILD_GUIDE.md)** — 构建步骤、产物说明
+- **[PROTON_ENGINE.md](PROTON_ENGINE.md)** — Proton 引擎 flavor（`ENGINE=proton`：bootstrap 流程 / OHOS 补丁系列 / 与 wine flavor 的差异 / 已知限制）
 - **[BUILD_ENV.md](BUILD_ENV.md)** — 从零搭建构建环境
 
 ### 平台限制与已知问题

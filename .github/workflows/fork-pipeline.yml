@@ -1,0 +1,209 @@
+# .github/workflows/fork-pipeline.yml
+# Fork 自包含流水线测试 — 不依赖私有 ghcr buildenv 镜像与登录态 SDK。
+#
+# 与上游 build.yml 的差异:
+#   - 无 container (上游用私有 ghcr.io/panedioic/winehua-buildenv:test,
+#     fork 的 GITHUB_TOKEN 无权拉取); 依赖直接 apt 安装 (列表对齐
+#     ci/Dockerfile.buildenv)
+#   - OHOS SDK 用 OpenHarmony 公开镜像 (repo.huaweicloud.com) 的
+#     6.1-Release linux 部分, 解出 native/llvm + sysroot 供交叉编译
+#   - 只构建引擎链路 (deps + wine / proton), 不做 hvigor HAP 打包
+#     (command-line-tools 不公开, 且 HAP 链路未被本次改动触碰)
+#   - 触发: push 到任意分支 (build.yml 只认 master/main-ui, 不会双跑)
+#
+# 验证目标 (docs/PROTON_ENGINE.md 的改动面):
+#   engine-wine   — build_engine.sh 重构后 wine flavor 全链路不回归
+#   engine-proton — build_proton.sh bootstrap (ValveSoftware/wine +
+#                   patches/wine-ohos 系列) + 引擎交叉编译
+name: Fork engine pipeline
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  # 精简: guest 图形/Vulkan bundle 与 mono 均不在引擎链路改动面内
+  BUILD_GUEST_GFX: '0'
+  BUILD_GUEST_VULKAN: '0'
+  BUILD_WINE_MONO: '0'
+  OHOS_SDK_MIRROR: https://repo.huaweicloud.com/openharmony/os/6.1-Release/ohos-sdk-windows_linux-public.tar.gz
+
+jobs:
+  engine-wine:
+    name: make deps wine (wine flavor)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install build dependencies (mirror of ci/Dockerfile.buildenv)
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build meson \
+            bison flex autoconf automake libtool libltdl-dev \
+            pkgconf zip git file python3 python3-pip glslang-tools \
+            spirv-tools gettext curl wget texinfo \
+            libexpat1-dev libxml2-dev libffi-dev libfreetype-dev \
+            gcc-mingw-w64-i686 g++-mingw-w64-i686 \
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+            mingw-w64-tools default-jdk
+          pipx install pyyaml mako markupsafe 2>/dev/null || \
+            pip3 install --break-system-packages pyyaml mako markupsafe
+          # OHOS SDK 的 ld.lld 依赖 libxml2.so.2, Ubuntu 26.04 只有 .so.16
+          # (与 ci/Dockerfile.buildenv 相同的兼容处理)
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libxml2.so.2 ]; then
+            newlib="$(ls /usr/lib/x86_64-linux-gnu/libxml2.so.* | head -1)"
+            sudo ln -sf "$newlib" /usr/lib/x86_64-linux-gnu/libxml2.so.2
+          fi
+          sudo ldconfig
+
+      - name: Fetch OpenHarmony SDK (public mirror)
+        run: |
+          set -euxo pipefail
+          curl --fail --location --retry 3 --output /tmp/ohos-sdk.tar.gz "$OHOS_SDK_MIRROR"
+          # 外层 tar 按组件分 zip (linux/native-linux-x64-*.zip 是交叉编译工具链),
+          # 只取 linux 侧再二次解压 native 组件
+          mkdir -p "$HOME/ohos-sdk" /tmp/ohos-sdk-outer
+          tar -xzf /tmp/ohos-sdk.tar.gz -C /tmp/ohos-sdk-outer linux
+          rm -f /tmp/ohos-sdk.tar.gz
+          native_zip="$(find /tmp/ohos-sdk-outer -maxdepth 2 -name 'native-linux-x64-*.zip' -type f | head -1)"
+          [ -n "$native_zip" ] || { echo "ERROR: native SDK zip missing"; find /tmp/ohos-sdk-outer -maxdepth 2 -type f | head -20; exit 1; }
+          unzip -q "$native_zip" -d "$HOME/ohos-sdk"
+          rm -rf /tmp/ohos-sdk-outer
+          # native zip 解出 native/{llvm,sysroot,...}; env.sh 期望 $OHOS_SDK/native/llvm/bin/clang
+          clang="$HOME/ohos-sdk/native/llvm/bin/clang"
+          [ -x "$clang" ] || { echo "ERROR: native clang not found at $clang"; exit 1; }
+          echo "OHOS_SDK=$HOME/ohos-sdk" >> "$GITHUB_ENV"
+          "$clang" --version | head -1
+          test -f "$HOME/ohos-sdk/native/sysroot/usr/lib/x86_64-linux-ohos/libc.so"
+
+      - name: Build wine engine (deps + cross build + wineserver)
+        run: |
+          set -euxo pipefail
+          sudo env "PATH=$PATH" "HOME=$HOME" "OHOS_SDK=$OHOS_SDK" make NATIVE_ARCH=arm64-v8a deps wine
+
+      - name: Verify engine artifacts
+        run: |
+          set -euxo pipefail
+          for f in \
+            build/wine-native/tools/winegcc/winegcc \
+            build/wine-ohos/dlls/ntdll/ntdll.so \
+            build/wine-ohos/dlls/win32u/win32u.so \
+            build/wine-ohos/dlls/winewayland.drv/winewayland.so \
+            build/wine-ohos/dlls/wineohos.drv/wineohos.so \
+            build/wine-ohos/loader/wine \
+            build/wine_server/wineserver; do
+            test -s "$f"
+            file "$f"
+          done
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-wine-logs-${{ github.sha }}
+          path: |
+            build/**/meson-logs/**
+            build/**/CMakeFiles/CMakeOutput.log
+            build/**/CMakeFiles/CMakeError.log
+            build/**/config.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  engine-proton:
+    name: make deps wine (proton flavor)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install build dependencies (mirror of ci/Dockerfile.buildenv)
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build meson \
+            bison flex autoconf automake libtool libltdl-dev \
+            pkgconf zip git file python3 python3-pip glslang-tools \
+            spirv-tools gettext curl wget texinfo \
+            libexpat1-dev libxml2-dev libffi-dev libfreetype-dev \
+            gcc-mingw-w64-i686 g++-mingw-w64-i686 \
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+            mingw-w64-tools default-jdk
+          pipx install pyyaml mako markupsafe 2>/dev/null || \
+            pip3 install --break-system-packages pyyaml mako markupsafe
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libxml2.so.2 ]; then
+            newlib="$(ls /usr/lib/x86_64-linux-gnu/libxml2.so.* | head -1)"
+            sudo ln -sf "$newlib" /usr/lib/x86_64-linux-gnu/libxml2.so.2
+          fi
+          sudo ldconfig
+
+      - name: Fetch OpenHarmony SDK (public mirror)
+        run: |
+          set -euxo pipefail
+          curl --fail --location --retry 3 --output /tmp/ohos-sdk.tar.gz "$OHOS_SDK_MIRROR"
+          # 外层 tar 按组件分 zip (linux/native-linux-x64-*.zip 是交叉编译工具链),
+          # 只取 linux 侧再二次解压 native 组件
+          mkdir -p "$HOME/ohos-sdk" /tmp/ohos-sdk-outer
+          tar -xzf /tmp/ohos-sdk.tar.gz -C /tmp/ohos-sdk-outer linux
+          rm -f /tmp/ohos-sdk.tar.gz
+          native_zip="$(find /tmp/ohos-sdk-outer -maxdepth 2 -name 'native-linux-x64-*.zip' -type f | head -1)"
+          [ -n "$native_zip" ] || { echo "ERROR: native SDK zip missing"; find /tmp/ohos-sdk-outer -maxdepth 2 -type f | head -20; exit 1; }
+          unzip -q "$native_zip" -d "$HOME/ohos-sdk"
+          rm -rf /tmp/ohos-sdk-outer
+          # native zip 解出 native/{llvm,sysroot,...}; env.sh 期望 $OHOS_SDK/native/llvm/bin/clang
+          clang="$HOME/ohos-sdk/native/llvm/bin/clang"
+          [ -x "$clang" ] || { echo "ERROR: native clang not found at $clang"; exit 1; }
+          echo "OHOS_SDK=$HOME/ohos-sdk" >> "$GITHUB_ENV"
+          "$clang" --version | head -1
+          test -f "$HOME/ohos-sdk/native/sysroot/usr/lib/x86_64-linux-ohos/libc.so"
+
+      - name: Build proton engine (bootstrap + patch series + cross build)
+        run: |
+          set -euxo pipefail
+          sudo env "PATH=$PATH" "HOME=$HOME" "OHOS_SDK=$OHOS_SDK" make NATIVE_ARCH=arm64-v8a ENGINE=proton deps wine
+
+      - name: Verify proton engine artifacts
+        run: |
+          set -euxo pipefail
+          # bootstrap 产物: 上游 clone + 补丁系列已应用
+          test -f build/proton-source/.winehua-source-id
+          cat build/proton-source/.winehua-source-id
+          grep -q 'WineHua\|wineohos\|OHOS' build/proton-source/configure.ac \
+            || { echo 'ERROR: patch series not applied (configure.ac lacks OHOS modules)'; exit 1; }
+          for f in \
+            build/proton-native/tools/winegcc/winegcc \
+            build/proton-ohos/dlls/ntdll/ntdll.so \
+            build/proton-ohos/dlls/win32u/win32u.so \
+            build/proton-ohos/dlls/winewayland.drv/winewayland.so \
+            build/proton-ohos/dlls/wineohos.drv/wineohos.so \
+            build/proton-ohos/loader/wine \
+            build/proton_server/wineserver; do
+            test -s "$f"
+            file "$f"
+          done
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-proton-logs-${{ github.sha }}
+          path: |
+            build/**/meson-logs/**
+            build/**/CMakeFiles/CMakeOutput.log
+            build/**/CMakeFiles/CMakeError.log
+            build/**/config.log
+          if-no-files-found: ignore
+          retention-days: 7

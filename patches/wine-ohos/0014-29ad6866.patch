@@ -1,0 +1,38 @@
+From 29ad6866b5fe249918e97e4fa7912da37ff236d9 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sun, 21 Jun 2026 01:40:56 +0800
+Subject: [PATCH 014/104] =?UTF-8?q?=E4=BF=AE=E5=A4=8D:=20PAD=5FMODE=20?=
+ =?UTF-8?q?=E5=85=81=E8=AE=B8=E6=A1=8C=E9=9D=A2=E7=AA=97=E5=8F=A3=E5=88=9B?=
+ =?UTF-8?q?=E5=BB=BA=20wayland=20surface=20(subsurfacing=20=E6=A0=B9)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+winewayland.drv/window.c: 桌面窗口原本被排除（无 Wayland surface），
+子窗口找不到父 surface 只能独立成为 xdg_toplevel。PAD_MODE 下移除
+此限制，桌面窗口获得 surface 后所有子窗口自动变为 wl_subsurface，
+位置由 Wine 驱动通过 wl_subsurface_set_position 管理。
+---
+ dlls/winewayland.drv/window.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index 88eee3421d72..366550fd5830 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -62,10 +62,13 @@ static struct wayland_win_data *wayland_win_data_create(HWND hwnd, const struct
+     struct rb_entry *rb_entry;
+     HWND parent;
+ 
+-    /* Don't create win data for desktop or HWND_MESSAGE windows. */
++    /* PAD_MODE: 桌面窗口需要 wayland surface 作为 subsurfacing 的根。
++     * 允许所有窗口（包括桌面/HWND_MESSAGE）创建 win_data。 */
++#ifndef PAD_MODE
+     if (!(parent = NtUserGetAncestor(hwnd, GA_PARENT))) return NULL;
+     if (parent != NtUserGetDesktopWindow() && !NtUserGetAncestor(parent, GA_PARENT))
+         return NULL;
++#endif
+ 
+     if (!(data = calloc(1, sizeof(*data)))) return NULL;
+ 
+

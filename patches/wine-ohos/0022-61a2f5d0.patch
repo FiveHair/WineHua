@@ -1,0 +1,2369 @@
+From 61a2f5d06b835dd5fe7c8993db5b6392c342c4ae Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Sat, 27 Jun 2026 01:23:28 +0800
+Subject: [PATCH 022/104] =?UTF-8?q?OHOS=20host-broker=20=E9=9F=B3=E9=A2=91?=
+ =?UTF-8?q?=E5=90=8E=E7=AB=AF=20+=20smoke=20test?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- wineohos.drv/ohos.c: mmdevapi 后端, audio endpoint 管理
+- wineohos.drv/ohos_audio_client.c: IPC 客户端, bootstrap 握手
+- mmdevapi/client.c: 音频客户端适配
+- programs/winehua_audio_smoke: 音频烟雾测试 (WAV + MP3)
+- configure.ac/configure: 注册 wineohos.drv + audio_smoke
+- .gitignore: 忽略 autom4te.cache
+---
+ .gitignore                               |    1 +
+ configure                                |    4 +
+ configure.ac                             |    2 +
+ dlls/mmdevapi/client.c                   |   45 +-
+ dlls/mmdevapi/main.c                     |    2 +-
+ dlls/wineohos.drv/Makefile.in            |    8 +
+ dlls/wineohos.drv/ohos.c                 | 1288 ++++++++++++++++++++++
+ dlls/wineohos.drv/ohos_audio_client.c    |  390 +++++++
+ dlls/wineohos.drv/ohos_audio_client.h    |   46 +
+ programs/winehua_audio_smoke/Makefile.in |    7 +
+ programs/winehua_audio_smoke/main.c      |  399 +++++++
+ 11 files changed, 2177 insertions(+), 15 deletions(-)
+ create mode 100644 dlls/wineohos.drv/Makefile.in
+ create mode 100644 dlls/wineohos.drv/ohos.c
+ create mode 100644 dlls/wineohos.drv/ohos_audio_client.c
+ create mode 100644 dlls/wineohos.drv/ohos_audio_client.h
+ create mode 100644 programs/winehua_audio_smoke/Makefile.in
+ create mode 100644 programs/winehua_audio_smoke/main.c
+
+diff --git a/.gitignore b/.gitignore
+index 618d1cd36e47..618d00bd30ef 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -13,3 +13,4 @@ build-ohos-arm64/
+ # Editor
+ *.swp
+ *~
++autom4te.cache/
+diff --git a/configure b/configure
+index bfef736053bf..c73389888bf2 100755
+--- a/configure
++++ b/configure
+@@ -1564,6 +1564,7 @@ enable_winegstreamer
+ enable_winehid_sys
+ enable_winemac_drv
+ enable_winemapi
++enable_wineohos_drv
+ enable_wineoss_drv
+ enable_wineps_drv
+ enable_winepulse_drv
+@@ -1803,6 +1804,7 @@ enable_winefile
+ enable_winemenubuilder
+ enable_winemine
+ enable_winemsibuilder
++enable_winehua_audio_smoke
+ enable_winepath
+ enable_winetest
+ enable_winevdm
+@@ -23638,6 +23640,7 @@ wine_fn_config_makefile dlls/winegstreamer enable_winegstreamer
+ wine_fn_config_makefile dlls/winehid.sys enable_winehid_sys
+ wine_fn_config_makefile dlls/winemac.drv enable_winemac_drv
+ wine_fn_config_makefile dlls/winemapi enable_winemapi
++wine_fn_config_makefile dlls/wineohos.drv enable_wineohos_drv
+ wine_fn_config_makefile dlls/wineoss.drv enable_wineoss_drv
+ wine_fn_config_makefile dlls/wineps.drv enable_wineps_drv
+ wine_fn_config_makefile dlls/wineps16.drv16 enable_win16
+@@ -23926,6 +23929,7 @@ wine_fn_config_makefile programs/winefile enable_winefile
+ wine_fn_config_makefile programs/winemenubuilder enable_winemenubuilder
+ wine_fn_config_makefile programs/winemine enable_winemine
+ wine_fn_config_makefile programs/winemsibuilder enable_winemsibuilder
++wine_fn_config_makefile programs/winehua_audio_smoke enable_winehua_audio_smoke
+ wine_fn_config_makefile programs/winepath enable_winepath
+ wine_fn_config_makefile programs/winetest enable_winetest
+ wine_fn_config_makefile programs/winevdm enable_winevdm
+diff --git a/configure.ac b/configure.ac
+index d597bad37504..2931c8ffdb12 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -3373,6 +3373,7 @@ WINE_CONFIG_MAKEFILE(dlls/winegstreamer)
+ WINE_CONFIG_MAKEFILE(dlls/winehid.sys)
+ WINE_CONFIG_MAKEFILE(dlls/winemac.drv)
+ WINE_CONFIG_MAKEFILE(dlls/winemapi)
++WINE_CONFIG_MAKEFILE(dlls/wineohos.drv)
+ WINE_CONFIG_MAKEFILE(dlls/wineoss.drv)
+ WINE_CONFIG_MAKEFILE(dlls/wineps.drv)
+ WINE_CONFIG_MAKEFILE(dlls/wineps16.drv16)
+@@ -3661,6 +3662,7 @@ WINE_CONFIG_MAKEFILE(programs/winefile)
+ WINE_CONFIG_MAKEFILE(programs/winemenubuilder)
+ WINE_CONFIG_MAKEFILE(programs/winemine)
+ WINE_CONFIG_MAKEFILE(programs/winemsibuilder)
++WINE_CONFIG_MAKEFILE(programs/winehua_audio_smoke)
+ WINE_CONFIG_MAKEFILE(programs/winepath)
+ WINE_CONFIG_MAKEFILE(programs/winetest)
+ WINE_CONFIG_MAKEFILE(programs/winevdm)
+diff --git a/dlls/mmdevapi/client.c b/dlls/mmdevapi/client.c
+index d4d3e82b4665..6e4e13bdab36 100644
+--- a/dlls/mmdevapi/client.c
++++ b/dlls/mmdevapi/client.c
+@@ -358,7 +358,7 @@ HRESULT validate_fmt(const WAVEFORMATEXTENSIBLE *fmt, BOOL compatible)
+     {
+         if (fmt2.Format.wBitsPerSample != 32 && fmt2.Format.wBitsPerSample != 64)
+             ret = E_INVALIDARG;
+-        else if (fmt2.Format.wBitsPerSample != 32)
++        else if (fmt2.Format.wBitsPerSample != 32 && !compatible)
+             ret = AUDCLNT_E_UNSUPPORTED_FORMAT;
+         else if (fmt2.Samples.wValidBitsPerSample != fmt2.Format.wBitsPerSample)
+             ret = AUDCLNT_E_UNSUPPORTED_FORMAT;
+@@ -374,6 +374,16 @@ HRESULT validate_fmt(const WAVEFORMATEXTENSIBLE *fmt, BOOL compatible)
+     return ret;
+ }
+ 
++static BOOL backend_allows_shared_mode_conversion(void)
++{
++    static const WCHAR wineohos_driverW[] = L"wineohos.drv";
++
++    /* The OHOS backend always mixes through a fixed 48 kHz stereo s16 broker.
++     * Let the backend accept common shared-mode client formats and normalize
++     * them internally instead of rejecting them before create_stream(). */
++    return drvs.module_name[0] && !wcsicmp(drvs.module_name, wineohos_driverW);
++}
++
+ static HRESULT stream_init(struct audio_client *client, const BOOLEAN force_def_period,
+                            const AUDCLNT_SHAREMODE mode, const DWORD flags,
+                            REFERENCE_TIME duration, REFERENCE_TIME period,
+@@ -421,17 +431,19 @@ static HRESULT stream_init(struct audio_client *client, const BOOLEAN force_def_
+     } else {
+         WAVEFORMATEX *mix_fmt;
+ 
+-        if (FAILED(hr = IAudioClient3_GetMixFormat(&client->IAudioClient3_iface, &mix_fmt)))
+-            return hr;
+-
+-        if (flags & AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM)
++        if (flags & AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM || backend_allows_shared_mode_conversion())
+             compatible = TRUE;
+-        else if (flags & AUDCLNT_STREAMFLAGS_RATEADJUST)
+-            compatible = fmt->nChannels == mix_fmt->nChannels;
+-        else
+-            compatible = fmt->nSamplesPerSec == mix_fmt->nSamplesPerSec && fmt->nChannels == mix_fmt->nChannels;
++        else {
++            if (FAILED(hr = IAudioClient3_GetMixFormat(&client->IAudioClient3_iface, &mix_fmt)))
++                return hr;
++
++            if (flags & AUDCLNT_STREAMFLAGS_RATEADJUST)
++                compatible = fmt->nChannels == mix_fmt->nChannels;
++            else
++                compatible = fmt->nSamplesPerSec == mix_fmt->nSamplesPerSec && fmt->nChannels == mix_fmt->nChannels;
+ 
+-        CoTaskMemFree(mix_fmt);
++            CoTaskMemFree(mix_fmt);
++        }
+     }
+ 
+     hr = validate_fmt((const WAVEFORMATEXTENSIBLE *)fmt, compatible);
+@@ -816,12 +828,17 @@ static HRESULT WINAPI client_IsFormatSupported(IAudioClient3 *iface, AUDCLNT_SHA
+     } else {
+         WAVEFORMATEX *mix_fmt;
+ 
+-        if (FAILED(hr = IAudioClient3_GetMixFormat(iface, &mix_fmt)))
+-            return hr;
++        if (backend_allows_shared_mode_conversion())
++            compatible = TRUE;
++        else
++        {
++            if (FAILED(hr = IAudioClient3_GetMixFormat(iface, &mix_fmt)))
++                return hr;
+ 
+-        compatible = fmt->nSamplesPerSec == mix_fmt->nSamplesPerSec && fmt->nChannels == mix_fmt->nChannels;
++            compatible = fmt->nSamplesPerSec == mix_fmt->nSamplesPerSec && fmt->nChannels == mix_fmt->nChannels;
+ 
+-        CoTaskMemFree(mix_fmt);
++            CoTaskMemFree(mix_fmt);
++        }
+     }
+ 
+     hr = validate_fmt((const WAVEFORMATEXTENSIBLE *)fmt, TRUE);
+diff --git a/dlls/mmdevapi/main.c b/dlls/mmdevapi/main.c
+index 70eace863e15..28c893782411 100644
+--- a/dlls/mmdevapi/main.c
++++ b/dlls/mmdevapi/main.c
+@@ -120,7 +120,7 @@ static BOOL load_driver(const WCHAR *name, DriverFuncs *driver)
+ 
+ static BOOL WINAPI init_driver(INIT_ONCE *once, void *param, void **context)
+ {
+-    static WCHAR default_list[] = L"pulse,alsa,oss,coreaudio";
++    static WCHAR default_list[] = L"ohos,pulse,alsa,oss,coreaudio";
+     DriverFuncs driver;
+     HKEY key;
+     WCHAR reg_list[256], *p, *next, *driver_list = default_list;
+diff --git a/dlls/wineohos.drv/Makefile.in b/dlls/wineohos.drv/Makefile.in
+new file mode 100644
+index 000000000000..521f373d1cbf
+--- /dev/null
++++ b/dlls/wineohos.drv/Makefile.in
+@@ -0,0 +1,8 @@
++EXTRAINCL    = -I$(srcdir)/../../../../shared
++
++UNIXLIB       = wineohos.so
++UNIX_LIBS     = $(PTHREAD_LIBS)
++
++SOURCES = \
++	ohos_audio_client.c \
++	ohos.c
+diff --git a/dlls/wineohos.drv/ohos.c b/dlls/wineohos.drv/ohos.c
+new file mode 100644
+index 000000000000..86a49d591767
+--- /dev/null
++++ b/dlls/wineohos.drv/ohos.c
+@@ -0,0 +1,1288 @@
++/*
++ * OHOS audio driver (unixlib)
++ *
++ * Copyright 2026 OpenAI
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include <errno.h>
++#include <pthread.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "ntstatus.h"
++#include "winternl.h"
++
++#include "mmdeviceapi.h"
++#include "initguid.h"
++#include "audioclient.h"
++#include "mmddk.h"
++
++#include "wine/debug.h"
++#include "wine/unixlib.h"
++
++#include "../mmdevapi/unixlib.h"
++#include "ohos_audio_client.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(ohosaudio);
++
++static const REFERENCE_TIME default_period = 100000; /* 10 ms */
++static const REFERENCE_TIME minimum_period = 50000;  /* 5 ms */
++
++static const WCHAR render_device_name[] =
++{
++    'O','H','O','S',' ','A','u','d','i','o',' ','S','p','e','a','k','e','r',0
++};
++static const char render_device_id[] = "default";
++#define MIX_FRAMES_ERROR (~0u)
++
++struct ohos_stream
++{
++    OhosAudioClient *client;
++    OhosAudioClientStream broker_stream;
++    WAVEFORMATEXTENSIBLE *fmt;
++    DWORD flags;
++    AUDCLNT_SHAREMODE share;
++    HANDLE event;
++    BOOL started;
++    BOOL stop_notify_thread;
++    BOOL notify_thread_started;
++    pthread_t notify_thread;
++    UINT32 client_period_frames;
++    UINT32 client_buffer_frames;
++    UINT32 client_bytes_per_frame;
++    UINT32 mix_period_frames;
++    UINT32 mix_buffer_frames;
++    UINT32 mix_bytes_per_frame;
++    UINT32 locked_frames;
++    UINT32 mix_buffer_capacity_frames;
++    UINT64 client_frames_submitted;
++    UINT64 last_position;
++    UINT64 client_input_frames;
++    UINT64 mix_output_frames;
++    float channel_volume[2];
++    float prev_frame[2];
++    BOOL have_prev_frame;
++    BYTE *local_buffer;
++    INT16 *mix_buffer;
++    pthread_mutex_t lock;
++};
++
++static NTSTATUS ohos_not_implemented(void *args)
++{
++    return STATUS_SUCCESS;
++}
++
++static struct ohos_stream *handle_get_stream(stream_handle handle)
++{
++    return (struct ohos_stream *)(UINT_PTR)handle;
++}
++
++static void ohos_lock(struct ohos_stream *stream)
++{
++    pthread_mutex_lock(&stream->lock);
++}
++
++static void ohos_unlock(struct ohos_stream *stream)
++{
++    pthread_mutex_unlock(&stream->lock);
++}
++
++static NTSTATUS ohos_unlock_result(struct ohos_stream *stream, HRESULT *result, HRESULT value)
++{
++    *result = value;
++    ohos_unlock(stream);
++    return STATUS_SUCCESS;
++}
++
++static UINT64 query_qpc_100ns(void)
++{
++    LARGE_INTEGER stamp, freq;
++
++    NtQueryPerformanceCounter(&stamp, &freq);
++    return (stamp.QuadPart * (UINT64)10000000) / freq.QuadPart;
++}
++
++static UINT32 get_channel_mask(UINT32 channels)
++{
++    switch (channels)
++    {
++    case 1:
++        return KSAUDIO_SPEAKER_MONO;
++    case 2:
++        return KSAUDIO_SPEAKER_STEREO;
++    default:
++        return 0;
++    }
++}
++
++static BOOL is_float_format(const WAVEFORMATEX *fmt)
++{
++    const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)fmt;
++
++    if (fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) return TRUE;
++    return fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++           IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
++}
++
++static BOOL is_pcm_format(const WAVEFORMATEX *fmt)
++{
++    const WAVEFORMATEXTENSIBLE *fmtex = (const WAVEFORMATEXTENSIBLE *)fmt;
++
++    if (fmt->wFormatTag == WAVE_FORMAT_PCM) return TRUE;
++    return fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++           IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM);
++}
++
++static UINT16 get_valid_bits_per_sample(const WAVEFORMATEX *fmt)
++{
++    if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
++        return ((const WAVEFORMATEXTENSIBLE *)fmt)->Samples.wValidBitsPerSample;
++    return fmt->wBitsPerSample;
++}
++
++static BOOL is_supported_sample_rate(UINT32 rate)
++{
++    /* The broker always mixes to 48 kHz stereo s16, so we can accept
++     * common shared-mode client streams and resample them on either side
++     * of the mix rate instead of rejecting them up front. */
++    return rate >= 8000 && rate <= 192000;
++}
++
++static HRESULT validate_format(const WAVEFORMATEX *fmt)
++{
++    UINT16 valid_bits;
++
++    if (!fmt) return E_POINTER;
++    if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
++        fmt->cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX))
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++    if (fmt->nChannels != 1 && fmt->nChannels != 2)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++    if (!is_supported_sample_rate(fmt->nSamplesPerSec))
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++    valid_bits = get_valid_bits_per_sample(fmt);
++    if (!valid_bits || valid_bits > fmt->wBitsPerSample)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++
++    if (is_pcm_format(fmt))
++    {
++        if (fmt->wBitsPerSample != 8 && fmt->wBitsPerSample != 16 &&
++            fmt->wBitsPerSample != 24 && fmt->wBitsPerSample != 32)
++            return AUDCLNT_E_UNSUPPORTED_FORMAT;
++        if (fmt->wBitsPerSample == 32)
++        {
++            if (valid_bits != 24 && valid_bits != 32)
++                return AUDCLNT_E_UNSUPPORTED_FORMAT;
++        }
++        else if (valid_bits != fmt->wBitsPerSample)
++            return AUDCLNT_E_UNSUPPORTED_FORMAT;
++    }
++    else if (is_float_format(fmt))
++    {
++        if (fmt->wBitsPerSample != 32 && fmt->wBitsPerSample != 64)
++            return AUDCLNT_E_UNSUPPORTED_FORMAT;
++        if (valid_bits != fmt->wBitsPerSample)
++            return AUDCLNT_E_UNSUPPORTED_FORMAT;
++    }
++    else return AUDCLNT_E_UNSUPPORTED_FORMAT;
++
++    if (fmt->nBlockAlign != fmt->nChannels * fmt->wBitsPerSample / 8)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++    if (fmt->nAvgBytesPerSec != fmt->nSamplesPerSec * fmt->nBlockAlign)
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++
++    return S_OK;
++}
++
++static WAVEFORMATEXTENSIBLE *clone_wave_format(const WAVEFORMATEX *fmt)
++{
++    WAVEFORMATEXTENSIBLE *ret;
++
++    if (!(ret = calloc(1, sizeof(*ret)))) return NULL;
++
++    if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
++    {
++        memcpy(ret, fmt, sizeof(*ret));
++        return ret;
++    }
++
++    ret->Format = *fmt;
++    ret->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
++    ret->Format.cbSize = sizeof(*ret) - sizeof(ret->Format);
++    ret->Samples.wValidBitsPerSample = fmt->wBitsPerSample;
++    ret->dwChannelMask = get_channel_mask(fmt->nChannels);
++    ret->SubFormat = is_float_format(fmt) ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
++                                          : KSDATAFORMAT_SUBTYPE_PCM;
++    return ret;
++}
++
++static float read_pcm_u8(const BYTE *src)
++{
++    return ((INT32)src[0] - 128) / 128.0f;
++}
++
++static float read_pcm_s16(const BYTE *src)
++{
++    INT16 sample;
++
++    memcpy(&sample, src, sizeof(sample));
++    return sample / 32768.0f;
++}
++
++static float read_pcm_s24(const BYTE *src)
++{
++    INT32 sample = (INT32)((UINT32)src[0] | ((UINT32)src[1] << 8) | ((UINT32)src[2] << 16));
++
++    if (sample & 0x00800000) sample |= ~0x00ffffff;
++    return sample / 8388608.0f;
++}
++
++static float read_pcm_s32(const BYTE *src)
++{
++    INT32 sample;
++
++    memcpy(&sample, src, sizeof(sample));
++    return (float)((double)sample / 2147483648.0);
++}
++
++static float read_ieee_float32(const BYTE *src)
++{
++    float sample;
++
++    memcpy(&sample, src, sizeof(sample));
++    return sample;
++}
++
++static float read_ieee_float64(const BYTE *src)
++{
++    double sample;
++
++    memcpy(&sample, src, sizeof(sample));
++    return (float)sample;
++}
++
++static INT16 clamp_s16_float(float sample)
++{
++    if (sample > 32767.0f) return 32767;
++    if (sample < -32768.0f) return -32768;
++    return (INT16)sample;
++}
++
++static HRESULT map_broker_error(int err, HRESULT fallback)
++{
++    switch (err < 0 ? -err : err)
++    {
++    case 0:
++        return S_OK;
++    case ENOENT:
++    case ENODEV:
++    case ECONNRESET:
++    case EPIPE:
++        return AUDCLNT_E_SERVICE_NOT_RUNNING;
++    case ENOMEM:
++        return E_OUTOFMEMORY;
++    case EINVAL:
++        return AUDCLNT_E_UNSUPPORTED_FORMAT;
++    case EACCES:
++    case EPERM:
++        return E_ACCESSDENIED;
++    case EBUSY:
++        return AUDCLNT_E_BUFFER_TOO_LARGE;
++    default:
++        return fallback;
++    }
++}
++
++static BOOL probe_broker_available(void)
++{
++    OhosAudioClient *client = NULL;
++    int ret = ohos_audio_client_connect(&client);
++
++    if (ret != 0)
++    {
++        TRACE("failed to connect audio broker: %d\n", ret);
++        return FALSE;
++    }
++
++    ohos_audio_client_disconnect(client);
++    return TRUE;
++}
++
++static UINT32 client_frames_to_mix_frames_ceil(const struct ohos_stream *stream, UINT32 client_frames)
++{
++    UINT32 rate = stream->fmt->Format.nSamplesPerSec;
++
++    if (!client_frames) return 0;
++    if (rate == 48000) return client_frames;
++    return (UINT32)(((UINT64)client_frames * 48000 + rate - 1) / rate);
++}
++
++static UINT32 mix_frames_to_client_frames_floor(const struct ohos_stream *stream, UINT32 mix_frames)
++{
++    UINT32 rate = stream->fmt->Format.nSamplesPerSec;
++
++    if (!mix_frames) return 0;
++    if (rate == 48000) return mix_frames;
++    return (UINT32)(((UINT64)mix_frames * rate) / 48000);
++}
++
++static UINT32 mix_frames_to_client_frames_ceil(const struct ohos_stream *stream, UINT32 mix_frames)
++{
++    UINT32 rate = stream->fmt->Format.nSamplesPerSec;
++
++    if (!mix_frames) return 0;
++    if (rate == 48000) return mix_frames;
++    return (UINT32)(((UINT64)mix_frames * rate + 47999) / 48000);
++}
++
++static void reset_stream_counters_locked(struct ohos_stream *stream)
++{
++    stream->client_frames_submitted = 0;
++    stream->last_position = 0;
++    stream->client_input_frames = 0;
++    stream->mix_output_frames = 0;
++    stream->have_prev_frame = FALSE;
++    stream->prev_frame[0] = 0.0f;
++    stream->prev_frame[1] = 0.0f;
++}
++
++static UINT32 query_broker_padding_frames_locked(struct ohos_stream *stream)
++{
++    WinehuaAudioGetStatusResp status;
++    int ret;
++
++    if (!stream->client) return 0;
++    ret = ohos_audio_client_get_status(stream->client, stream->broker_stream.stream_id, &status);
++    if (ret != 0)
++    {
++        WARN("ohos_audio_client_get_status failed: %d\n", ret);
++        return 0;
++    }
++
++    return status.queued_frames;
++}
++
++static UINT32 query_client_padding_frames_locked(struct ohos_stream *stream)
++{
++    return mix_frames_to_client_frames_ceil(stream, query_broker_padding_frames_locked(stream));
++}
++
++static void signal_if_room_locked(struct ohos_stream *stream)
++{
++    UINT32 padding;
++
++    if (!stream->event || !stream->started) return;
++    padding = query_client_padding_frames_locked(stream);
++    if (padding < stream->client_buffer_frames)
++        NtSetEvent(stream->event, NULL);
++}
++
++static void *notify_thread_main(void *arg)
++{
++    struct ohos_stream *stream = arg;
++
++    while (1)
++    {
++        LARGE_INTEGER delay;
++
++        ohos_lock(stream);
++        if (stream->stop_notify_thread)
++        {
++            ohos_unlock(stream);
++            break;
++        }
++        signal_if_room_locked(stream);
++        ohos_unlock(stream);
++
++        delay.QuadPart = -50000; /* 5 ms */
++        NtDelayExecution(FALSE, &delay);
++    }
++    return NULL;
++}
++
++static HRESULT create_broker_stream(struct ohos_stream *stream, UINT32 requested_client_buffer_frames)
++{
++    WinehuaAudioOpenStreamReq req;
++    int ret;
++
++    memset(&req, 0, sizeof(req));
++    req.sample_rate = 48000;
++    req.channels = 2;
++    req.sample_format = WINEHUA_AUDIO_SAMPLE_S16LE;
++    req.buffer_frames = client_frames_to_mix_frames_ceil(stream, requested_client_buffer_frames);
++    req.period_frames = client_frames_to_mix_frames_ceil(stream, stream->client_period_frames);
++    req.flags = 0;
++
++    ret = ohos_audio_client_connect(&stream->client);
++    if (ret != 0)
++    {
++        WARN("ohos_audio_client_connect failed: %d\n", ret);
++        return map_broker_error(ret, AUDCLNT_E_SERVICE_NOT_RUNNING);
++    }
++
++    memset(&stream->broker_stream, 0, sizeof(stream->broker_stream));
++    stream->broker_stream.ring_fd = -1;
++    ret = ohos_audio_client_open_stream(stream->client, &req, &stream->broker_stream);
++    if (ret != 0)
++    {
++        WARN("ohos_audio_client_open_stream failed: %d\n", ret);
++        ohos_audio_client_disconnect(stream->client);
++        stream->client = NULL;
++        return map_broker_error(ret, AUDCLNT_E_DEVICE_INVALIDATED);
++    }
++
++    stream->mix_period_frames = stream->broker_stream.preferred_period_frames ?
++        stream->broker_stream.preferred_period_frames : req.period_frames;
++    stream->mix_buffer_frames = stream->broker_stream.ring_capacity_frames;
++    stream->mix_bytes_per_frame = 4;
++    stream->client_buffer_frames = max(1u, mix_frames_to_client_frames_floor(stream, stream->mix_buffer_frames));
++    stream->mix_buffer_capacity_frames = client_frames_to_mix_frames_ceil(stream, stream->client_buffer_frames) + 4;
++
++    TRACE("created broker stream rate=%u channels=%u bits=%u client_period=%u client_buffer=%u mix_period=%u mix_buffer=%u stream_id=%u\n",
++          stream->fmt->Format.nSamplesPerSec, stream->fmt->Format.nChannels,
++          stream->fmt->Format.wBitsPerSample, stream->client_period_frames,
++          stream->client_buffer_frames, stream->mix_period_frames,
++          stream->mix_buffer_frames, stream->broker_stream.stream_id);
++    return S_OK;
++}
++
++static void decode_input_frame(const struct ohos_stream *stream, const BYTE *buffer, UINT32 frame, float *left, float *right)
++{
++    UINT32 channels = stream->fmt->Format.nChannels;
++    UINT32 bytes_per_sample = stream->fmt->Format.wBitsPerSample / 8;
++    const BYTE *src = buffer + frame * stream->client_bytes_per_frame;
++    float sample0 = 0.0f, sample1 = 0.0f;
++
++    if (is_float_format(&stream->fmt->Format))
++    {
++        if (bytes_per_sample == 4)
++        {
++            sample0 = read_ieee_float32(src);
++            sample1 = channels == 1 ? sample0 : read_ieee_float32(src + bytes_per_sample);
++        }
++        else
++        {
++            sample0 = read_ieee_float64(src);
++            sample1 = channels == 1 ? sample0 : read_ieee_float64(src + bytes_per_sample);
++        }
++    }
++    else
++    {
++        switch (bytes_per_sample)
++        {
++        case 1:
++            sample0 = read_pcm_u8(src);
++            sample1 = channels == 1 ? sample0 : read_pcm_u8(src + bytes_per_sample);
++            break;
++        case 2:
++            sample0 = read_pcm_s16(src);
++            sample1 = channels == 1 ? sample0 : read_pcm_s16(src + bytes_per_sample);
++            break;
++        case 3:
++            sample0 = read_pcm_s24(src);
++            sample1 = channels == 1 ? sample0 : read_pcm_s24(src + bytes_per_sample);
++            break;
++        default:
++            sample0 = read_pcm_s32(src);
++            sample1 = channels == 1 ? sample0 : read_pcm_s32(src + bytes_per_sample);
++            break;
++        }
++    }
++
++    *left = sample0;
++    *right = sample1;
++}
++
++static void apply_client_volume(const struct ohos_stream *stream, float *left, float *right)
++{
++    if (stream->fmt->Format.nChannels == 1)
++    {
++        float volume = stream->channel_volume[0];
++        *left *= volume;
++        *right *= volume;
++    }
++    else
++    {
++        *left *= stream->channel_volume[0];
++        *right *= stream->channel_volume[1];
++    }
++}
++
++static void store_prev_frame(struct ohos_stream *stream, const BYTE *buffer, UINT32 frames)
++{
++    if (!frames) return;
++    decode_input_frame(stream, buffer, frames - 1, &stream->prev_frame[0], &stream->prev_frame[1]);
++    stream->have_prev_frame = TRUE;
++}
++
++static void load_source_frame(const struct ohos_stream *stream, const BYTE *buffer, UINT32 frames,
++                              UINT64 src_base, INT64 abs_index, float out[2])
++{
++    if (!frames)
++    {
++        if (stream->have_prev_frame)
++        {
++            out[0] = stream->prev_frame[0];
++            out[1] = stream->prev_frame[1];
++        }
++        else out[0] = out[1] = 0.0f;
++        return;
++    }
++
++    if (abs_index < (INT64)src_base)
++    {
++        if (stream->have_prev_frame)
++        {
++            out[0] = stream->prev_frame[0];
++            out[1] = stream->prev_frame[1];
++            return;
++        }
++        abs_index = src_base;
++    }
++
++    if ((UINT64)abs_index >= src_base + frames)
++        abs_index = (INT64)(src_base + frames - 1);
++
++    decode_input_frame(stream, buffer, (UINT32)((UINT64)abs_index - src_base), &out[0], &out[1]);
++}
++
++static UINT32 convert_client_frames_to_mix_locked(struct ohos_stream *stream, const BYTE *src,
++                                                  UINT32 in_frames, INT16 *dst, UINT32 dst_capacity_frames)
++{
++    UINT32 i;
++
++    if (!in_frames) return 0;
++
++    if (stream->fmt->Format.nSamplesPerSec == 48000)
++    {
++        if (in_frames > dst_capacity_frames) return MIX_FRAMES_ERROR;
++        for (i = 0; i < in_frames; ++i)
++        {
++            float left, right;
++
++            decode_input_frame(stream, src, i, &left, &right);
++            apply_client_volume(stream, &left, &right);
++            dst[i * 2] = clamp_s16_float(left * 32767.0f);
++            dst[i * 2 + 1] = clamp_s16_float(right * 32767.0f);
++        }
++
++        store_prev_frame(stream, src, in_frames);
++        stream->client_input_frames += in_frames;
++        stream->mix_output_frames += in_frames;
++        return in_frames;
++    }
++    else
++    {
++        UINT64 src_base = stream->client_input_frames;
++        UINT64 src_total = src_base + in_frames;
++        UINT64 target_mix_total = (src_total * 48000ULL) / stream->fmt->Format.nSamplesPerSec;
++        UINT64 needed = target_mix_total - stream->mix_output_frames;
++
++        if (needed > dst_capacity_frames) return MIX_FRAMES_ERROR;
++
++        for (i = 0; i < needed; ++i)
++        {
++            UINT64 out_abs = stream->mix_output_frames + i;
++            UINT64 scaled = out_abs * (UINT64)stream->fmt->Format.nSamplesPerSec;
++            UINT64 i0 = scaled / 48000ULL;
++            UINT64 rem = scaled % 48000ULL;
++            float frac = rem / 48000.0f;
++            float a[2], b[2], left, right;
++
++            load_source_frame(stream, src, in_frames, src_base, (INT64)i0, a);
++            load_source_frame(stream, src, in_frames, src_base, (INT64)i0 + 1, b);
++            left = a[0] + (b[0] - a[0]) * frac;
++            right = a[1] + (b[1] - a[1]) * frac;
++            apply_client_volume(stream, &left, &right);
++            dst[i * 2] = clamp_s16_float(left * 32767.0f);
++            dst[i * 2 + 1] = clamp_s16_float(right * 32767.0f);
++        }
++
++        store_prev_frame(stream, src, in_frames);
++        stream->client_input_frames = src_total;
++        stream->mix_output_frames = target_mix_total;
++        return (UINT32)needed;
++    }
++}
++
++static void destroy_stream(struct ohos_stream *stream)
++{
++    if (!stream) return;
++
++    if (stream->notify_thread_started)
++    {
++        ohos_lock(stream);
++        stream->stop_notify_thread = TRUE;
++        ohos_unlock(stream);
++        pthread_join(stream->notify_thread, NULL);
++    }
++
++    if (stream->client)
++    {
++        ohos_audio_client_close_stream(stream->client, &stream->broker_stream);
++        ohos_audio_client_disconnect(stream->client);
++        stream->client = NULL;
++    }
++
++    free(stream->local_buffer);
++    free(stream->mix_buffer);
++    free(stream->fmt);
++    pthread_mutex_destroy(&stream->lock);
++    free(stream);
++}
++
++static NTSTATUS ohos_process_attach(void *args)
++{
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_process_detach(void *args)
++{
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_get_endpoint_ids(void *args)
++{
++    struct get_endpoint_ids_params *params = args;
++    unsigned int needed = 0;
++
++    params->num = 0;
++    params->default_idx = 0;
++
++    if (params->flow != eRender)
++    {
++        params->result = S_OK;
++        return STATUS_SUCCESS;
++    }
++
++    needed = sizeof(*params->endpoints) + sizeof(render_device_name) + ((sizeof(render_device_id) + 1) & ~1);
++    params->num = 1;
++
++    if (params->size < needed)
++    {
++        params->size = needed;
++        params->result = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
++        return STATUS_SUCCESS;
++    }
++
++    params->endpoints[0].name = sizeof(*params->endpoints);
++    memcpy((char *)params->endpoints + params->endpoints[0].name,
++           render_device_name, sizeof(render_device_name));
++    params->endpoints[0].device = sizeof(*params->endpoints) + sizeof(render_device_name);
++    memcpy((char *)params->endpoints + params->endpoints[0].device,
++           render_device_id, sizeof(render_device_id));
++    params->default_idx = 0;
++    params->result = S_OK;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_create_stream(void *args)
++{
++    struct create_stream_params *params = args;
++    struct ohos_stream *stream = NULL;
++    HRESULT hr;
++    UINT32 requested_client_buffer_frames;
++
++    TRACE("ohos_create_stream flow=%u share=%u rate=%u channels=%u bits=%u duration=%s period=%s flags=%#x\n",
++          params->flow, params->share, params->fmt ? params->fmt->nSamplesPerSec : 0,
++          params->fmt ? params->fmt->nChannels : 0, params->fmt ? params->fmt->wBitsPerSample : 0,
++          wine_dbgstr_longlong(params->duration), wine_dbgstr_longlong(params->period), params->flags);
++
++    params->result = S_OK;
++    *params->stream = 0;
++    *params->channel_count = 0;
++
++    if (params->flow != eRender)
++    {
++        params->result = AUDCLNT_E_UNSUPPORTED_FORMAT;
++        return STATUS_SUCCESS;
++    }
++    if (params->share == AUDCLNT_SHAREMODE_EXCLUSIVE)
++    {
++        params->result = AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED;
++        return STATUS_SUCCESS;
++    }
++    if (FAILED(hr = validate_format(params->fmt)))
++    {
++        params->result = hr;
++        return STATUS_SUCCESS;
++    }
++
++    if (!(stream = calloc(1, sizeof(*stream))))
++    {
++        params->result = E_OUTOFMEMORY;
++        return STATUS_SUCCESS;
++    }
++
++    pthread_mutex_init(&stream->lock, NULL);
++    stream->share = params->share;
++    stream->flags = params->flags;
++    stream->client_period_frames = max(1u, (UINT32)((params->period * params->fmt->nSamplesPerSec) / 10000000));
++    requested_client_buffer_frames = max(stream->client_period_frames * 2,
++                                         (UINT32)((params->duration * params->fmt->nSamplesPerSec + 9999999) / 10000000));
++    stream->client_bytes_per_frame = params->fmt->nBlockAlign;
++    stream->channel_volume[0] = 1.0f;
++    stream->channel_volume[1] = 1.0f;
++
++    if (!(stream->fmt = clone_wave_format(params->fmt)))
++    {
++        params->result = E_OUTOFMEMORY;
++        goto fail;
++    }
++
++    if (FAILED(hr = create_broker_stream(stream, requested_client_buffer_frames)))
++    {
++        params->result = hr;
++        goto fail;
++    }
++
++    stream->local_buffer = calloc(stream->client_buffer_frames, stream->client_bytes_per_frame);
++    if (!stream->local_buffer)
++    {
++        params->result = E_OUTOFMEMORY;
++        goto fail;
++    }
++
++    stream->mix_buffer = calloc(stream->mix_buffer_capacity_frames, sizeof(INT16) * 2);
++    if (!stream->mix_buffer)
++    {
++        params->result = E_OUTOFMEMORY;
++        goto fail;
++    }
++
++    if (pthread_create(&stream->notify_thread, NULL, notify_thread_main, stream) == 0)
++        stream->notify_thread_started = TRUE;
++    else
++        WARN("failed to start notify thread for stream\n");
++
++    reset_stream_counters_locked(stream);
++    *params->channel_count = params->fmt->nChannels;
++    *params->stream = (stream_handle)(UINT_PTR)stream;
++    return STATUS_SUCCESS;
++
++fail:
++    destroy_stream(stream);
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_release_stream(void *args)
++{
++    struct release_stream_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++
++    destroy_stream(stream);
++    params->result = S_OK;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_start(void *args)
++{
++    struct start_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++    int ret;
++
++    ohos_lock(stream);
++
++    if ((stream->flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK) && !stream->event)
++        return ohos_unlock_result(stream, &params->result, AUDCLNT_E_EVENTHANDLE_NOT_SET);
++    if (stream->started)
++        return ohos_unlock_result(stream, &params->result, AUDCLNT_E_NOT_STOPPED);
++
++    ret = ohos_audio_client_start(stream->client, stream->broker_stream.stream_id);
++    if (ret != 0)
++    {
++        WARN("ohos_audio_client_start failed: %d\n", ret);
++        return ohos_unlock_result(stream, &params->result,
++                                  map_broker_error(ret, AUDCLNT_E_DEVICE_INVALIDATED));
++    }
++
++    stream->started = TRUE;
++    signal_if_room_locked(stream);
++    return ohos_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS ohos_stop(void *args)
++{
++    struct stop_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++    int ret;
++
++    ohos_lock(stream);
++    if (!stream->started)
++        return ohos_unlock_result(stream, &params->result, S_FALSE);
++
++    ret = ohos_audio_client_stop(stream->client, stream->broker_stream.stream_id);
++    if (ret != 0)
++    {
++        WARN("ohos_audio_client_stop failed: %d\n", ret);
++        return ohos_unlock_result(stream, &params->result,
++                                  map_broker_error(ret, AUDCLNT_E_DEVICE_INVALIDATED));
++    }
++
++    stream->started = FALSE;
++    return ohos_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS ohos_reset(void *args)
++{
++    struct reset_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++    int ret;
++
++    ohos_lock(stream);
++    if (stream->started)
++        return ohos_unlock_result(stream, &params->result, AUDCLNT_E_NOT_STOPPED);
++    if (stream->locked_frames)
++        return ohos_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_OPERATION_PENDING);
++
++    ret = ohos_audio_client_reset(stream->client, stream->broker_stream.stream_id);
++    if (ret != 0)
++    {
++        WARN("ohos_audio_client_reset failed: %d\n", ret);
++        return ohos_unlock_result(stream, &params->result,
++                                  map_broker_error(ret, AUDCLNT_E_DEVICE_INVALIDATED));
++    }
++
++    reset_stream_counters_locked(stream);
++    return ohos_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS ohos_get_render_buffer(void *args)
++{
++    struct get_render_buffer_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++    UINT32 requested_mix_frames;
++    UINT32 padding_mix_frames;
++
++    ohos_lock(stream);
++
++    if (stream->locked_frames)
++        return ohos_unlock_result(stream, &params->result, AUDCLNT_E_OUT_OF_ORDER);
++    if (!params->frames)
++    {
++        *params->data = NULL;
++        return ohos_unlock_result(stream, &params->result, S_OK);
++    }
++
++    requested_mix_frames = client_frames_to_mix_frames_ceil(stream, params->frames);
++    padding_mix_frames = query_broker_padding_frames_locked(stream);
++    if (padding_mix_frames + requested_mix_frames > stream->mix_buffer_frames)
++        return ohos_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_TOO_LARGE);
++
++    memset(stream->local_buffer, 0, params->frames * stream->client_bytes_per_frame);
++    stream->locked_frames = params->frames;
++    *params->data = stream->local_buffer;
++    return ohos_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS ohos_release_render_buffer(void *args)
++{
++    struct release_render_buffer_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++    UINT32 mix_frames;
++    size_t written;
++
++    ohos_lock(stream);
++
++    if (!stream->locked_frames)
++        return ohos_unlock_result(stream, &params->result,
++                                  params->written_frames ? AUDCLNT_E_OUT_OF_ORDER : S_OK);
++    if (params->written_frames > stream->locked_frames)
++        return ohos_unlock_result(stream, &params->result, AUDCLNT_E_INVALID_SIZE);
++    if (!params->written_frames)
++    {
++        stream->locked_frames = 0;
++        return ohos_unlock_result(stream, &params->result, S_OK);
++    }
++
++    if (params->flags & AUDCLNT_BUFFERFLAGS_SILENT)
++        memset(stream->local_buffer, 0, params->written_frames * stream->client_bytes_per_frame);
++
++    mix_frames = convert_client_frames_to_mix_locked(stream, stream->local_buffer, params->written_frames,
++                                                     stream->mix_buffer, stream->mix_buffer_capacity_frames);
++    if (mix_frames == MIX_FRAMES_ERROR)
++    {
++        stream->locked_frames = 0;
++        return ohos_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_ERROR);
++    }
++
++    written = ohos_audio_client_write_frames(&stream->broker_stream, stream->mix_buffer, mix_frames);
++    if (written != mix_frames)
++    {
++        stream->locked_frames = 0;
++        return ohos_unlock_result(stream, &params->result, AUDCLNT_E_BUFFER_TOO_LARGE);
++    }
++
++    stream->client_frames_submitted += params->written_frames;
++    stream->locked_frames = 0;
++    signal_if_room_locked(stream);
++    return ohos_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS ohos_get_capture_buffer(void *args)
++{
++    struct get_capture_buffer_params *params = args;
++
++    *params->data = NULL;
++    *params->frames = 0;
++    *params->flags = 0;
++    if (params->devpos) *params->devpos = 0;
++    if (params->qpcpos) *params->qpcpos = 0;
++    params->result = AUDCLNT_S_BUFFER_EMPTY;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_release_capture_buffer(void *args)
++{
++    struct release_capture_buffer_params *params = args;
++
++    params->result = params->done ? AUDCLNT_E_OUT_OF_ORDER : S_OK;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_is_format_supported(void *args)
++{
++    struct is_format_supported_params *params = args;
++
++    if (params->share == AUDCLNT_SHAREMODE_EXCLUSIVE)
++        params->result = AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED;
++    else
++        params->result = validate_format(params->fmt_in);
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_get_mix_format(void *args)
++{
++    struct get_mix_format_params *params = args;
++    WAVEFORMATEXTENSIBLE *fmt = params->fmt;
++
++    if (params->flow != eRender)
++    {
++        params->result = E_NOTIMPL;
++        return STATUS_SUCCESS;
++    }
++
++    memset(fmt, 0, sizeof(*fmt));
++    fmt->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
++    fmt->Format.nChannels = 2;
++    fmt->Format.nSamplesPerSec = 48000;
++    fmt->Format.wBitsPerSample = 16;
++    fmt->Format.nBlockAlign = 4;
++    fmt->Format.nAvgBytesPerSec = 192000;
++    fmt->Format.cbSize = sizeof(*fmt) - sizeof(fmt->Format);
++    fmt->Samples.wValidBitsPerSample = 16;
++    fmt->dwChannelMask = KSAUDIO_SPEAKER_STEREO;
++    fmt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
++    params->result = S_OK;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_get_device_period(void *args)
++{
++    struct get_device_period_params *params = args;
++
++    if (params->def_period) *params->def_period = default_period;
++    if (params->min_period) *params->min_period = minimum_period;
++    params->result = S_OK;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_get_buffer_size(void *args)
++{
++    struct get_buffer_size_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++
++    ohos_lock(stream);
++    *params->frames = stream->client_buffer_frames;
++    return ohos_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS ohos_get_latency(void *args)
++{
++    struct get_latency_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++
++    ohos_lock(stream);
++    *params->latency = (stream->mix_period_frames * 10000000ULL) / 48000 + 6666;
++    return ohos_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS ohos_get_current_padding(void *args)
++{
++    struct get_current_padding_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++
++    ohos_lock(stream);
++    *params->padding = query_client_padding_frames_locked(stream);
++    return ohos_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS ohos_get_next_packet_size(void *args)
++{
++    struct get_next_packet_size_params *params = args;
++
++    *params->frames = 0;
++    params->result = S_OK;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_get_frequency(void *args)
++{
++    struct get_frequency_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++
++    ohos_lock(stream);
++    *params->freq = stream->fmt->Format.nSamplesPerSec;
++    if (stream->share == AUDCLNT_SHAREMODE_SHARED)
++        *params->freq *= stream->client_bytes_per_frame;
++    return ohos_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS ohos_get_position(void *args)
++{
++    struct get_position_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++    UINT64 padding;
++    UINT64 position;
++
++    ohos_lock(stream);
++    padding = query_client_padding_frames_locked(stream);
++    position = stream->client_frames_submitted >= padding ? stream->client_frames_submitted - padding : 0;
++    if (position < stream->last_position)
++        position = stream->last_position;
++    else
++        stream->last_position = position;
++
++    *params->pos = position;
++    if (stream->share == AUDCLNT_SHAREMODE_SHARED && !params->device)
++        *params->pos *= stream->client_bytes_per_frame;
++    ohos_unlock(stream);
++
++    if (params->qpctime)
++        *params->qpctime = query_qpc_100ns();
++
++    params->result = S_OK;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_set_volumes(void *args)
++{
++    struct set_volumes_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++    UINT32 i;
++
++    ohos_lock(stream);
++    for (i = 0; i < stream->fmt->Format.nChannels && i < 2; ++i)
++        stream->channel_volume[i] = params->master_volume * params->volumes[i] * params->session_volumes[i];
++    if (stream->fmt->Format.nChannels == 1)
++        stream->channel_volume[1] = stream->channel_volume[0];
++    ohos_unlock(stream);
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_set_event_handle(void *args)
++{
++    struct set_event_handle_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++
++    ohos_lock(stream);
++    if (!(stream->flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK))
++        return ohos_unlock_result(stream, &params->result, AUDCLNT_E_EVENTHANDLE_NOT_EXPECTED);
++    if (stream->event)
++        return ohos_unlock_result(stream, &params->result, HRESULT_FROM_WIN32(ERROR_INVALID_NAME));
++
++    stream->event = params->event;
++    signal_if_room_locked(stream);
++    return ohos_unlock_result(stream, &params->result, S_OK);
++}
++
++static NTSTATUS ohos_test_connect(void *args)
++{
++    struct test_connect_params *params = args;
++
++    params->priority = probe_broker_available() ? Priority_Preferred : Priority_Unavailable;
++    if (params->priority == Priority_Unavailable)
++        ERR("ohos_test_connect marked driver unavailable (audio broker not reachable)\n");
++    else
++        TRACE("ohos_test_connect marked driver preferred\n");
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_is_started(void *args)
++{
++    struct is_started_params *params = args;
++    struct ohos_stream *stream = handle_get_stream(params->stream);
++
++    ohos_lock(stream);
++    return ohos_unlock_result(stream, &params->result, stream->started ? S_OK : S_FALSE);
++}
++
++static NTSTATUS ohos_get_prop_value(void *args)
++{
++    struct get_prop_value_params *params = args;
++
++    params->result = E_NOTIMPL;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_midi_get_driver(void *args)
++{
++    ((WCHAR *)args)[0] = 0;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_midi_init(void *args)
++{
++    struct midi_init_params *params = args;
++
++    *params->err = MMSYSERR_NOERROR;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_midi_release(void *args)
++{
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_midi_out_message(void *args)
++{
++    struct midi_out_message_params *params = args;
++
++    switch (params->msg)
++    {
++    case DRVM_INIT:
++    case DRVM_EXIT:
++    case DRVM_ENABLE:
++    case DRVM_DISABLE:
++        *params->err = MMSYSERR_NOERROR;
++        break;
++    case MODM_GETNUMDEVS:
++        *params->err = 0;
++        break;
++    default:
++        *params->err = MMSYSERR_NOTSUPPORTED;
++        break;
++    }
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_midi_in_message(void *args)
++{
++    struct midi_in_message_params *params = args;
++
++    switch (params->msg)
++    {
++    case DRVM_INIT:
++    case DRVM_EXIT:
++    case DRVM_ENABLE:
++    case DRVM_DISABLE:
++        *params->err = MMSYSERR_NOERROR;
++        break;
++    case MIDM_GETNUMDEVS:
++        *params->err = 0;
++        break;
++    default:
++        *params->err = MMSYSERR_NOTSUPPORTED;
++        break;
++    }
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_midi_notify_wait(void *args)
++{
++    struct midi_notify_wait_params *params = args;
++
++    while (params->quit && !*params->quit)
++    {
++        LARGE_INTEGER delay;
++
++        delay.QuadPart = -1000000;
++        NtDelayExecution(FALSE, &delay);
++    }
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS ohos_aux_message(void *args)
++{
++    struct aux_message_params *params = args;
++
++    switch (params->msg)
++    {
++    case DRVM_INIT:
++    case DRVM_EXIT:
++    case DRVM_ENABLE:
++    case DRVM_DISABLE:
++        *params->err = MMSYSERR_NOERROR;
++        break;
++    case AUXDM_GETNUMDEVS:
++        *params->err = 0;
++        break;
++    default:
++        *params->err = MMSYSERR_NOTSUPPORTED;
++        break;
++    }
++    return STATUS_SUCCESS;
++}
++
++const unixlib_entry_t __wine_unix_call_funcs[] =
++{
++    ohos_process_attach,
++    ohos_process_detach,
++    ohos_not_implemented,
++    ohos_not_implemented,
++    ohos_get_endpoint_ids,
++    ohos_create_stream,
++    ohos_release_stream,
++    ohos_start,
++    ohos_stop,
++    ohos_reset,
++    ohos_get_render_buffer,
++    ohos_release_render_buffer,
++    ohos_get_capture_buffer,
++    ohos_release_capture_buffer,
++    ohos_is_format_supported,
++    ohos_not_implemented,
++    ohos_get_mix_format,
++    ohos_get_device_period,
++    ohos_get_buffer_size,
++    ohos_get_latency,
++    ohos_get_current_padding,
++    ohos_get_next_packet_size,
++    ohos_get_frequency,
++    ohos_get_position,
++    ohos_set_volumes,
++    ohos_set_event_handle,
++    ohos_not_implemented,
++    ohos_test_connect,
++    ohos_is_started,
++    ohos_get_prop_value,
++    ohos_midi_get_driver,
++    ohos_midi_init,
++    ohos_midi_release,
++    ohos_midi_out_message,
++    ohos_midi_in_message,
++    ohos_midi_notify_wait,
++    ohos_aux_message,
++};
++
++C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == funcs_count);
+diff --git a/dlls/wineohos.drv/ohos_audio_client.c b/dlls/wineohos.drv/ohos_audio_client.c
+new file mode 100644
+index 000000000000..4d56cf000df0
+--- /dev/null
++++ b/dlls/wineohos.drv/ohos_audio_client.c
+@@ -0,0 +1,390 @@
++#pragma makedep unix
++
++#include "ohos_audio_client.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++static int set_close_on_exec(int fd, int enabled)
++{
++    int flags = fcntl(fd, F_GETFD);
++
++    if (flags < 0) return -errno;
++    if (enabled) flags |= FD_CLOEXEC;
++    else flags &= ~FD_CLOEXEC;
++    if (fcntl(fd, F_SETFD, flags) != 0) return -errno;
++    return 0;
++}
++
++static ssize_t send_packet(int fd, const void *data, size_t bytes, int send_fd)
++{
++    struct msghdr msg;
++    struct iovec iov;
++    char control[CMSG_SPACE(sizeof(int))];
++
++    memset(&msg, 0, sizeof(msg));
++    memset(control, 0, sizeof(control));
++    iov.iov_base = (void *)data;
++    iov.iov_len = bytes;
++    msg.msg_iov = &iov;
++    msg.msg_iovlen = 1;
++
++    if (send_fd >= 0)
++    {
++        struct cmsghdr *cmsg;
++
++        msg.msg_control = control;
++        msg.msg_controllen = sizeof(control);
++        cmsg = CMSG_FIRSTHDR(&msg);
++        cmsg->cmsg_level = SOL_SOCKET;
++        cmsg->cmsg_type = SCM_RIGHTS;
++        cmsg->cmsg_len = CMSG_LEN(sizeof(int));
++        memcpy(CMSG_DATA(cmsg), &send_fd, sizeof(send_fd));
++        msg.msg_controllen = cmsg->cmsg_len;
++    }
++
++    while (1)
++    {
++        ssize_t sent = sendmsg(fd, &msg, 0);
++        if (sent >= 0) return sent;
++        if (errno != EINTR) return -1;
++    }
++}
++
++static ssize_t recv_packet(int fd, void *data, size_t bytes, int *recv_fd)
++{
++    struct msghdr msg;
++    struct iovec iov;
++    char control[CMSG_SPACE(sizeof(int))];
++    ssize_t got;
++
++    if (recv_fd) *recv_fd = -1;
++    memset(&msg, 0, sizeof(msg));
++    memset(control, 0, sizeof(control));
++    iov.iov_base = data;
++    iov.iov_len = bytes;
++    msg.msg_iov = &iov;
++    msg.msg_iovlen = 1;
++    msg.msg_control = control;
++    msg.msg_controllen = sizeof(control);
++
++    while (1)
++    {
++        got = recvmsg(fd, &msg, 0);
++        if (got >= 0) break;
++        if (errno != EINTR) return -1;
++    }
++
++    if (got <= 0) return got;
++    if (msg.msg_flags & MSG_TRUNC) return -1;
++    if (recv_fd)
++    {
++        struct cmsghdr *cmsg;
++
++        for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg))
++        {
++            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
++                cmsg->cmsg_len >= CMSG_LEN(sizeof(int)))
++            {
++                memcpy(recv_fd, CMSG_DATA(cmsg), sizeof(int));
++                break;
++            }
++        }
++    }
++    return got;
++}
++
++static int parse_env_fd(const char *name, int *out_fd)
++{
++    const char *value = getenv(name);
++    char *end = NULL;
++    long parsed;
++
++    if (!value || !value[0] || !out_fd) return -ENOENT;
++    parsed = strtol(value, &end, 10);
++    if (!end || *end || parsed < 0 || parsed > INT32_MAX) return -EINVAL;
++    *out_fd = (int)parsed;
++    return 0;
++}
++
++static int client_call(OhosAudioClient *client, uint16_t cmd,
++                       const void *payload, size_t payload_size,
++                       void *out_payload, size_t out_payload_size,
++                       int *out_fd)
++{
++    unsigned char reqbuf[WINEHUA_AUDIO_PACKET_MAX];
++    unsigned char respbuf[WINEHUA_AUDIO_PACKET_MAX];
++    WinehuaAudioIpcHeader *header = (WinehuaAudioIpcHeader *)reqbuf;
++    WinehuaAudioIpcHeader *reply = (WinehuaAudioIpcHeader *)respbuf;
++    ssize_t got;
++    int recv_fd = -1;
++    int ret = -EIO;
++
++    if (!client || sizeof(*header) + payload_size > sizeof(reqbuf) ||
++        sizeof(*reply) + out_payload_size > sizeof(respbuf))
++        return -EINVAL;
++    if (out_fd) *out_fd = -1;
++
++    memset(reqbuf, 0, sizeof(*header));
++    header->magic = WINEHUA_AUDIO_CONTROL_MAGIC;
++    header->version = WINEHUA_AUDIO_PROTOCOL_VERSION;
++    header->cmd = cmd;
++    header->seq = ++client->next_seq;
++    header->payload_size = payload_size;
++    if (payload_size) memcpy(reqbuf + sizeof(*header), payload, payload_size);
++
++    pthread_mutex_lock(&client->lock);
++
++    if (send_packet(client->fd, reqbuf, sizeof(*header) + payload_size, -1) !=
++        (ssize_t)(sizeof(*header) + payload_size))
++        goto done;
++
++    got = recv_packet(client->fd, respbuf, sizeof(respbuf), &recv_fd);
++    if (got < (ssize_t)sizeof(*reply)) goto done;
++    if (reply->magic != WINEHUA_AUDIO_CONTROL_MAGIC ||
++        reply->version != WINEHUA_AUDIO_PROTOCOL_VERSION ||
++        reply->cmd != cmd || reply->seq != header->seq ||
++        reply->payload_size != out_payload_size ||
++        (size_t)got != sizeof(*reply) + out_payload_size)
++        goto done;
++
++    if (out_payload_size) memcpy(out_payload, respbuf + sizeof(*reply), out_payload_size);
++    if (out_fd)
++    {
++        *out_fd = recv_fd;
++        recv_fd = -1;
++    }
++    ret = 0;
++
++done:
++    if (recv_fd >= 0) close(recv_fd);
++    pthread_mutex_unlock(&client->lock);
++    return ret;
++}
++
++int ohos_audio_client_connect(OhosAudioClient **out_client)
++{
++    OhosAudioClient *client = NULL;
++    WinehuaAudioBootstrapReq bootstrap_req;
++    WinehuaAudioHelloReq hello_req;
++    WinehuaAudioHelloResp hello_resp;
++    int bootstrap_fd = -1;
++    int private_pair[2] = { -1, -1 };
++    int ret;
++    const char *protocol = getenv("WINE_OHOS_AUDIO_PROTOCOL_VERSION");
++
++    if (!out_client) return -EINVAL;
++    if (protocol && protocol[0] && atoi(protocol) != (int)WINEHUA_AUDIO_PROTOCOL_VERSION)
++        return -EPROTO;
++
++    ret = parse_env_fd("WINE_OHOS_AUDIO_BOOTSTRAP_FD", &bootstrap_fd);
++    if (ret != 0) return ret;
++
++    client = calloc(1, sizeof(*client));
++    if (!client) return -ENOMEM;
++
++    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, private_pair) != 0)
++    {
++        free(client);
++        return -errno;
++    }
++
++    set_close_on_exec(private_pair[0], 1);
++    set_close_on_exec(private_pair[1], 1);
++
++    memset(&bootstrap_req, 0, sizeof(bootstrap_req));
++    bootstrap_req.magic = WINEHUA_AUDIO_BOOTSTRAP_MAGIC;
++    bootstrap_req.version = WINEHUA_AUDIO_PROTOCOL_VERSION;
++    bootstrap_req.cmd = WINEHUA_AUDIO_BOOTSTRAP_OPEN_CONTROL;
++    bootstrap_req.client_pid = (uint32_t)getpid();
++    bootstrap_req.client_tid = bootstrap_req.client_pid;
++    snprintf(bootstrap_req.process_name, sizeof(bootstrap_req.process_name),
++             "wine-%u", bootstrap_req.client_pid);
++
++    if (send_packet(bootstrap_fd, &bootstrap_req, sizeof(bootstrap_req), private_pair[1]) !=
++        (ssize_t)sizeof(bootstrap_req))
++    {
++        close(private_pair[0]);
++        close(private_pair[1]);
++        free(client);
++        return -EIO;
++    }
++
++    close(private_pair[1]);
++    client->fd = private_pair[0];
++    client->next_seq = 0;
++    pthread_mutex_init(&client->lock, NULL);
++
++    memset(&hello_req, 0, sizeof(hello_req));
++    hello_req.client_pid = bootstrap_req.client_pid;
++    hello_req.client_tid = bootstrap_req.client_tid;
++    memcpy(hello_req.process_name, bootstrap_req.process_name, sizeof(hello_req.process_name));
++    if (client_call(client, WINEHUA_AUDIO_CMD_HELLO, &hello_req, sizeof(hello_req),
++                    &hello_resp, sizeof(hello_resp), NULL) != 0 ||
++        hello_resp.result != 0)
++    {
++        int err = hello_resp.result ? hello_resp.result : -EIO;
++        ohos_audio_client_disconnect(client);
++        return err;
++    }
++
++    *out_client = client;
++    return 0;
++}
++
++void ohos_audio_client_disconnect(OhosAudioClient *client)
++{
++    if (!client) return;
++    if (client->fd >= 0) close(client->fd);
++    pthread_mutex_destroy(&client->lock);
++    free(client);
++}
++
++int ohos_audio_client_open_stream(OhosAudioClient *client,
++                                  const WinehuaAudioOpenStreamReq *req,
++                                  OhosAudioClientStream *out_stream)
++{
++    WinehuaAudioOpenStreamResp resp;
++    int ring_fd = -1;
++
++    if (!client || !req || !out_stream) return -EINVAL;
++    memset(out_stream, 0, sizeof(*out_stream));
++    out_stream->ring_fd = -1;
++
++    if (client_call(client, WINEHUA_AUDIO_CMD_OPEN_STREAM, req, sizeof(*req),
++                    &resp, sizeof(resp), &ring_fd) != 0)
++        return -EIO;
++    if (resp.result != 0)
++    {
++        if (ring_fd >= 0) close(ring_fd);
++        return resp.result;
++    }
++    if (ring_fd < 0) return -EIO;
++
++    out_stream->stream_id = resp.stream_id;
++    out_stream->preferred_period_frames = resp.preferred_period_frames;
++    out_stream->ring_capacity_frames = resp.ring_capacity_frames;
++    out_stream->mix_frame_size = resp.mix_frame_size;
++    out_stream->ring_mapping_size = resp.ring_mapping_size;
++    out_stream->ring_fd = ring_fd;
++    out_stream->ring = mmap(NULL, out_stream->ring_mapping_size, PROT_READ | PROT_WRITE,
++                            MAP_SHARED, out_stream->ring_fd, 0);
++    if (out_stream->ring == MAP_FAILED)
++    {
++        int err = -errno;
++        out_stream->ring = NULL;
++        close(out_stream->ring_fd);
++        out_stream->ring_fd = -1;
++        return err;
++    }
++    if (out_stream->ring->magic != WINEHUA_AUDIO_RING_MAGIC ||
++        out_stream->ring->version != WINEHUA_AUDIO_PROTOCOL_VERSION)
++    {
++        ohos_audio_client_close_stream(client, out_stream);
++        return -EPROTO;
++    }
++    return 0;
++}
++
++int ohos_audio_client_start(OhosAudioClient *client, uint32_t stream_id)
++{
++    WinehuaAudioStreamCmdReq req = { stream_id };
++    WinehuaAudioStreamCmdResp resp;
++
++    if (!client) return -EINVAL;
++    if (client_call(client, WINEHUA_AUDIO_CMD_START, &req, sizeof(req), &resp, sizeof(resp), NULL) != 0)
++        return -EIO;
++    return resp.result;
++}
++
++int ohos_audio_client_stop(OhosAudioClient *client, uint32_t stream_id)
++{
++    WinehuaAudioStreamCmdReq req = { stream_id };
++    WinehuaAudioStreamCmdResp resp;
++
++    if (!client) return -EINVAL;
++    if (client_call(client, WINEHUA_AUDIO_CMD_STOP, &req, sizeof(req), &resp, sizeof(resp), NULL) != 0)
++        return -EIO;
++    return resp.result;
++}
++
++int ohos_audio_client_reset(OhosAudioClient *client, uint32_t stream_id)
++{
++    WinehuaAudioStreamCmdReq req = { stream_id };
++    WinehuaAudioStreamCmdResp resp;
++
++    if (!client) return -EINVAL;
++    if (client_call(client, WINEHUA_AUDIO_CMD_RESET, &req, sizeof(req), &resp, sizeof(resp), NULL) != 0)
++        return -EIO;
++    return resp.result;
++}
++
++int ohos_audio_client_close_stream(OhosAudioClient *client, OhosAudioClientStream *stream)
++{
++    WinehuaAudioStreamCmdReq req;
++    WinehuaAudioStreamCmdResp resp;
++    int result = 0;
++
++    if (!client || !stream) return -EINVAL;
++
++    req.stream_id = stream->stream_id;
++    if (client_call(client, WINEHUA_AUDIO_CMD_CLOSE, &req, sizeof(req), &resp, sizeof(resp), NULL) != 0)
++        result = -EIO;
++    else
++        result = resp.result;
++
++    if (stream->ring && stream->ring != MAP_FAILED)
++    {
++        munmap(stream->ring, stream->ring_mapping_size);
++        stream->ring = NULL;
++    }
++    if (stream->ring_fd >= 0)
++    {
++        close(stream->ring_fd);
++        stream->ring_fd = -1;
++    }
++    memset(stream, 0, sizeof(*stream));
++    stream->ring_fd = -1;
++    return result;
++}
++
++int ohos_audio_client_get_status(OhosAudioClient *client,
++                                 uint32_t stream_id,
++                                 WinehuaAudioGetStatusResp *out_status)
++{
++    WinehuaAudioGetStatusReq req = { stream_id };
++
++    if (!client || !out_status) return -EINVAL;
++    if (client_call(client, WINEHUA_AUDIO_CMD_GET_STATUS, &req, sizeof(req),
++                    out_status, sizeof(*out_status), NULL) != 0)
++        return -EIO;
++    return out_status->result;
++}
++
++size_t ohos_audio_client_write_frames(OhosAudioClientStream *stream, const void *data, size_t frames)
++{
++    size_t written;
++
++    if (!stream || !stream->ring) return 0;
++    written = winehua_audio_ring_write_frames(stream->ring, data, frames);
++    if (written < frames) winehua_audio_ring_increment_overflow(stream->ring);
++    return written;
++}
++
++size_t ohos_audio_client_get_free_frames(const OhosAudioClientStream *stream)
++{
++    if (!stream || !stream->ring) return 0;
++    return winehua_audio_ring_free_frames(stream->ring);
++}
++
++size_t ohos_audio_client_get_queued_frames(const OhosAudioClientStream *stream)
++{
++    if (!stream || !stream->ring) return 0;
++    return winehua_audio_ring_used_frames(stream->ring);
++}
+diff --git a/dlls/wineohos.drv/ohos_audio_client.h b/dlls/wineohos.drv/ohos_audio_client.h
+new file mode 100644
+index 000000000000..2b3dd7e1142a
+--- /dev/null
++++ b/dlls/wineohos.drv/ohos_audio_client.h
+@@ -0,0 +1,46 @@
++#ifndef WINEOHOS_AUDIO_CLIENT_H
++#define WINEOHOS_AUDIO_CLIENT_H
++
++#include <pthread.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include "../../../../shared/audio/audio_ipc_protocol.h"
++
++typedef struct OhosAudioClient
++{
++    int fd;
++    uint32_t next_seq;
++    pthread_mutex_t lock;
++} OhosAudioClient;
++
++typedef struct OhosAudioClientStream
++{
++    uint32_t stream_id;
++    uint32_t preferred_period_frames;
++    uint32_t ring_capacity_frames;
++    uint32_t mix_frame_size;
++    int ring_fd;
++    size_t ring_mapping_size;
++    WinehuaAudioRingBuffer *ring;
++} OhosAudioClientStream;
++
++int ohos_audio_client_connect(OhosAudioClient **out_client);
++void ohos_audio_client_disconnect(OhosAudioClient *client);
++
++int ohos_audio_client_open_stream(OhosAudioClient *client,
++                                  const WinehuaAudioOpenStreamReq *req,
++                                  OhosAudioClientStream *out_stream);
++int ohos_audio_client_start(OhosAudioClient *client, uint32_t stream_id);
++int ohos_audio_client_stop(OhosAudioClient *client, uint32_t stream_id);
++int ohos_audio_client_reset(OhosAudioClient *client, uint32_t stream_id);
++int ohos_audio_client_close_stream(OhosAudioClient *client, OhosAudioClientStream *stream);
++int ohos_audio_client_get_status(OhosAudioClient *client,
++                                 uint32_t stream_id,
++                                 WinehuaAudioGetStatusResp *out_status);
++
++size_t ohos_audio_client_write_frames(OhosAudioClientStream *stream, const void *data, size_t frames);
++size_t ohos_audio_client_get_free_frames(const OhosAudioClientStream *stream);
++size_t ohos_audio_client_get_queued_frames(const OhosAudioClientStream *stream);
++
++#endif
+diff --git a/programs/winehua_audio_smoke/Makefile.in b/programs/winehua_audio_smoke/Makefile.in
+new file mode 100644
+index 000000000000..f0542364b0d0
+--- /dev/null
++++ b/programs/winehua_audio_smoke/Makefile.in
+@@ -0,0 +1,7 @@
++MODULE    = winehua_audio_smoke.exe
++IMPORTS   = ole32 winmm
++
++EXTRADLLFLAGS = -mconsole
++
++SOURCES = \
++	main.c
+diff --git a/programs/winehua_audio_smoke/main.c b/programs/winehua_audio_smoke/main.c
+new file mode 100644
+index 000000000000..81f4e3b9832f
+--- /dev/null
++++ b/programs/winehua_audio_smoke/main.c
+@@ -0,0 +1,399 @@
++/*
++ * WineHua audio smoke test.
++ */
++
++#define COBJMACROS
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <windows.h>
++#include <initguid.h>
++#include <mmsystem.h>
++#include <mmdeviceapi.h>
++#include <audioclient.h>
++
++#define MAX_WAV_SIZE (32 * 1024 * 1024)
++#define PRIMARY_MP3_PATH "Z:\\Documents\\Media\\Alarm01.mp3"
++#define FALLBACK_MP3_PATH "C:\\Documents\\Media\\Alarm01.mp3"
++#define ROOT_MP3_PATH "C:\\Alarm01.mp3"
++#define LOCAL_MP3_PATH "Alarm01.mp3"
++#define PRIMARY_WAV_PATH "Z:\\Documents\\Media\\Alarm01.wav"
++#define FALLBACK_WAV_PATH "C:\\Documents\\Media\\Alarm01.wav"
++#define LOCAL_WAV_PATH "Alarm01.wav"
++
++struct wav_file
++{
++    WAVEFORMATEX *format;
++    DWORD format_size;
++    BYTE *data;
++    DWORD data_size;
++    char path[MAX_PATH];
++};
++
++static DWORD read_u32le(const BYTE *data)
++{
++    return (DWORD)data[0] | ((DWORD)data[1] << 8) | ((DWORD)data[2] << 16) | ((DWORD)data[3] << 24);
++}
++
++static DWORD align_down(DWORD value, DWORD alignment)
++{
++    return alignment ? value - value % alignment : value;
++}
++
++static void free_wav_file(struct wav_file *wav)
++{
++    if (!wav) return;
++    HeapFree(GetProcessHeap(), 0, wav->format);
++    HeapFree(GetProcessHeap(), 0, wav->data);
++    memset(wav, 0, sizeof(*wav));
++}
++
++static BOOL load_wav_file(const char *path, struct wav_file *wav)
++{
++    HANDLE file = INVALID_HANDLE_VALUE;
++    LARGE_INTEGER size;
++    BYTE *file_bytes = NULL;
++    DWORD bytes_read = 0;
++    DWORD format_offset = 0, format_size = 0, data_offset = 0, data_size = 0;
++    DWORD offset, next, copy_size;
++    BOOL ok = FALSE;
++
++    memset(wav, 0, sizeof(*wav));
++    file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
++    if (file == INVALID_HANDLE_VALUE) return FALSE;
++
++    if (!GetFileSizeEx(file, &size) || size.QuadPart < 44 || size.QuadPart > MAX_WAV_SIZE) goto done;
++
++    file_bytes = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)size.QuadPart);
++    if (!file_bytes) goto done;
++
++    if (!ReadFile(file, file_bytes, (DWORD)size.QuadPart, &bytes_read, NULL) || bytes_read != size.QuadPart) goto done;
++    if (memcmp(file_bytes, "RIFF", 4) || memcmp(file_bytes + 8, "WAVE", 4)) goto done;
++
++    for (offset = 12; offset + 8 <= (DWORD)size.QuadPart; offset = next)
++    {
++        DWORD chunk_size = read_u32le(file_bytes + offset + 4);
++
++        if ((DWORD)size.QuadPart - offset < 8 || chunk_size > (DWORD)size.QuadPart - offset - 8) break;
++        next = offset + 8 + chunk_size + (chunk_size & 1);
++
++        if (!memcmp(file_bytes + offset, "fmt ", 4) && chunk_size >= 16 && !format_offset)
++        {
++            format_offset = offset + 8;
++            format_size = chunk_size;
++        }
++        else if (!memcmp(file_bytes + offset, "data", 4) && !data_offset)
++        {
++            data_offset = offset + 8;
++            data_size = chunk_size;
++        }
++    }
++
++    if (!format_offset || !data_offset) goto done;
++
++    copy_size = format_size < sizeof(WAVEFORMATEX) ? sizeof(WAVEFORMATEX) : format_size;
++    wav->format = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, copy_size);
++    if (!wav->format) goto done;
++
++    memcpy(wav->format, file_bytes + format_offset, format_size);
++    wav->format_size = copy_size;
++    if (format_size == 16) wav->format->cbSize = 0;
++    if (!wav->format->nBlockAlign) goto done;
++
++    data_size = align_down(data_size, wav->format->nBlockAlign);
++    if (!data_size) goto done;
++
++    wav->data = HeapAlloc(GetProcessHeap(), 0, data_size);
++    if (!wav->data) goto done;
++
++    memcpy(wav->data, file_bytes + data_offset, data_size);
++    wav->data_size = data_size;
++    lstrcpynA(wav->path, path, MAX_PATH);
++    ok = TRUE;
++
++done:
++    HeapFree(GetProcessHeap(), 0, file_bytes);
++    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
++    if (!ok) free_wav_file(wav);
++    return ok;
++}
++
++static BOOL load_alarm_wav(struct wav_file *wav)
++{
++    static const char *const paths[] = {PRIMARY_WAV_PATH, FALLBACK_WAV_PATH, LOCAL_WAV_PATH};
++    unsigned int i;
++
++    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
++    {
++        if (load_wav_file(paths[i], wav))
++        {
++            fprintf(stderr, "winehua_audio_smoke: using %s\n", wav->path);
++            return TRUE;
++        }
++    }
++
++    fprintf(stderr, "winehua_audio_smoke: failed to open %s or fallbacks\n", PRIMARY_WAV_PATH);
++    return FALSE;
++}
++
++static BOOL file_exists(const char *path)
++{
++    DWORD attrs = GetFileAttributesA(path);
++    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
++}
++
++static int play_mp3_via_mci(const char *path)
++{
++    static const char alias_name[] = "winehua_mp3";
++    char cmd[2 * MAX_PATH + 64];
++    char error_text[256];
++    MCIERROR error;
++
++    snprintf(cmd, sizeof(cmd), "close %s", alias_name);
++    mciSendStringA(cmd, NULL, 0, NULL);
++
++    snprintf(cmd, sizeof(cmd), "open \"%s\" type mpegvideo alias %s", path, alias_name);
++    error = mciSendStringA(cmd, NULL, 0, NULL);
++    if (error)
++    {
++        snprintf(cmd, sizeof(cmd), "open \"%s\" alias %s", path, alias_name);
++        error = mciSendStringA(cmd, NULL, 0, NULL);
++    }
++
++    if (error)
++    {
++        if (!mciGetErrorStringA(error, error_text, sizeof(error_text)))
++            snprintf(error_text, sizeof(error_text), "MCI error %u", (unsigned int)error);
++        fprintf(stderr, "winehua_audio_smoke: MCI open failed for %s: %s\n", path, error_text);
++        return 4;
++    }
++
++    fprintf(stderr, "winehua_audio_smoke: using MP3 %s\n", path);
++
++    snprintf(cmd, sizeof(cmd), "play %s wait", alias_name);
++    error = mciSendStringA(cmd, NULL, 0, NULL);
++    if (error)
++    {
++        if (!mciGetErrorStringA(error, error_text, sizeof(error_text)))
++            snprintf(error_text, sizeof(error_text), "MCI error %u", (unsigned int)error);
++        fprintf(stderr, "winehua_audio_smoke: MCI play failed for %s: %s\n", path, error_text);
++        snprintf(cmd, sizeof(cmd), "close %s", alias_name);
++        mciSendStringA(cmd, NULL, 0, NULL);
++        return 5;
++    }
++
++    snprintf(cmd, sizeof(cmd), "close %s", alias_name);
++    mciSendStringA(cmd, NULL, 0, NULL);
++    fprintf(stderr, "winehua_audio_smoke: MP3 playback complete\n");
++    return 0;
++}
++
++static int play_alarm_mp3(void)
++{
++    static const char *const paths[] = {PRIMARY_MP3_PATH, FALLBACK_MP3_PATH, ROOT_MP3_PATH, LOCAL_MP3_PATH};
++    unsigned int i;
++
++    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
++    {
++        if (file_exists(paths[i]))
++            return play_mp3_via_mci(paths[i]);
++    }
++
++    fprintf(stderr, "winehua_audio_smoke: no Alarm01.mp3 found in mapped Wine paths\n");
++    return -1;
++}
++
++static int play_wav_via_audioclient(const struct wav_file *wav)
++{
++    IMMDeviceEnumerator *enumerator = NULL;
++    IMMDevice *device = NULL;
++    IAudioClient *client = NULL;
++    IAudioRenderClient *render = NULL;
++    UINT32 buffer_frames = 0;
++    UINT32 total_frames = wav->data_size / wav->format->nBlockAlign;
++    UINT32 offset_frames = 0;
++    UINT32 padding = 0;
++    REFERENCE_TIME duration = 10000000;
++    BYTE *dst = NULL;
++    HRESULT hr;
++    BOOL com_initialized = FALSE;
++
++    hr = CoInitialize(NULL);
++    if (SUCCEEDED(hr))
++        com_initialized = TRUE;
++    else if (hr != RPC_E_CHANGED_MODE)
++    {
++        fprintf(stderr, "CoInitialize failed: 0x%08lx\n", hr);
++        return 2;
++    }
++
++    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_INPROC_SERVER,
++                          &IID_IMMDeviceEnumerator, (void **)&enumerator);
++    if (FAILED(hr))
++    {
++        fprintf(stderr, "CoCreateInstance(IMMDeviceEnumerator) failed: 0x%08lx\n", hr);
++        goto fail;
++    }
++
++    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(enumerator, eRender, eConsole, &device);
++    if (FAILED(hr))
++    {
++        fprintf(stderr, "GetDefaultAudioEndpoint failed: 0x%08lx\n", hr);
++        goto fail;
++    }
++
++    hr = IMMDevice_Activate(device, &IID_IAudioClient, CLSCTX_INPROC_SERVER, NULL, (void **)&client);
++    if (FAILED(hr))
++    {
++        fprintf(stderr, "IMMDevice_Activate(IAudioClient) failed: 0x%08lx\n", hr);
++        goto fail;
++    }
++
++    hr = IAudioClient_Initialize(client, AUDCLNT_SHAREMODE_SHARED, 0, duration, 0, wav->format, NULL);
++    if (FAILED(hr))
++    {
++        fprintf(stderr, "IAudioClient_Initialize failed: 0x%08lx\n", hr);
++        goto fail;
++    }
++
++    hr = IAudioClient_GetBufferSize(client, &buffer_frames);
++    if (FAILED(hr))
++    {
++        fprintf(stderr, "IAudioClient_GetBufferSize failed: 0x%08lx\n", hr);
++        goto fail;
++    }
++
++    hr = IAudioClient_GetService(client, &IID_IAudioRenderClient, (void **)&render);
++    if (FAILED(hr))
++    {
++        fprintf(stderr, "IAudioClient_GetService(IAudioRenderClient) failed: 0x%08lx\n", hr);
++        goto fail;
++    }
++
++    fprintf(stderr, "winehua_audio_smoke: format tag=%u channels=%u rate=%lu bits=%u frames=%u buffer=%u\n",
++            wav->format->wFormatTag, wav->format->nChannels, wav->format->nSamplesPerSec,
++            wav->format->wBitsPerSample, total_frames, buffer_frames);
++
++    if (buffer_frames > total_frames) buffer_frames = total_frames;
++    if (buffer_frames)
++    {
++        hr = IAudioRenderClient_GetBuffer(render, buffer_frames, &dst);
++        if (FAILED(hr))
++        {
++            fprintf(stderr, "IAudioRenderClient_GetBuffer(initial) failed: 0x%08lx\n", hr);
++            goto fail;
++        }
++
++        memcpy(dst, wav->data, buffer_frames * wav->format->nBlockAlign);
++        hr = IAudioRenderClient_ReleaseBuffer(render, buffer_frames, 0);
++        if (FAILED(hr))
++        {
++            fprintf(stderr, "IAudioRenderClient_ReleaseBuffer(initial) failed: 0x%08lx\n", hr);
++            goto fail;
++        }
++
++        offset_frames = buffer_frames;
++    }
++
++    hr = IAudioClient_Start(client);
++    if (FAILED(hr))
++    {
++        fprintf(stderr, "IAudioClient_Start failed: 0x%08lx\n", hr);
++        goto fail;
++    }
++
++    while (offset_frames < total_frames)
++    {
++        UINT32 available_frames;
++        UINT32 chunk_frames;
++
++        hr = IAudioClient_GetCurrentPadding(client, &padding);
++        if (FAILED(hr))
++        {
++            fprintf(stderr, "IAudioClient_GetCurrentPadding failed: 0x%08lx\n", hr);
++            goto fail_stop;
++        }
++
++        if (padding >= buffer_frames)
++        {
++            Sleep(5);
++            continue;
++        }
++
++        available_frames = buffer_frames - padding;
++        chunk_frames = total_frames - offset_frames;
++        if (chunk_frames > available_frames) chunk_frames = available_frames;
++        if (!chunk_frames)
++        {
++            Sleep(5);
++            continue;
++        }
++
++        hr = IAudioRenderClient_GetBuffer(render, chunk_frames, &dst);
++        if (FAILED(hr))
++        {
++            fprintf(stderr, "IAudioRenderClient_GetBuffer failed: 0x%08lx\n", hr);
++            goto fail_stop;
++        }
++
++        memcpy(dst, wav->data + offset_frames * wav->format->nBlockAlign,
++               chunk_frames * wav->format->nBlockAlign);
++        hr = IAudioRenderClient_ReleaseBuffer(render, chunk_frames, 0);
++        if (FAILED(hr))
++        {
++            fprintf(stderr, "IAudioRenderClient_ReleaseBuffer failed: 0x%08lx\n", hr);
++            goto fail_stop;
++        }
++
++        offset_frames += chunk_frames;
++    }
++
++    do
++    {
++        Sleep(10);
++        hr = IAudioClient_GetCurrentPadding(client, &padding);
++        if (FAILED(hr))
++        {
++            fprintf(stderr, "IAudioClient_GetCurrentPadding(drain) failed: 0x%08lx\n", hr);
++            goto fail_stop;
++        }
++    } while (padding);
++
++    IAudioClient_Stop(client);
++    IAudioRenderClient_Release(render);
++    IAudioClient_Release(client);
++    IMMDevice_Release(device);
++    IMMDeviceEnumerator_Release(enumerator);
++    if (com_initialized) CoUninitialize();
++
++    fprintf(stderr, "winehua_audio_smoke: playback complete\n");
++    return 0;
++
++fail_stop:
++    IAudioClient_Stop(client);
++fail:
++    if (render) IAudioRenderClient_Release(render);
++    if (client) IAudioClient_Release(client);
++    if (device) IMMDevice_Release(device);
++    if (enumerator) IMMDeviceEnumerator_Release(enumerator);
++    if (com_initialized) CoUninitialize();
++    return 3;
++}
++
++int main(void)
++{
++    struct wav_file wav;
++    int ret;
++
++    ret = play_alarm_mp3();
++    if (ret == 0) return 0;
++    if (ret > 0)
++        fprintf(stderr, "winehua_audio_smoke: MP3 playback unavailable, falling back to WAV path\n");
++
++    if (!load_alarm_wav(&wav)) return 1;
++
++    ret = play_wav_via_audioclient(&wav);
++    free_wav_file(&wav);
++    return ret;
++}
+

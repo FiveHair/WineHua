@@ -1,0 +1,245 @@
+From db90f6413abd7d856361377f09d5ab7c2178f253 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Mon, 6 Jul 2026 02:12:19 +0800
+Subject: [PATCH 027/104] =?UTF-8?q?feat:=20WoW64=2032-bit=20=E8=BF=9B?=
+ =?UTF-8?q?=E7=A8=8B=E5=8A=A0=E8=BD=BD=E8=AF=8A=E6=96=AD=E6=97=A5=E5=BF=97?=
+ =?UTF-8?q?=20+=20--enable-archs=3Di386,x86=5F64?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- unix/loader.c: find_builtin 搜索路径、open_dll_file、set_dll_path 诊断
+- loader.c: load_dll 入口/出口、process_attach、MODULE_InitDLL、fixup_imports 诊断
+- signal_i386.c: LdrInitializeThunk 入口诊断
+- server.c: server_init_process_done 诊断
+---
+ dlls/ntdll/loader.c      | 18 ++++++++++++++++++
+ dlls/ntdll/signal_i386.c |  3 +++
+ dlls/ntdll/unix/loader.c | 30 +++++++++++++++++++++++++++++-
+ dlls/ntdll/unix/server.c |  3 +++
+ 4 files changed, 53 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 31fa136039be..8d3215fa4fdb 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -1700,6 +1700,8 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
+     }
+     else TRACE("(%p %s,%s,%p) - CALL\n", module, debugstr_w(wm->ldr.BaseDllName.Buffer),
+                reason_names[reason], lpReserved );
++    MESSAGE( "[OHOS-DIAG] MODULE_InitDLL: %s reason=%s\n",
++             debugstr_w(wm->ldr.BaseDllName.Buffer), reason_names[reason] );
+ 
+     __TRY
+     {
+@@ -1714,6 +1716,8 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved
+                       status, entry, module, reason_names[reason], lpReserved );
+     }
+     __ENDTRY
++    MESSAGE( "[OHOS-DIAG] MODULE_InitDLL: %s => ret=%d status=0x%x\n",
++             debugstr_w(wm->ldr.BaseDllName.Buffer), retv, status );
+ 
+     /* The state of the module list may have changed due to the call
+        to the dll. We cannot assume that this module has not been
+@@ -1797,8 +1801,12 @@ static NTSTATUS process_attach( LDR_DDAG_NODE *node, LPVOID lpReserved )
+     /* Call DLL entry point */
+     if (status == STATUS_SUCCESS)
+     {
++        MESSAGE( "[OHOS-DIAG] process_attach: calling DllMain for %s\n",
++                 debugstr_w(wm->ldr.BaseDllName.Buffer) );
+         call_ldr_notifications( LDR_DLL_NOTIFICATION_REASON_LOADED, &wm->ldr );
+         status = MODULE_InitDLL( wm, DLL_PROCESS_ATTACH, lpReserved );
++        MESSAGE( "[OHOS-DIAG] process_attach: %s DllMain status=0x%lx\n",
++                 debugstr_w(wm->ldr.BaseDllName.Buffer), status );
+         if (status == STATUS_SUCCESS)
+         {
+             wm->ldr.Flags |= LDR_PROCESS_ATTACHED;
+@@ -3346,6 +3354,7 @@ static NTSTATUS load_dll( const WCHAR *load_path, const WCHAR *libname, DWORD fl
+     NTSTATUS nts = STATUS_DLL_NOT_FOUND;
+     BOOL redirected;
+     void *prev;
++    MESSAGE( "[OHOS-DIAG] load_dll: %s\n", debugstr_w(libname) );
+ 
+     TRACE( "looking for %s in %s\n", debugstr_w(libname), debugstr_w(load_path) );
+ 
+@@ -3394,6 +3403,7 @@ static NTSTATUS load_dll( const WCHAR *load_path, const WCHAR *libname, DWORD fl
+         TRACE("Loaded module %s at %p\n", debugstr_us(&nt_name), (*pwm)->ldr.DllBase);
+     else
+         WARN("Failed to load module %s; status=%lx\n", debugstr_w(libname), nts);
++    MESSAGE( "[OHOS-DIAG] load_dll: %s => nts=0x%lx\n", debugstr_w(libname), nts );
+ 
+     if (mapping) NtClose( mapping );
+     RtlFreeUnicodeString( &nt_name );
+@@ -4496,11 +4506,13 @@ void loader_init( CONTEXT *context, void **entry )
+         update_load_config( wm->ldr.DllBase );
+ #endif
+ 
++        MESSAGE( "[OHOS-DIAG] loader_init: loading kernel32\n" );
+         if ((status = load_dll( NULL, L"kernel32.dll", 0, &kernel32, FALSE )) != STATUS_SUCCESS)
+         {
+             MESSAGE( "wine: could not load kernel32.dll, status %lx\n", status );
+             NtTerminateProcess( GetCurrentProcess(), status );
+         }
++        MESSAGE( "[OHOS-DIAG] loader_init: kernel32 loaded\n" );
+         node_kernel32 = kernel32->ldr.DdagNode;
+         pBaseThreadInitThunk = RtlFindExportedRoutineByName( kernel32->ldr.DllBase, "BaseThreadInitThunk" );
+         LdrGetProcedureAddress( kernel32->ldr.DllBase, &ctrl_routine, 0, (void **)&pCtrlRoutine );
+@@ -4510,10 +4522,12 @@ void loader_init( CONTEXT *context, void **entry )
+         if (needs_elevation())
+             elevate_token();
+         get_env_var( L"WINESYSTEMDLLPATH", 0, &system_dll_path );
++        MESSAGE( "[OHOS-DIAG] loader_init: calling fixup_imports\n" );
+         if (wm->ldr.Flags & LDR_COR_ILONLY)
+             status = fixup_imports_ilonly( wm, NULL, entry );
+         else
+             status = fixup_imports( wm, NULL );
++        MESSAGE( "[OHOS-DIAG] loader_init: fixup status=0x%lx\n", (unsigned long)status );
+ 
+         if (status)
+         {
+@@ -4556,10 +4570,14 @@ void loader_init( CONTEXT *context, void **entry )
+         if (wm->ldr.ActivationContext)
+             RtlActivateActivationContext( 0, wm->ldr.ActivationContext, &cookie );
+ 
++        MESSAGE( "[OHOS-DIAG] loader_init: attach(ntdll)\n" );
+         status = process_attach( node_ntdll, context );
++        MESSAGE( "[OHOS-DIAG] loader_init: attach(ntdll)=0x%lx\n", (unsigned long)status );
+         if (!status)
+         {
++            MESSAGE( "[OHOS-DIAG] loader_init: attach(kernel32)\n" );
+             status = process_attach( node_kernel32, context );
++            MESSAGE( "[OHOS-DIAG] loader_init: attach(kernel32)=0x%lx\n", (unsigned long)status );
+         }
+         if (status)
+         {
+diff --git a/dlls/ntdll/signal_i386.c b/dlls/ntdll/signal_i386.c
+index 8a9a77532ee7..cb5cfc508e92 100644
+--- a/dlls/ntdll/signal_i386.c
++++ b/dlls/ntdll/signal_i386.c
+@@ -534,9 +534,12 @@ __ASM_GLOBAL_FUNC( signal_start_thread,
+  */
+ void WINAPI LdrInitializeThunk( CONTEXT *context, ULONG_PTR unk2, ULONG_PTR unk3, ULONG_PTR unk4 )
+ {
++    FIXME( "[OHOS-DIAG] 32bit LdrInitializeThunk Eip=0x%lx\n", context->Eip );
+     loader_init( context, (void **)&context->Eax );
++    FIXME( "[OHOS-DIAG] 32bit loader_init done Eax=0x%lx\n", context->Eax );
+     TRACE_(relay)( "\1Starting thread proc %p (arg=%p)\n", (void *)context->Eax, (void *)context->Ebx );
+     signal_start_thread( context );
++    FIXME( "[OHOS-DIAG] 32bit signal_start_thread returned!\n" );
+ }
+ 
+ 
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 6519d65754ec..556fbbcbc2a5 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -322,6 +322,13 @@ static void set_dll_path(void)
+         dll_path_maxlen = max( dll_path_maxlen, strlen(dll_paths[i]) );
+     }
+     dll_paths[count] = NULL;
++
++    /* OHOS-DIAG: dump DLL search paths */
++    MESSAGE( "[OHOS-DIAG] set_dll_path: build_dir=%s dll_dir=%s WINEDLLPATH=%s\n",
++             build_dir ? build_dir : "(null)", dll_dir ? dll_dir : "(null)",
++             getenv("WINEDLLPATH") ? getenv("WINEDLLPATH") : "(null)" );
++    for (i = 0; dll_paths[i]; i++)
++        MESSAGE( "[OHOS-DIAG]   dll_path[%d] = %s\n", i, dll_paths[i] );
+ }
+ 
+ 
+@@ -424,6 +431,11 @@ static void init_paths(void)
+         wineloader = build_path( ntdll_dir, "wine" );
+     }
+ 
++    MESSAGE( "[OHOS-DIAG] init_paths: build_dir=%s ntdll_dir=%s dll_dir=%s bin_dir=%s\n",
++             build_dir ? build_dir : "(null)",
++             ntdll_dir ? ntdll_dir : "(null)",
++             dll_dir ? dll_dir : "(null)",
++             bin_dir ? bin_dir : "(null)" );
+     set_dll_path();
+     set_system_dll_path();
+     set_home_dir();
+@@ -1286,6 +1298,7 @@ static NTSTATUS open_dll_file( const char *name, OBJECT_ATTRIBUTES *attr, HANDLE
+             if (!stat( name, &st )) return status;
+         }
+         /* otherwise continue searching */
++        MESSAGE( "[OHOS-DIAG] open_dll_file NOT FOUND: %s status=0x%x\n", name, status );
+         return STATUS_DLL_NOT_FOUND;
+     }
+ 
+@@ -1294,6 +1307,7 @@ static NTSTATUS open_dll_file( const char *name, OBJECT_ATTRIBUTES *attr, HANDLE
+                               SECTION_MAP_READ | SECTION_MAP_EXECUTE,
+                               NULL, &size, PAGE_EXECUTE_READ, SEC_IMAGE, handle );
+     NtClose( handle );
++    MESSAGE( "[OHOS-DIAG] open_dll_file OK: %s mapping=%p\n", name, *mapping );
+     return status;
+ }
+ 
+@@ -1382,6 +1396,11 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
+ 
+     TRACE( "looking for %s for file %s\n", debugstr_a(file + pos + 1), debugstr_us(nt_name) );
+ 
++    /* OHOS-DIAG: log DLL search with machine and search type */
++    MESSAGE( "[OHOS-DIAG] find_builtin: name=%s search_machine=0x%x pe_dir=%s build_dir=%s alt_build_dir=%s\n",
++             file + pos + 1, search_machine, pe_dir ? pe_dir : "(null)",
++             build_dir ? build_dir : "(null)", alt_build_dir ? alt_build_dir : "(null)" );
++
+     if (build_dir)
+     {
+         /* try as a dll */
+@@ -1412,6 +1431,7 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
+         ptr = prepend( ptr, dll_paths[i], strlen(dll_paths[i]) );
+         status = open_builtin_pe_file( ptr, &attr, module, size_ptr, image_info, limit_low, limit_high,
+                                        load_machine, prefer_native, offset );
++        MESSAGE( "[OHOS-DIAG] open_builtin_pe: path=%s status=0x%x\n", ptr, status );
+         /* use so dir for unix lib */
+         ptr = file + pos;
+         ptr = prepend( ptr, so_dir, strlen(so_dir) );
+@@ -1813,7 +1833,10 @@ static void load_ntdll_wow64_functions( HMODULE module )
+ 
+     pLdrSystemDllInitBlock->ntdll_handle = (ULONG_PTR)module;
+ 
+-#define GET_FUNC(name) pLdrSystemDllInitBlock->p##name = find_named_export( module, exports, #name )
++#define GET_FUNC(name) do { \
++    pLdrSystemDllInitBlock->p##name = find_named_export( module, exports, #name ); \
++    MESSAGE( "[OHOS-DIAG] wow64_func: %s=%p\n", #name, pLdrSystemDllInitBlock->p##name ); \
++} while(0)
+     GET_FUNC( KiUserApcDispatcher );
+     GET_FUNC( KiUserCallbackDispatcher );
+     GET_FUNC( KiUserExceptionDispatcher );
+@@ -1830,6 +1853,8 @@ static void load_ntdll_wow64_functions( HMODULE module )
+     {
+         unixlib_handle_t *p__wine_unixlib_handle = (void *)find_named_export( module, exports,
+                                                                               "__wine_unixlib_handle" );
++        MESSAGE( "[OHOS-DIAG] wow64_func: __wine_unixlib_handle=%p unix_call_wow64_funcs=%p\n",
++                 p__wine_unixlib_handle, unix_call_wow64_funcs );
+         *p__wine_unixlib_handle = (UINT_PTR)unix_call_wow64_funcs;
+     }
+ #endif
+@@ -2020,7 +2045,10 @@ static void load_wow64_ntdll( USHORT machine )
+     status = find_builtin_dll( &nt_name, NULL, &module, &size, &info, 0, 0, machine, 0, FALSE, 0 );
+     if (status == STATUS_IMAGE_NOT_AT_BASE) status = virtual_relocate_module( module );
+     if (status) fatal_error( "failed to load %s error %x\n", debugstr_w(path), status );
++    MESSAGE( "[OHOS-DIAG] load_wow64_ntdll: machine=0x%x path=%s module=%p OK\n",
++             machine, debugstr_w(path), module );
+     load_ntdll_wow64_functions( module );
++    MESSAGE( "[OHOS-DIAG] load_wow64_ntdll: wow64 functions loaded OK\n" );
+     TRACE("loaded %s at %p\n", debugstr_w(path), module );
+     free( path );
+ }
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index b821c3f10ca3..18f37e4628bc 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1807,7 +1807,10 @@ void server_init_process_done(void)
+     SERVER_END_REQ;
+ 
+     assert( !status );
++    MESSAGE( "[OHOS-DIAG] server_init_process_done: TransferAddress=0x%lx machine=0x%x TEB=%p\n",
++             main_image_info.TransferAddress, main_image_info.Machine, data->teb );
+     signal_start_thread( main_image_info.TransferAddress, peb, data->teb );
++    MESSAGE( "[OHOS-DIAG] FATAL: signal_start_thread RETURNED unexpectedly!\n" );
+ }
+ 
+ 
+

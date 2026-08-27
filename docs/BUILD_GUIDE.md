@@ -45,6 +45,9 @@ make NATIVE_ARCH=arm64-v8a
 
 # 双架构 HAP
 make NATIVE_ARCH=all
+
+# Proton 引擎 flavor（需先生成 patches/wine-ohos 补丁系列, 见 PROTON_ENGINE.md）
+make ENGINE=proton NATIVE_ARCH=arm64-v8a hap
 ```
 
 ### 单阶段构建
@@ -109,12 +112,14 @@ build/.stamps/
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `NATIVE_ARCH` | `x86_64` (Makefile) | `arm64-v8a` 或 `x86_64` 或 `all` |
+| `ENGINE` | `wine` | 引擎 flavor：`wine`（fork 直建）或 `proton`（ValveSoftware/wine + `patches/wine-ohos` 补丁系列，详见 [PROTON_ENGINE.md](./PROTON_ENGINE.md)） |
 | `GUEST_ARCH` | `x86_64` | guest 侧架构 |
 | `OHOS_SDK` | `/apps/harmony/sdk/default/openharmony` | HarmonyOS SDK 路径 |
 | `BUILD_GUEST_GFX` | `1` (Makefile) / `0` (脚本直跑) | 构建 guest Mesa (VirGL) |
 | `BUILD_GUEST_VULKAN` | `1` (Makefile) | 构建 guest Vulkan 栈 (Loader + Venus ICD) |
 | `BUILD_WINE_MONO` | `0` | 设为 `1` 下载 Wine Mono (.NET 运行时) |
 | `TARGET_SDK_VERSION` | `6.1.0(23)` | HAP SDK 版本 |
+| `PROTON_UPSTREAM_REF` | `proton_11.0` | Proton flavor 的上游基线（ValveSoftware/wine 分支/tag） |
 
 运行时变量（注入 Wine 子进程，见 `graphics_broker.cpp` / `wine_env.cpp` / `wine_child.cpp`）：
 

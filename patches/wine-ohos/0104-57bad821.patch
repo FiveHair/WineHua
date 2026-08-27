@@ -1,0 +1,27 @@
+From 57bad82108fa3ecbbc0fa1757079edf696117cf6 Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Fri, 14 Aug 2026 10:35:08 +0800
+Subject: [PATCH 104/104] =?UTF-8?q?secur32:=20schannel=20=E7=A6=81?=
+ =?UTF-8?q?=E7=94=A8=20CHACHA20-POLY1305=20=E4=BC=98=E5=85=88=E7=BA=A7=20(?=
+ =?UTF-8?q?Box64=20=E4=B8=8B=E5=BC=BA=E5=88=B6=20AES-GCM)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ dlls/secur32/schannel_gnutls.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/secur32/schannel_gnutls.c b/dlls/secur32/schannel_gnutls.c
+index b95d8875d65d..a32cca6c59d2 100644
+--- a/dlls/secur32/schannel_gnutls.c
++++ b/dlls/secur32/schannel_gnutls.c
+@@ -434,7 +434,7 @@ static int pull_timeout(gnutls_transport_ptr_t transport, unsigned int timeout)
+ 
+ static NTSTATUS set_priority(schan_credentials *cred, gnutls_session_t session)
+ {
+-    char priority[128] = "NORMAL:%LATEST_RECORD_VERSION", *p;
++    char priority[160] = "NORMAL:-CHACHA20-POLY1305:%LATEST_RECORD_VERSION", *p;
+     BOOL server = !!(cred->credential_use & SECPKG_CRED_INBOUND);
+     const struct protocol_priority_flag *protocols =
+         server ? server_protocol_priority_flags : client_protocol_priority_flags;

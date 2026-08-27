@@ -43,6 +43,7 @@ x86_64 下 Wine 原生 .so 由系统 linker 直接加载。
 | 全屏游戏 (指针锁定 / 相对鼠标 / 光标回中) | ✅ |
 | 触屏手势 / 触控板模式 | ✅ |
 | NAPI 沙箱运行 | ✅ |
+| Proton 引擎 flavor (`make ENGINE=proton`) | 🚧 构建体系就绪，待补丁系列首生成 ([docs/PROTON_ENGINE.md](docs/PROTON_ENGINE.md)) |
 
 ## 构建
 
@@ -53,8 +54,16 @@ make NATIVE_ARCH=arm64-v8a
 # 仅 HAP (只改 ArkTS / C++)
 make NATIVE_ARCH=arm64-v8a hap
 
+# Proton 引擎 flavor (ValveSoftware/wine + WineHua OHOS 补丁系列;
+# 需先运行 scripts/gen-wine-ohos-patches.sh 生成 patches/wine-ohos/)
+make ENGINE=proton NATIVE_ARCH=arm64-v8a hap
+
 # 详细文档: docs/BUILD_GUIDE.md
 ```
+
+Proton flavor 与 wine flavor 共享全部功能与设备端契约（同一 `wine-data.zip`
+布局、`.wine` prefix、升级/重置流程），仅引擎源换为 Valve 的 Proton wine 树
+— 详见 [docs/PROTON_ENGINE.md](docs/PROTON_ENGINE.md)。
 
 ## 目录结构
 
@@ -90,8 +99,11 @@ WineHua/
 │       ├── WineEnvService.ets     # 引擎环境/D3D 后端配置
 │       └── InputSettingsService.ets # 输入设置 (光标速度/触控板等)
 ├── scripts/
-│   ├── env.sh                 # 环境变量 (NATIVE_ARCH, 工具链)
-│   ├── build_wine.sh          # Wine 构建
+│   ├── env.sh                 # 环境变量 (NATIVE_ARCH, ENGINE, 工具链)
+│   ├── build_engine.sh        # 引擎共享构建管线 (wine|proton 参数化)
+│   ├── build_wine.sh          # Wine 引擎入口 (fork 直建)
+│   ├── build_proton.sh        # Proton 引擎入口 (上游+补丁系列 bootstrap)
+│   ├── gen-wine-ohos-patches.sh # 导出 OHOS 补丁系列 → patches/wine-ohos/
 │   ├── build_box64.sh         # Box64 构建 (box64.so)
 │   ├── build_guest_gfx.sh     # Guest Mesa (VirGL) 构建
 │   ├── build_ohos_guest_vulkan.sh # Guest Vulkan (Venus) 构建

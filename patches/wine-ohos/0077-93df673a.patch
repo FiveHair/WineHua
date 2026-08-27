@@ -1,0 +1,65 @@
+From 93df673ac15959e427c77297c70413f7a5df57e9 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sun, 26 Jul 2026 01:12:20 +0800
+Subject: [PATCH 077/104] =?UTF-8?q?feat(winewayland):=20app=5Fid=20?=
+ =?UTF-8?q?=E9=99=84=E5=8A=A0=E7=AA=97=E5=8F=A3=20class=20=E5=90=8E?=
+ =?UTF-8?q?=E7=BC=80=E4=BB=A5=E5=8C=BA=E5=88=86=20explorer=20=E7=AA=97?=
+ =?UTF-8?q?=E5=8F=A3=E7=B1=BB=E5=9E=8B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Shell_TrayWnd → explorer.exe.taskbar
+#32769        → explorer.exe.desktop-shell
+
+compositor 此前被迫用几何启发推断窗口角色, 语义化 app_id 后可消除。
+---
+ dlls/winewayland.drv/wayland_surface.c | 34 +++++++++++++++++++++++++-
+ 1 file changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
+index 2d5c526ae85b..96c062758300 100644
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -271,7 +271,39 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
+     xdg_toplevel_add_listener(surface->xdg_toplevel, &xdg_toplevel_listener, surface->hwnd);
+ 
+     if (process_name)
+-        xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
++    {
++        /* Append window class suffix for known explorer window types,
++         * enabling the compositor to identify desktop root and taskbar
++         * without geometric heuristics.
++         *
++         * Class names as defined in programs/explorer/:
++         *   Shell_TrayWnd — systray.c:150 (taskbar)
++         *   #32769        — desktop.c:40  (DESKTOP_CLASS_ATOM, desktop shell) */
++        static const WCHAR taskbar_class[] = {'S','h','e','l','l','_','T','r','a','y','W','n','d', 0};
++        static const WCHAR desktop_atom[] = {'#','3','2','7','6','9', 0};
++        WCHAR class_buf[256];
++        UNICODE_STRING class_str = {.Buffer = class_buf, .MaximumLength = sizeof(class_buf)};
++        const char *suffix = NULL;
++
++        if (NtUserGetClassName(surface->hwnd, TRUE, &class_str))
++        {
++            if (!wcscmp(class_buf, taskbar_class))
++                suffix = "taskbar";
++            else if (!wcscmp(class_buf, desktop_atom))
++                suffix = "desktop-shell";
++        }
++
++        if (suffix)
++        {
++            char app_id[512];
++            snprintf(app_id, sizeof(app_id), "%s.%s", process_name, suffix);
++            xdg_toplevel_set_app_id(surface->xdg_toplevel, app_id);
++        }
++        else
++        {
++            xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
++        }
++    }
+ 
+     if (!NtUserInternalGetWindowText(surface->hwnd, text, ARRAY_SIZE(text)))
+         text[0] = 0;
+

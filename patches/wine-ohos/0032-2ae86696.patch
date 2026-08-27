@@ -1,0 +1,201 @@
+From 2ae866964dc356a3e88d5481722d440ff14c7583 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sat, 11 Jul 2026 00:43:41 +0800
+Subject: [PATCH 032/104] =?UTF-8?q?refactor:=20PAD=5FMODE=20=E2=86=92=20?=
+ =?UTF-8?q?=5F=5FOHOS=5F=5F=20=E7=BC=96=E8=AF=91=E6=97=B6=E5=AE=8F=20+=20w?=
+ =?UTF-8?q?inewayland.drv=20=E8=BF=90=E8=A1=8C=E6=97=B6=E6=A1=8C=E9=9D=A2?=
+ =?UTF-8?q?=E6=A8=A1=E5=BC=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- ntdll/unix: process.c/loader.c/server.c 中 PAD_MODE 改为 __OHOS__
+- winewayland.drv: #ifdef PAD_MODE 改为 getenv(WINEHUA_DESKTOP_MODE) 运行时检测
+  - window.c: 桌面模式允许所有窗口创建 win_data，独立窗口模式按需创建
+  - wayland_surface.c: 桌面模式使用虚拟桌面坐标，独立窗口模式使用相对坐标
+---
+ dlls/ntdll/unix/loader.c               | 12 ++++++------
+ dlls/ntdll/unix/process.c              | 12 ++++++------
+ dlls/ntdll/unix/server.c               |  4 ++--
+ dlls/winewayland.drv/wayland_surface.c | 18 +++++++++---------
+ dlls/winewayland.drv/window.c          | 16 +++++++++-------
+ 5 files changed, 32 insertions(+), 30 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index d00cbdfffc4b..2d3ee6e422bb 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -37,7 +37,7 @@
+ #include <sys/stat.h>
+ #include <sys/mman.h>
+ #include <sys/wait.h>
+-#ifdef PAD_MODE
++#ifdef __OHOS__
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <dirent.h>
+@@ -404,7 +404,7 @@ static void init_paths(void)
+     else
+     {
+         if (!(dll_dir = remove_tail( ntdll_dir, get_so_dir(current_machine) ))) dll_dir = ntdll_dir;
+-#ifdef PAD_MODE
++#ifdef __OHOS__
+         {
+             const char *wine_data_dir = getenv( "WINEDATADIR" );
+             if (wine_data_dir) data_dir = strdup( wine_data_dir );
+@@ -565,10 +565,10 @@ void start_server( BOOL debug )
+     MESSAGE( "[OHOS-LOADER] start_server called, started=%d debug=%d\n", started, debug );
+     if (!started)
+     {
+-#ifdef PAD_MODE
++#ifdef __OHOS__
+         /* 问题起因: 标准 Linux 上 start_server() 通过 posix_spawn 启动 wineserver，
+          * wineserver 自动 daemonize（double-fork），中间进程退出后 waitpid 返回，
+-         * 此时 wineserver socket 已就绪。但 OHOS PAD_MODE 没有 execve，
++         * 此时 wineserver socket 已就绪。但 OHOS 没有 execve，
+          * wineserver 是 libwineserver.so 库而非独立 ELF 可执行文件。
+          *
+          * 解决办法: 通过 Process Broker 请求主进程调用 StartNativeChildProcess
+@@ -2207,7 +2207,7 @@ static int pre_exec(void)
+ 
+ static int pre_exec(void)
+ {
+-#ifdef PAD_MODE
++#ifdef __OHOS__
+     return 0;  /* Pad fork-only: no preloader, no execve */
+ #elif defined(HAVE_WINE_PRELOADER)
+     return 1;  /* we have a preloader */
+@@ -2225,7 +2225,7 @@ static void reexec_loader( int argc, char *argv[], char *extra_arg )
+     char **new_argv;
+ 
+     /* have to exec if we have a preloader, or an argument, or if we are the initial wrapper */
+-#ifdef PAD_MODE
++#ifdef __OHOS__
+     if (!pre_exec() && !extra_arg) return;  // Pad: no preloader, skip default reexec
+ #else
+     if (!pre_exec() && !extra_arg && dlsym( RTLD_DEFAULT, "wine_main_preload_info" )) return;
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index 1d2965b6f646..988e445535d2 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -56,7 +56,7 @@
+ # include <libprocstat.h>
+ #endif
+ #include <unistd.h>
+-#ifdef PAD_MODE
++#ifdef __OHOS__
+ #include <sys/un.h>
+ #endif
+ #ifdef HAVE_MACH_MACH_H
+@@ -400,9 +400,9 @@ static BOOL is_unix_console_handle( HANDLE handle )
+ }
+ 
+ 
+-#ifdef PAD_MODE
++#ifdef __OHOS__
+ /***********************************************************************
+- *           send_spawn_request  (PAD_MODE)
++ *           send_spawn_request  (OHOS broker+NCP)
+  *
+  * 通过 broker 的 Unix socket 发送一个 SPAWN 请求, 携带 entryParams、
+  * N 个命名 fd (SCM_RIGHTS) 和父进程的完整环境变量。协议:
+@@ -522,7 +522,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+         isatty(1) && is_unix_console_handle( params->hStdOutput ))
+         stdout_fd = 1;
+ 
+-#ifdef PAD_MODE
++#ifdef __OHOS__
+     /* Process Broker: 通过 Unix socket 请求主进程创建子进程。
+      *
+      * 问题起因: wineboot 是 appspawn 子进程，它在 --init 阶段通过
+@@ -749,7 +749,7 @@ NTSTATUS wow64_wine_spawnvp( void *args )
+ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, int unixdir,
+                                const RTL_USER_PROCESS_PARAMETERS *params )
+ {
+-#ifdef PAD_MODE
++#ifdef __OHOS__
+     /* Pad: native Unix binary execution not supported (no execve).
+      * This path is rarely hit for core Wine (most exes are PE). */
+     return STATUS_UNSUCCESSFUL;
+@@ -842,7 +842,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+     if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
+     if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+     return status;
+-#endif /* !PAD_MODE */
++#endif /* !__OHOS__ */
+ }
+ 
+ static NTSTATUS alloc_handle_list( const PS_ATTRIBUTE *handles_attr, obj_handle_t **handles, data_size_t *handles_len )
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index b821c3f10ca3..a03bb26b7003 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1629,8 +1629,8 @@ size_t server_init_process(void)
+         MESSAGE( "[OHOS-LOADER] server_init WINESERVERSOCKET=%s, using fd directly\n", env_socket );
+         fd_socket = atoi( env_socket );
+ 
+-#ifdef PAD_MODE
+-        /* PAD_MODE: wineserver 可能在进程间传递 fd 期间退出。
++#ifdef __OHOS__
++        /* OHOS: wineserver 可能在进程间传递 fd 期间退出。
+          * recv(MSG_PEEK|MSG_DONTWAIT) 检测: 对方关闭返回 0，存活且无数据
+          * 返回 -1/EAGAIN，有数据返回 >0（MSG_PEEK 不消耗）。 */
+         {
+diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
+index de8d3a49f007..74bdf150980b 100644
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -609,16 +609,16 @@ static void wayland_surface_reconfigure_geometry(struct wayland_surface *surface
+ 
+     if (!IsRectEmpty(&rect))
+     {
+-        // PAD_MODE: 传递窗口在虚拟桌面中的位置，使 compositor 能正确合成
+-        // surface->window.rect 是相对于虚拟桌面的屏幕坐标
+-        // CW_USEDEFAULT (0x80000000) 会被 bounds check 过滤掉
++        // 桌面模式: 传递窗口在虚拟桌面中的屏幕坐标
++        // 独立窗口模式: 使用 (0,0) 相对坐标
+         int geo_x = 0, geo_y = 0;
+-#ifdef PAD_MODE
+-        if (surface->window.rect.left > -32768 && surface->window.rect.left < 32768)
+-            geo_x = surface->window.rect.left;
+-        if (surface->window.rect.top > -32768 && surface->window.rect.top < 32768)
+-            geo_y = surface->window.rect.top;
+-#endif
++        if (getenv("WINEHUA_DESKTOP_MODE") && atoi(getenv("WINEHUA_DESKTOP_MODE")))
++        {
++            if (surface->window.rect.left > -32768 && surface->window.rect.left < 32768)
++                geo_x = surface->window.rect.left;
++            if (surface->window.rect.top > -32768 && surface->window.rect.top < 32768)
++                geo_y = surface->window.rect.top;
++        }
+         xdg_surface_set_window_geometry(surface->xdg_surface,
+                                         geo_x, geo_y,
+                                         rect.right - rect.left,
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index 366550fd5830..8a9fc7638f00 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -62,13 +62,15 @@ static struct wayland_win_data *wayland_win_data_create(HWND hwnd, const struct
+     struct rb_entry *rb_entry;
+     HWND parent;
+ 
+-    /* PAD_MODE: 桌面窗口需要 wayland surface 作为 subsurfacing 的根。
+-     * 允许所有窗口（包括桌面/HWND_MESSAGE）创建 win_data。 */
+-#ifndef PAD_MODE
+-    if (!(parent = NtUserGetAncestor(hwnd, GA_PARENT))) return NULL;
+-    if (parent != NtUserGetDesktopWindow() && !NtUserGetAncestor(parent, GA_PARENT))
+-        return NULL;
+-#endif
++    /* 桌面模式: 所有窗口(包括桌面/HWND_MESSAGE)都需创建 win_data
++     * 作为 subsurfacing 的根。独立窗口模式: 只创建有父窗口的。
++     * 运行时通过环境变量 WINEHUA_DESKTOP_MODE 判断。 */
++    if (!getenv("WINEHUA_DESKTOP_MODE") || !atoi(getenv("WINEHUA_DESKTOP_MODE")))
++    {
++        if (!(parent = NtUserGetAncestor(hwnd, GA_PARENT))) return NULL;
++        if (parent != NtUserGetDesktopWindow() && !NtUserGetAncestor(parent, GA_PARENT))
++            return NULL;
++    }
+ 
+     if (!(data = calloc(1, sizeof(*data)))) return NULL;
+ 
+

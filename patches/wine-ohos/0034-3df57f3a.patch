@@ -1,0 +1,71 @@
+From 3df57f3a0469c70bfe29a791b3594ac9905ce9bb Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Wed, 24 Jun 2026 10:13:13 +0800
+Subject: [PATCH 034/104] fix: Z: drive mapping uses fixed
+ /storage/Users/currentUser instead of HOME
+
+Previously Z: drive was mapped to C:\Users\HUAWEI env var, which was changed to
+a deep app-private path (/storage/Users/currentUser/Download/app.hackeris.winehua)
+in commit 543d4bf. This broke user directory visibility from Wine.
+
+Now both dosdevices fallback paths (unixlib.c for mountmgr, file.c for ntdll)
+use a hardcoded /storage/Users/currentUser, decoupling Z: from the HOME
+environment variable.
+---
+ dlls/mountmgr.sys/unixlib.c | 7 +++----
+ dlls/ntdll/unix/file.c      | 9 ++++-----
+ 2 files changed, 7 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/mountmgr.sys/unixlib.c b/dlls/mountmgr.sys/unixlib.c
+index a8b9aceadb26..33f436e4abd3 100644
+--- a/dlls/mountmgr.sys/unixlib.c
++++ b/dlls/mountmgr.sys/unixlib.c
+@@ -295,7 +295,7 @@ static NTSTATUS get_dosdev_symlink( void *args )
+     /* OHOS: symlink() not available in NAPI sandbox. For known drive
+      * letters, return hardcoded default mount points, but ONLY if the
+      * target directory actually exists (avoids creating phantom drives).
+-     * c: → $WINEPREFIX/drive_c, z: → /
++     * c: → $WINEPREFIX/drive_c, z: → /storage/Users/currentUserstorage/Users/currentUser
+      * :: (block device) variants are skipped (no real device). */
+     if (ret == -1)
+     {
+@@ -305,9 +305,8 @@ static NTSTATUS get_dosdev_symlink( void *args )
+             struct stat st;
+             if (dev[0] == 'z')
+             {
+-                const char *home = getenv( "HOME" );
+-                if (!home) home = "/storage/Users/currentUser";
+-                lstrcpynA( params->dest, home, params->size );
++                const char *z_target = "/storage/Users/currentUser";
++                lstrcpynA( params->dest, z_target, params->size );
+                 if (params->size > 0) params->dest[params->size - 1] = 0;
+                 return STATUS_SUCCESS;
+             }
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index e2d0dbbbdfc9..20900f95857d 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -3835,7 +3835,7 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
+ #ifdef __OHOS__
+     /* OHOS: symlink() not available in NAPI sandbox. For drive letter
+      * prefixes, fall back to hardcoded default directory paths.
+-     * c: → $WINEPREFIX/drive_c, ..., z: → $HOME */
++     * c: → $WINEPREFIX/drive_c, ..., z: → /storage/Users/currentUser */
+     if (prefix_len == 2 && prefix[1] == ':')
+     {
+         unix_name[pos] = 0;  /* null-terminate the prefix for lstat */
+@@ -3843,10 +3843,9 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
+         {
+             if (prefix[0] == 'z')
+             {
+-                const char *home = getenv( "HOME" );
+-                if (!home) home = "/storage/Users/currentUser";
+-                strcpy( unix_name, home );
+-                pos = strlen( home );
++                const char *z_target = "/storage/Users/currentUser";
++                strcpy( unix_name, z_target );
++                pos = strlen( z_target );
+             }
+             else if (prefix[0] >= 'c' && prefix[0] <= 'y')
+             {
+

@@ -1,0 +1,443 @@
+From 7c2c142a18a09916aec465a01e57d7ba268c880c Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sat, 25 Jul 2026 14:10:17 +0800
+Subject: [PATCH 066/104] =?UTF-8?q?refactor(ntdll):=20=E6=8F=90=E5=8F=96?=
+ =?UTF-8?q?=E5=85=AC=E5=85=B1=20Process=20Broker=20=E5=AE=A2=E6=88=B7?=
+ =?UTF-8?q?=E7=AB=AF=E5=88=B0=20ohos=5Fbroker.c/h?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+loader.c (start_server) 和 process.c (spawn_process) 原先各自内联
+broker Unix socket 通信代码，协议相同但重复。提取到公共文件：
+- ohos_broker.h: 声明 ohos_broker_spawn() 接口
+- ohos_broker.c: 实现 socket 连接、SPAWN 消息构建/发送(含 SCM_RIGHTS)、响应解析
+- loader.c: ~42 行内联 → ~7 行 ohos_broker_spawn() 调用
+- process.c: 删除 send_spawn_request() ~68 行 + connect ~19 行 → ~7 行调用
+---
+ dlls/ntdll/Makefile.in        |   1 +
+ dlls/ntdll/unix/loader.c      |  43 ++--------
+ dlls/ntdll/unix/ohos_broker.c | 142 ++++++++++++++++++++++++++++++++++
+ dlls/ntdll/unix/ohos_broker.h |  46 +++++++++++
+ dlls/ntdll/unix/process.c     | 102 ++----------------------
+ 5 files changed, 203 insertions(+), 131 deletions(-)
+ create mode 100644 dlls/ntdll/unix/ohos_broker.c
+ create mode 100644 dlls/ntdll/unix/ohos_broker.h
+
+diff --git a/dlls/ntdll/Makefile.in b/dlls/ntdll/Makefile.in
+index 9a15bc319a4f..e85ea31d718e 100644
+--- a/dlls/ntdll/Makefile.in
++++ b/dlls/ntdll/Makefile.in
+@@ -56,6 +56,7 @@ SOURCES = \
+ 	unix/file.c \
+ 	unix/loader.c \
+ 	unix/loadorder.c \
++	unix/ohos_broker.c \
+ 	unix/process.c \
+ 	unix/registry.c \
+ 	unix/security.c \
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index f96e9e928f19..6191ba9c814c 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -38,9 +38,8 @@
+ #include <sys/mman.h>
+ #include <sys/wait.h>
+ #ifdef __OHOS__
+-#include <sys/socket.h>
+-#include <sys/un.h>
+ #include <dirent.h>
++#include "ohos_broker.h"
+ #endif
+ #include <unistd.h>
+ #include <dlfcn.h>
+@@ -601,43 +600,13 @@ void start_server( BOOL debug )
+             const char *binDir = getenv("WINEBINDIR");
+             if (!binDir) binDir = "/data/storage/el2/base/files/wine/bin";
+ 
+-            int broker_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+-            if (broker_fd >= 0)
+             {
+-                struct sockaddr_un addr;
+-                memset(&addr, 0, sizeof(addr));
+-                addr.sun_family = AF_UNIX;
+-                const char *broker_path = getenv("PROCESSBROKER");
+-                strcpy(addr.sun_path, broker_path ? broker_path : "/data/storage/el2/base/files/.wine_broker");
++                char entryParams[1024];
++                snprintf(entryParams, sizeof(entryParams), "%s|wineserver|-f|-p", binDir);
+ 
+-                if (connect(broker_fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
+-                {
+-                    char entryParams[1024];
+-                    snprintf(entryParams, sizeof(entryParams), "%s|wineserver|-f|-p", binDir);
+-
+-                    char req[2048];
+-                    int reqlen = snprintf(req, sizeof(req), "SPAWN\n%s\n", entryParams);
+-
+-                    struct iovec iov;
+-                    iov.iov_base = req;
+-                    iov.iov_len = reqlen;
+-
+-                    struct msghdr msg = {};
+-                    msg.msg_iov = &iov;
+-                    msg.msg_iovlen = 1;
+-
+-                    if (sendmsg(broker_fd, &msg, MSG_NOSIGNAL) >= 0)
+-                    {
+-                        int32_t response[2];
+-                        ssize_t n = recv(broker_fd, response, sizeof(response), MSG_WAITALL);
+-                        if (n == sizeof(response))
+-                        {
+-                            if (response[1] == 0 && response[0] > 0)
+-                                started = TRUE;
+-                        }
+-                    }
+-                }
+-                close(broker_fd);
++                int child_pid;
++                if (ohos_broker_spawn(entryParams, NULL, NULL, 0, &child_pid) == 0)
++                    started = TRUE;
+             }
+ 
+             if (started)
+diff --git a/dlls/ntdll/unix/ohos_broker.c b/dlls/ntdll/unix/ohos_broker.c
+new file mode 100644
+index 000000000000..4f0603fdb4a9
+--- /dev/null
++++ b/dlls/ntdll/unix/ohos_broker.c
+@@ -0,0 +1,142 @@
++/*
++ * WineHua Process Broker client implementation
++ *
++ * Copyright 2025-2026 WineHua contributors
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(process);
++
++/* Resolve the broker socket path. */
++static const char *broker_socket_path(void)
++{
++    const char *path = getenv("PROCESSBROKER");
++    return path ? path : "/data/storage/el2/base/files/.wine_broker";
++}
++
++/* Send a SPAWN request over an already-connected broker socket.
++ * entry_params may be NULL (treated as empty).
++ * Returns 0 on success (sets *child_pid), -1 on failure. */
++static int broker_send_spawn(int broker_fd, const char *entry_params,
++                             const char **fd_names, const int *fds, int n_fds,
++                             int *child_pid)
++{
++    char req_hdr[] = "SPAWN\n";
++    size_t ep_len = entry_params ? strlen(entry_params) : 0;
++    char fds_line[512];
++    int fl_len, i;
++    struct iovec iov_parts[3];
++    struct msghdr msg;
++    union { char buf[CMSG_SPACE(sizeof(int) * 16)]; struct cmsghdr align; } ctrl;
++    ssize_t received;
++    int32_t response[2];
++
++    if (n_fds > 16) n_fds = 16;  /* ctrl buffer limit, aligned with broker side */
++
++    /* Build "\nFDS:name0,name1,...\n" (just "\n" when no fds) */
++    if (n_fds > 0)
++    {
++        fl_len = snprintf(fds_line, sizeof(fds_line), "\nFDS:");
++        for (i = 0; i < n_fds; i++)
++            fl_len += snprintf(fds_line + fl_len, sizeof(fds_line) - fl_len,
++                               "%s%s", i ? "," : "", fd_names[i]);
++        fl_len += snprintf(fds_line + fl_len, sizeof(fds_line) - fl_len, "\n");
++    }
++    else fl_len = snprintf(fds_line, sizeof(fds_line), "\n");
++
++    iov_parts[0].iov_base = req_hdr;
++    iov_parts[0].iov_len  = sizeof(req_hdr) - 1;
++    iov_parts[1].iov_base = (void *)(entry_params ? entry_params : "");
++    iov_parts[1].iov_len  = ep_len;
++    iov_parts[2].iov_base = fds_line;
++    iov_parts[2].iov_len  = fl_len;
++
++    memset(&msg, 0, sizeof(msg));
++    msg.msg_iov = iov_parts;
++    msg.msg_iovlen = 3;
++    if (n_fds > 0)
++    {
++        struct cmsghdr *cmsg;
++        msg.msg_control = ctrl.buf;
++        msg.msg_controllen = CMSG_SPACE(sizeof(int) * n_fds);
++        cmsg = CMSG_FIRSTHDR(&msg);
++        cmsg->cmsg_level = SOL_SOCKET;
++        cmsg->cmsg_type  = SCM_RIGHTS;
++        cmsg->cmsg_len   = CMSG_LEN(sizeof(int) * n_fds);
++        memcpy(CMSG_DATA(cmsg), fds, sizeof(int) * n_fds);
++        msg.msg_controllen = cmsg->cmsg_len;
++    }
++
++    if (sendmsg(broker_fd, &msg, MSG_NOSIGNAL) < 0) return -1;
++
++    received = recv(broker_fd, response, sizeof(response), MSG_WAITALL);
++    if (received != sizeof(response)) return -1;
++    if (response[1] != 0 || response[0] <= 0) return -1;
++    *child_pid = response[0];
++    return 0;
++}
++
++/***********************************************************************
++ *           ohos_broker_spawn
++ *
++ * Connect to the Process Broker and send a SPAWN request.
++ *
++ * The broker manages child process creation on OHOS (where fork/exec
++ * are unavailable).  Callers construct entry_params with the target
++ * binary and arguments, and optionally pass file descriptors to be
++ * inherited by the child via SCM_RIGHTS.
++ *
++ * Protocol (over Unix socket):
++ *   send:  "SPAWN\n{entry_params}\n[FDS:name0,...]\n" [+ cmsg{fds}]
++ *   recv:  int32_t[2] = {child_pid, error_status}
++ */
++int ohos_broker_spawn(const char *entry_params,
++                      const char **fd_names, const int *fds, int n_fds,
++                      int *child_pid)
++{
++    const char *path = broker_socket_path();
++    struct sockaddr_un addr;
++    int broker_fd;
++    int ret = -1;
++
++    broker_fd = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (broker_fd < 0) return -1;
++
++    memset(&addr, 0, sizeof(addr));
++    addr.sun_family = AF_UNIX;
++    strcpy(addr.sun_path, path);
++
++    if (connect(broker_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0)
++        ret = broker_send_spawn(broker_fd, entry_params, fd_names, fds, n_fds, child_pid);
++
++    close(broker_fd);
++    return ret;
++}
+diff --git a/dlls/ntdll/unix/ohos_broker.h b/dlls/ntdll/unix/ohos_broker.h
+new file mode 100644
+index 000000000000..476a81d39f85
+--- /dev/null
++++ b/dlls/ntdll/unix/ohos_broker.h
+@@ -0,0 +1,46 @@
++/*
++ * WineHua Process Broker client
++ *
++ * Copyright 2025-2026 WineHua contributors
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifndef __WINE_OHOS_BROKER_H
++#define __WINE_OHOS_BROKER_H
++
++#ifdef __OHOS__
++
++/* Send a SPAWN request to the Process Broker via Unix socket.
++ *
++ * The broker protocol:
++ *   "SPAWN\n{entry_params}\n[FDS:name0,name1,...]\n" + cmsg{fds}
++ * Response: int32_t[2] = {child_pid, status} (status 0 = success)
++ *
++ * entry_params: "binDir|arg0|arg1|..." may contain |__env=K=V segments
++ * fd_names: named file descriptors to pass (NULL if n_fds == 0)
++ * fds: file descriptors to send via SCM_RIGHTS (NULL if n_fds == 0)
++ * n_fds: number of fds (clamped to 16 max)
++ * child_pid: output, receives child process PID
++ *
++ * Returns 0 on success, -1 on failure.
++ */
++int ohos_broker_spawn(const char *entry_params,
++                      const char **fd_names, const int *fds, int n_fds,
++                      int *child_pid);
++
++#endif /* __OHOS__ */
++
++#endif /* __WINE_OHOS_BROKER_H */
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index 53bfa86d8dbf..3e5c8898bbfc 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -57,7 +57,7 @@
+ #endif
+ #include <unistd.h>
+ #ifdef __OHOS__
+-#include <sys/un.h>
++#include "ohos_broker.h"
+ #endif
+ #ifdef HAVE_MACH_MACH_H
+ # include <mach/mach.h>
+@@ -400,76 +400,6 @@ static BOOL is_unix_console_handle( HANDLE handle )
+ }
+ 
+ 
+-#ifdef __OHOS__
+-/***********************************************************************
+- *           send_spawn_request  (OHOS broker+NCP)
+- *
+- * 通过 broker 的 Unix socket 发送一个 SPAWN 请求, 携带 entryParams、
+- * N 个命名 fd (SCM_RIGHTS)。环境变量已序列化为 |__env=K=V| 段嵌入 entryParams。
+- * 协议:
+- *   "SPAWN\n{entryParams}\n[FDS:name0,name1,...]\n" + cmsg{fds}
+- * 成功返回 0 并置 *child_pid; 失败返回 -1。
+- */
+-static int send_spawn_request( int broker_fd, const char *entryParams,
+-                               const char **fd_names, const int *fds, int n_fds,
+-                               int *child_pid )
+-{
+-    char req_hdr[] = "SPAWN\n";
+-    size_t ep_len = entryParams ? strlen(entryParams) : 0;
+-    char fds_line[512];
+-    int fl_len, i;
+-    struct iovec iov_parts[3];
+-    struct msghdr msg;
+-    union { char buf[CMSG_SPACE(sizeof(int) * 16)]; struct cmsghdr align; } ctrl;
+-    ssize_t received;
+-    int32_t response[2];
+-
+-    if (n_fds > 16) n_fds = 16;  /* ctrl 缓冲区上限, 对齐 broker 侧 */
+-
+-    /* 构造 "\nFDS:name0,name1,...\n" (无 fd 时仅 "\n") */
+-    if (n_fds > 0)
+-    {
+-        fl_len = snprintf( fds_line, sizeof(fds_line), "\nFDS:" );
+-        for (i = 0; i < n_fds; i++)
+-            fl_len += snprintf( fds_line + fl_len, sizeof(fds_line) - fl_len,
+-                                "%s%s", i ? "," : "", fd_names[i] );
+-        fl_len += snprintf( fds_line + fl_len, sizeof(fds_line) - fl_len, "\n" );
+-    }
+-    else fl_len = snprintf( fds_line, sizeof(fds_line), "\n" );
+-
+-    iov_parts[0].iov_base = req_hdr;
+-    iov_parts[0].iov_len  = sizeof(req_hdr) - 1;
+-    iov_parts[1].iov_base = (void *)(entryParams ? entryParams : "");
+-    iov_parts[1].iov_len  = ep_len;
+-    iov_parts[2].iov_base = fds_line;
+-    iov_parts[2].iov_len  = fl_len;
+-
+-    memset( &msg, 0, sizeof(msg) );
+-    msg.msg_iov = iov_parts;
+-    msg.msg_iovlen = 3;
+-    if (n_fds > 0)
+-    {
+-        struct cmsghdr *cmsg;
+-        msg.msg_control = ctrl.buf;
+-        msg.msg_controllen = CMSG_SPACE(sizeof(int) * n_fds);
+-        cmsg = CMSG_FIRSTHDR( &msg );
+-        cmsg->cmsg_level = SOL_SOCKET;
+-        cmsg->cmsg_type  = SCM_RIGHTS;
+-        cmsg->cmsg_len   = CMSG_LEN(sizeof(int) * n_fds);
+-        memcpy( CMSG_DATA(cmsg), fds, sizeof(int) * n_fds );
+-        msg.msg_controllen = cmsg->cmsg_len;
+-    }
+-
+-    if (sendmsg( broker_fd, &msg, MSG_NOSIGNAL ) < 0) return -1;
+-
+-    received = recv( broker_fd, response, sizeof(response), MSG_WAITALL );
+-    if (received != sizeof(response)) return -1;
+-    if (response[1] != 0 || response[0] <= 0) return -1;
+-    *child_pid = response[0];
+-    return 0;
+-}
+-#endif
+-
+ 
+ /***********************************************************************
+  *           spawn_process
+@@ -502,14 +432,10 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+      * Broker 在主进程上下文（非 appspawn 子进程）调用 StartNativeChildProcess，
+      * 并通过 SCM_RIGHTS 传递 wineserver socket fd 给子进程。 */
+     {
+-        const char *broker_path = getenv("PROCESSBROKER");
+-        if (!broker_path) broker_path = "/data/storage/el2/base/files/.wine_broker";
+         const char *binDir = getenv("WINEBINDIR");
+         if (!binDir) binDir = "/data/storage/el2/base/files/wine/bin";
+         extern char **environ;
+         char *entryParams = NULL;
+-        int broker_fd;
+-        struct sockaddr_un addr;
+         int i, j, len;
+         /* 要传给子进程的命名 fd —— 目前仅 wineserver 通信 socket。
+          * 未来的宿主 fd 桥(GPU/剪贴板等)在此 append 即可, 协议无需再改。 */
+@@ -570,27 +496,15 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+         fds[n_send_fds] = socketfd;
+         n_send_fds++;
+ 
+-        /* 连接 broker 并发送 SPAWN 请求 */
+-        broker_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+-        if (broker_fd >= 0)
++        /* 通过 Process Broker 创建子进程 */
+         {
+-            memset(&addr, 0, sizeof(addr));
+-            addr.sun_family = AF_UNIX;
+-            strcpy(addr.sun_path, broker_path);
+-
+-            if (connect(broker_fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
+-            {
+-                int child_pid = -1;
+-                if (send_spawn_request(broker_fd, entryParams, fd_names, fds, n_send_fds, &child_pid) == 0)
+-                    pid = child_pid;
+-                else
+-                    pid = -1;
+-                if (pid <= 0) status = STATUS_UNSUCCESSFUL;
+-            }
+-            else status = STATUS_UNSUCCESSFUL;
+-            close(broker_fd);
++            int child_pid = -1;
++            if (ohos_broker_spawn(entryParams, fd_names, fds, n_send_fds, &child_pid) == 0)
++                pid = child_pid;
++            else
++                pid = -1;
++            if (pid <= 0) status = STATUS_UNSUCCESSFUL;
+         }
+-        else status = STATUS_UNSUCCESSFUL;
+ 
+         free(argv);
+         free(entryParams);
+

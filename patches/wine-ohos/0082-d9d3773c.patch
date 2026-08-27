@@ -1,0 +1,23 @@
+From d9d3773c59291fe7753cf7460cafd0c42221399c Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 22:57:15 +0800
+Subject: [PATCH 082/104] style(smoke): satisfy merge diff checks
+
+---
+ programs/winehua_vulkan_smoke/main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/programs/winehua_vulkan_smoke/main.c b/programs/winehua_vulkan_smoke/main.c
+index 13aafd90deb1..599fa17544d1 100644
+--- a/programs/winehua_vulkan_smoke/main.c
++++ b/programs/winehua_vulkan_smoke/main.c
+@@ -97,7 +97,7 @@ static void write_state(const struct probe_state *state, const char *status,
+              "{\"loaderApiVersion\":\"%s\",\"deviceApiVersion\":\"%s\","
+              "\"deviceName\":\"%s\",\"vendorId\":%u,\"deviceId\":%u,"
+              "\"graphicsQueueFamily\":%u,\"vulkanModule\":\"%s\","
+-             "\"winevulkanModule\":\"%s\"," 
++             "\"winevulkanModule\":\"%s\","
+              "\"checks\":{\"bufferCopy\":%s,\"imageClear\":%s,"
+              "\"storageImageWrite\":%s,\"storageImageRead\":%s,"
+              "\"sampledImageFetch\":%s,\"combinedImageSampler\":%s,"
+

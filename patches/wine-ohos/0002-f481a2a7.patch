@@ -1,0 +1,28 @@
+From f481a2a796da5751d23e4fba36c20bc7a1a18200 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sat, 13 Jun 2026 22:51:28 +0800
+Subject: [PATCH 002/104] fix: symlink failure non-fatal in setup_config_dir
+ for OHOS compatibility
+
+---
+ dlls/ntdll/unix/server.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 730a0cd9a942..34d1d5c937e1 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1350,8 +1350,10 @@ static int setup_config_dir(void)
+     if (!mkdir( "dosdevices", 0777 ))
+     {
+         mkdir( "drive_c", 0777 );
+-        symlink( "../drive_c", "dosdevices/c:" );
+-        symlink( "/", "dosdevices/z:" );
++        if (symlink( "../drive_c", "dosdevices/c:" ) == -1)
++            MESSAGE( "wine: symlink dosdevices/c: → ../drive_c failed: %s\n", strerror(errno) );
++        if (symlink( "/", "dosdevices/z:" ) == -1)
++            MESSAGE( "wine: symlink dosdevices/z: → / failed: %s\n", strerror(errno) );
+     }
+     else if (errno != EEXIST) fatal_perror( "cannot create %s/dosdevices", config_dir );
+ 
+

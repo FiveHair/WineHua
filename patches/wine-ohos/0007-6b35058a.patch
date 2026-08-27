@@ -1,0 +1,385 @@
+From 6b35058a4a49722dc615bb457d333b3f29bbe48e Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Mon, 15 Jun 2026 00:14:57 +0800
+Subject: [PATCH 007/104] =?UTF-8?q?fix:=20NEEDMEDIA=20=E6=AD=BB=E5=BE=AA?=
+ =?UTF-8?q?=E7=8E=AF=E4=BF=AE=E5=A4=8D=20+=20=E8=AF=8A=E6=96=AD=E6=97=A5?=
+ =?UTF-8?q?=E5=BF=97?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- queue.c: NEEDMEDIA for(;;) 加重试上限(10次)，防止 headless 环境无限循环
+- queue.c: 精简诊断日志，只保留关键路径标识
+- install.c: 添加 InstallHinfSectionW/SetupInstallFromInfSectionW 分阶段日志
+- wineboot.c: 添加各安装步骤检查点日志
+- virtual.c: 移除 mprotect_exec 中 prctl JIT 停用调用
+---
+ dlls/ntdll/unix/virtual.c    |  9 ++++----
+ dlls/setupapi/install.c      | 43 +++++++++++++++++++++++++++++++++---
+ dlls/setupapi/queue.c        | 30 ++++++++++++++++++++++++-
+ programs/wineboot/wineboot.c | 12 +++++++++-
+ 4 files changed, 84 insertions(+), 10 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 3aa08b809a8c..4c8257d6ca61 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -1942,22 +1942,21 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+     if (force_exec_prot && (unix_prot & PROT_READ) && !(unix_prot & PROT_EXEC))
+     {
+         TRACE( "forcing exec permission on %p-%p\n", base, (char *)base + size - 1 );
+-        /* OHOS: temporarily enable exec on noexec filesystem */
++        /* OHOS: enable exec on noexec filesystem. Keep JIT on. */
+         prctl( 0x6a6974, 0, 0 );
+-        if (!mprotect( base, size, unix_prot | PROT_EXEC )) { prctl( 0x6a6974, 0, 1 ); return 0; }
+-        prctl( 0x6a6974, 0, 1 );
++        if (!mprotect( base, size, unix_prot | PROT_EXEC )) return 0;
+         /* exec + write may legitimately fail, in that case fall back to write only */
+         if (!(unix_prot & PROT_WRITE)) return -1;
+         /* fall through to regular mprotect without exec */
+     }
+ 
+-    /* OHOS: for noexec filesystem, wrap any PROT_EXEC mprotect with prctl */
++    /* OHOS: for noexec filesystem, activate JIT before PROT_EXEC mprotect.
++     * Do NOT turn JIT off — Box64's InternalMmap & NewBrick also need it. */
+     if (unix_prot & PROT_EXEC)
+     {
+         int ret;
+         prctl( 0x6a6974, 0, 0 );
+         ret = mprotect( base, size, unix_prot );
+-        prctl( 0x6a6974, 0, 1 );
+         return ret;
+     }
+ 
+diff --git a/dlls/setupapi/install.c b/dlls/setupapi/install.c
+index 8fcfc8b1f238..0690846c641c 100644
+--- a/dlls/setupapi/install.c
++++ b/dlls/setupapi/install.c
+@@ -807,9 +807,10 @@ static BOOL install_section_callback( HINF hinf, PCWSTR field, void *arg )
+ {
+     struct install_section_callback_info *info = arg;
+ 
+-    TRACE( "installing %s\n", debugstr_w(field) );
++    ERR( "SETUPAPI: section_callback for %s\n", debugstr_w(field) );
+     SetupInstallFromInfSectionW( info->hwnd, hinf, field, SPINST_ALL, NULL, NULL, SP_COPY_NEWER,
+                                  info->callback, info->callback_context, NULL, NULL );
++    ERR( "SETUPAPI: section_callback for %s done\n", debugstr_w(field) );
+     return TRUE;
+ }
+ 
+@@ -1148,37 +1149,47 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section,
+ 
+     if (flags & SPINST_REGSVR)
+     {
++        ERR( "SETUPAPI: [%s] WineFakeDlls start\n", debugstr_w(section) );
+         if (iterate_section_fields( hinf, section, L"WineFakeDlls", fake_dlls_callback, NULL ))
+             cleanup_fake_dlls();
+         else
+             return FALSE;
++        ERR( "SETUPAPI: [%s] WineFakeDlls done\n", debugstr_w(section) );
+     }
+     if (flags & SPINST_FILES)
+     {
+         HSPFILEQ queue;
+ 
++        ERR( "SETUPAPI: [%s] CopyFiles start\n", debugstr_w(section) );
+         if (!(queue = SetupOpenFileQueue())) return FALSE;
+         ret = (SetupInstallFilesFromInfSectionW( hinf, NULL, queue, section, src_root, copy_flags ) &&
+                SetupCommitFileQueueW( owner, queue, callback, context ));
+         SetupCloseFileQueue( queue );
+         if (!ret) return FALSE;
++        ERR( "SETUPAPI: [%s] CopyFiles done\n", debugstr_w(section) );
+     }
+     if (flags & SPINST_INIFILES)
+     {
++        ERR( "SETUPAPI: [%s] UpdateInis start\n", debugstr_w(section) );
+         if (!iterate_section_fields( hinf, section, L"UpdateInis", update_ini_callback, NULL ) ||
+             !iterate_section_fields( hinf, section, L"UpdateIniFields",
+                                      update_ini_fields_callback, NULL ))
+             return FALSE;
++        ERR( "SETUPAPI: [%s] UpdateInis done\n", debugstr_w(section) );
+     }
+     if (flags & SPINST_INI2REG)
+     {
++        ERR( "SETUPAPI: [%s] Ini2Reg start\n", debugstr_w(section) );
+         if (!iterate_section_fields( hinf, section, L"Ini2Reg", ini2reg_callback, NULL ))
+             return FALSE;
++        ERR( "SETUPAPI: [%s] Ini2Reg done\n", debugstr_w(section) );
+     }
+     if (flags & SPINST_LOGCONFIG)
+     {
++        ERR( "SETUPAPI: [%s] LogConf start\n", debugstr_w(section) );
+         if (!iterate_section_fields( hinf, section, L"LogConf", logconf_callback, NULL ))
+             return FALSE;
++        ERR( "SETUPAPI: [%s] LogConf done\n", debugstr_w(section) );
+     }
+     if (flags & SPINST_REGSVR)
+     {
+@@ -1191,6 +1202,7 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section,
+             info.callback_context = context;
+         }
+ 
++        ERR( "SETUPAPI: [%s] RegisterDlls start\n", debugstr_w(section) );
+         hr = CoInitialize(NULL);
+ 
+         ret = iterate_section_fields( hinf, section, L"RegisterDlls", register_dlls_callback, &info );
+@@ -1200,10 +1212,12 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section,
+             CoUninitialize();
+ 
+         free( info.modules );
++        ERR( "SETUPAPI: [%s] RegisterDlls done (ret=%d)\n", debugstr_w(section), ret );
+         if (!ret) return FALSE;
+     }
+     if (flags & SPINST_UNREGSVR)
+     {
++        ERR( "SETUPAPI: [%s] UnregisterDlls start\n", debugstr_w(section) );
+         struct register_dll_info info = { .unregister = TRUE };
+         HRESULT hr;
+ 
+@@ -1222,12 +1236,14 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section,
+             CoUninitialize();
+ 
+         free( info.modules );
++        ERR( "SETUPAPI: [%s] UnregisterDlls done\n", debugstr_w(section) );
+         if (!ret) return FALSE;
+     }
+     if (flags & SPINST_REGISTRY)
+     {
+         struct registry_callback_info info;
+ 
++        ERR( "SETUPAPI: [%s] AddReg/DelReg start\n", debugstr_w(section) );
+         info.default_root = key_root;
+         info.delete = TRUE;
+         if (!iterate_section_fields( hinf, section, L"DelReg", registry_callback, &info ))
+@@ -1235,6 +1251,7 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section,
+         info.delete = FALSE;
+         if (!iterate_section_fields( hinf, section, L"AddReg", registry_callback, &info ))
+             return FALSE;
++        ERR( "SETUPAPI: [%s] AddReg/DelReg done\n", debugstr_w(section) );
+     }
+     if (flags & SPINST_BITREG)
+     {
+@@ -1288,17 +1305,28 @@ void WINAPI InstallHinfSectionW( HWND hwnd, HINSTANCE handle, LPCWSTR cmdline, I
+     if (hinf == INVALID_HANDLE_VALUE) return;
+ 
+     SetupDiGetActualSectionToInstallW( hinf, section, section, ARRAY_SIZE(section), NULL, NULL );
+-    TRACE( "using section %s\n", debugstr_w(section) );
++    ERR( "SETUPAPI: processing section %s\n", debugstr_w(section) );
+ 
+     iterate_section_fields( hinf, section, L"Include", include_callback, NULL );
++    ERR( "SETUPAPI: Include done, starting install_section_callback\n" );
+ 
+     info.callback_context = SetupInitDefaultQueueCallback( hwnd );
+     install_section_callback( hinf, section, &info );
++    ERR( "SETUPAPI: install_section_callback (%s) done\n", debugstr_w(section) );
++
++    ERR( "SETUPAPI: starting Needs iteration for %s\n", debugstr_w(section) );
+     iterate_section_fields( hinf, section, L"Needs", install_section_callback, &info );
++    ERR( "SETUPAPI: Needs iteration done for %s\n", debugstr_w(section) );
++
+     SetupTermDefaultQueueCallback( info.callback_context );
++    ERR( "SETUPAPI: Needs done, starting Services install (%s)\n", debugstr_w(section) );
++
+     lstrcatW( section, L".Services" );
+     SetupInstallServicesFromInfSectionW( hinf, section, 0 );
++    ERR( "SETUPAPI: Services install done\n" );
++
+     SetupCloseInfFile( hinf );
++    ERR( "SETUPAPI: InstallHinfSectionW complete\n" );
+ 
+     /* FIXME: should check the mode and maybe reboot */
+     /* there isn't much point in doing that since we */
+@@ -1496,12 +1524,20 @@ BOOL WINAPI SetupInstallServicesFromInfSectionW( HINF hinf, PCWSTR section, DWOR
+     INT section_flags;
+     BOOL ret = TRUE;
+ 
++    ERR( "SETUPAPI: installing services for section=%s\n", debugstr_w(section) );
++
+     if (!SetupFindFirstLineW( hinf, section, NULL, &context ))
+     {
+         SetLastError( ERROR_SECTION_NOT_FOUND );
+         return FALSE;
+     }
+-    if (!(scm = OpenSCManagerW( NULL, NULL, SC_MANAGER_ALL_ACCESS ))) return FALSE;
++    ERR( "SETUPAPI: calling OpenSCManagerW...\n" );
++    if (!(scm = OpenSCManagerW( NULL, NULL, SC_MANAGER_ALL_ACCESS )))
++    {
++        ERR( "SETUPAPI: OpenSCManagerW FAILED (err=%lu)\n", GetLastError() );
++        return FALSE;
++    }
++    ERR( "SETUPAPI: OpenSCManagerW OK, scm=%p\n", scm );
+ 
+     if (SetupFindFirstLineW( hinf, section, L"AddService", &context ))
+     {
+@@ -1529,6 +1565,7 @@ BOOL WINAPI SetupInstallServicesFromInfSectionW( HINF hinf, PCWSTR section, DWOR
+     }
+     if (ret) SetLastError( ERROR_SUCCESS );
+  done:
++    ERR( "SETUPAPI: services install done, closing SCM (ret=%d)\n", ret );
+     CloseServiceHandle( scm );
+     return ret;
+ }
+diff --git a/dlls/setupapi/queue.c b/dlls/setupapi/queue.c
+index bea68177b896..28d2cfd5207c 100644
+--- a/dlls/setupapi/queue.c
++++ b/dlls/setupapi/queue.c
+@@ -1387,6 +1387,7 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
+ 
+     if (queue->delete_queue.count)
+     {
++        ERR( "SETUPAPI-COMMIT: delete queue (%u files)\n", queue->delete_queue.count );
+         if (!(handler( context, SPFILENOTIFY_STARTSUBQUEUE, FILEOP_DELETE,
+                        queue->delete_queue.count ))) goto done;
+         for (op = queue->delete_queue.head; op; op = op->next)
+@@ -1411,6 +1412,7 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
+ 
+     if (queue->rename_queue.count)
+     {
++        ERR( "SETUPAPI-COMMIT: rename queue (%u files)\n", queue->rename_queue.count );
+         if (!(handler( context, SPFILENOTIFY_STARTSUBQUEUE, FILEOP_RENAME,
+                        queue->rename_queue.count ))) goto done;
+         for (op = queue->rename_queue.head; op; op = op->next)
+@@ -1436,6 +1438,7 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
+ 
+     if (queue->copy_queue.count)
+     {
++        ERR( "SETUPAPI-COMMIT: copy queue (%u files)\n", queue->copy_queue.count );
+         if (!(handler( context, SPFILENOTIFY_STARTSUBQUEUE, FILEOP_COPY,
+                        queue->copy_queue.count ))) goto done;
+         for (op = queue->copy_queue.head; op; op = op->next)
+@@ -1444,6 +1447,8 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
+ 
+             if (!op->media->resolved)
+             {
++                ERR( "SETUPAPI-COMMIT: NEEDMEDIA path op=%p media=%p src_file=%s\n",
++                     op, op->media, debugstr_w(op->src_file) );
+                 /* The NEEDMEDIA callback asks for the folder containing the
+                  * first file, but that might be in a subdir of the source
+                  * disk's root directory. We have to do some contortions to
+@@ -1457,6 +1462,7 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
+                 src_path[0] = 0;
+                 if (op->src_path)
+                 {
++                    ERR( "SETUPAPI-COMMIT: NEEDMEDIA src_path=%s\n", debugstr_w(op->src_path) );
+                     lstrcpyW(src_path, op->src_path);
+                     path_len = lstrlenW(src_path);
+ 
+@@ -1467,8 +1473,18 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
+                     op->src_path = NULL;
+                 }
+ 
+-                for (;;)
++                ERR( "SETUPAPI-COMMIT: NEEDMEDIA entering for(;;) loop, root=%s tag=%s\n",
++                     debugstr_w(op->media->root), debugstr_w(op->media->tag) );
+                 {
++                    int needmedia_retries = 0;
++                    for (;;)
++                {
++                    if (++needmedia_retries > 10)
++                    {
++                        ERR( "SETUPAPI-COMMIT: NEEDMEDIA giving up after %d retries for src_file=%s\n",
++                             needmedia_retries, debugstr_w(op->src_file) );
++                        break;
++                    }
+                     SOURCE_MEDIA_W media;
+                     media.Reserved = NULL;
+                     media.Tagfile = op->media->tag;
+@@ -1507,7 +1523,9 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
+                                 op->media->root[root_len - path_len - 1] = 0;
+                         }
+                         op->media->resolved = TRUE;
++                        ERR( "SETUPAPI-COMMIT: ENDCOPY(needmedia) for %s\n", debugstr_w(paths.Target) );
+                         handler( context, SPFILENOTIFY_ENDCOPY, (UINT_PTR)&paths, 0 );
++                        ERR( "SETUPAPI-COMMIT: ENDCOPY(needmedia) handler returned\n" );
+                         break;
+                     }
+                     paths.Win32Error = GetLastError();
+@@ -1529,10 +1547,13 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
+                     else if (op_result != FILEOP_DOIT)
+                         FIXME("Unhandled return value %#x.\n", op_result);
+                 }
++                }
+             }
+             else
+             {
+                 build_filepathsW( op, &paths );
++                ERR( "SETUPAPI-COMMIT: copying %s -> %s\n",
++                     debugstr_w(paths.Source), debugstr_w(paths.Target) );
+                 op_result = handler( context, SPFILENOTIFY_STARTCOPY, (UINT_PTR)&paths, FILEOP_COPY );
+                 if (op_result == FILEOP_ABORT)
+                     goto done;
+@@ -1559,19 +1580,26 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
+                     else if (op_result != FILEOP_SKIP && op_result != FILEOP_DOIT)
+                         FIXME("Unhandled return value %#x.\n", op_result);
+                 }
++                ERR( "SETUPAPI-COMMIT: ENDCOPY for %s\n", debugstr_w(paths.Target) );
+                 handler( context, SPFILENOTIFY_ENDCOPY, (UINT_PTR)&paths, 0 );
++                ERR( "SETUPAPI-COMMIT: ENDCOPY handler returned for %s\n", debugstr_w(paths.Target) );
+             }
+         }
++        ERR( "SETUPAPI-COMMIT: calling ENDSUBQUEUE for copy\n" );
+         handler( context, SPFILENOTIFY_ENDSUBQUEUE, FILEOP_COPY, 0 );
++        ERR( "SETUPAPI-COMMIT: copy queue done\n" );
+     }
+ 
+ 
+     result = TRUE;
+ 
+  done:
++    ERR( "SETUPAPI-COMMIT: ENDQUEUE callback (result=%d)\n", result );
+     handler( context, SPFILENOTIFY_ENDQUEUE, result, 0 );
++    ERR( "SETUPAPI-COMMIT: ENDQUEUE callback done\n" );
+     HeapFree( GetProcessHeap(), 0, (void *)paths.Source );
+     HeapFree( GetProcessHeap(), 0, (void *)paths.Target );
++    ERR( "SETUPAPI-COMMIT: SetupCommitFileQueueW complete\n" );
+     return result;
+ }
+ 
+diff --git a/programs/wineboot/wineboot.c b/programs/wineboot/wineboot.c
+index aa91d01c92f2..82d86a98ecf3 100644
+--- a/programs/wineboot/wineboot.c
++++ b/programs/wineboot/wineboot.c
+@@ -1680,9 +1680,11 @@ static void update_wineprefix( BOOL force )
+         HANDLE process;
+         DWORD count = 0;
+ 
++        WINE_ERR("wineboot: starting PreInstall\n");
+         if ((process = start_rundll32( inf_path, L"PreInstall", IMAGE_FILE_MACHINE_TARGET_HOST )))
+         {
+             HWND hwnd = show_wait_window();
++            WINE_ERR("wineboot: PreInstall started, waiting for completion\n");
+             for (;;)
+             {
+                 if (process)
+@@ -1694,21 +1696,29 @@ static void update_wineprefix( BOOL force )
+                         while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+                         continue;
+                     }
++                    WINE_ERR("wineboot: rundll32 process completed\n");
+                     CloseHandle( process );
+                 }
+                 if (!machines[count].Machine) break;
++                WINE_ERR("wineboot: starting install for machine %u (native=%d)\n",
++                         machines[count].Machine, machines[count].Native);
+                 if (machines[count].Native)
+                     process = start_rundll32( inf_path, L"DefaultInstall", IMAGE_FILE_MACHINE_TARGET_HOST );
+                 else
+                     process = start_rundll32( inf_path, L"Wow64Install", machines[count].Machine );
+                 count++;
+             }
++            WINE_ERR("wineboot: all installs complete, destroying wait window\n");
+             DestroyWindow( hwnd );
++        } else {
++            WINE_ERR("wineboot: PreInstall failed to start!\n");
+         }
++        WINE_ERR("wineboot: calling install_root_pnp_devices\n");
+         install_root_pnp_devices();
++        WINE_ERR("wineboot: calling update_user_profile\n");
+         update_user_profile();
+ 
+-        TRACE( "wine: configuration in %s has been updated.\n", debugstr_w(prettyprint_configdir()) );
++        WINE_ERR("wineboot: prefix update complete\n");
+     }
+ 
+ done:
+

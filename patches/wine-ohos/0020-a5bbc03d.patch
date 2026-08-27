@@ -1,0 +1,144 @@
+From a5bbc03d06c0e4a14936d4748ff25560238fd658 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Thu, 25 Jun 2026 02:54:06 +0800
+Subject: [PATCH 020/104] =?UTF-8?q?=E6=B8=85=E7=90=86:=20=E5=9B=9E?=
+ =?UTF-8?q?=E9=80=80=E7=BA=AF=E6=A0=BC=E5=BC=8F=E5=8C=96=E5=8F=98=E6=9B=B4?=
+ =?UTF-8?q?=20(=E8=8A=B1=E6=8B=AC=E5=8F=B7/=E7=A9=BA=E7=99=BD=E8=A1=8C/OHO?=
+ =?UTF-8?q?S-DEBUG=20=E6=B3=A8=E9=87=8A)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+受影响的文件:
+- wayland.c: 恢复上游单行 if 格式
+- waylanddrv_main.c: 恢复上游格式
+- install.c: 恢复上游空白行/花括号格式
+- file.c: 移除 OHOS-DEBUG 注释
+
+调试日志 (OHOS-LOADER/OHOS-WS/OHOS-WB) 保留，不影响功能。
+---
+ dlls/ntdll/unix/file.c                 |  2 --
+ dlls/setupapi/install.c                | 12 +++---------
+ dlls/winewayland.drv/wayland.c         |  4 +---
+ dlls/winewayland.drv/waylanddrv_main.c |  5 +----
+ 4 files changed, 5 insertions(+), 18 deletions(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index d3f5ee1b7da7..e2d0dbbbdfc9 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -3806,7 +3806,6 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
+         /* allow slash for unix namespace */
+         if (pos > 4 && prefix[4] == '/') pos = 4;
+         is_unix = pos == 4;
+-        /* OHOS-DEBUG */
+     }
+     prefix_len = pos;
+     prefix[prefix_len] = 0;
+@@ -4380,7 +4379,6 @@ NTSTATUS unix_to_nt_file_name( const char *unix_name, WCHAR **nt, UINT dispositi
+ 
+     if (!buffer)  /* dosdevices symlinks unavailable, fall back to \\?\unix path */
+     {
+-        /* OHOS-DEBUG */
+         if (!(buffer = malloc( sizeof(unix_prefixW) + len * sizeof(WCHAR) ))) return STATUS_NO_MEMORY;
+         memcpy( buffer, unix_prefixW, sizeof(unix_prefixW) );
+         ntdll_umbstowcs( unix_name, len, buffer + ARRAY_SIZE(unix_prefixW), len );
+diff --git a/dlls/setupapi/install.c b/dlls/setupapi/install.c
+index 114351c7711c..8fcfc8b1f238 100644
+--- a/dlls/setupapi/install.c
++++ b/dlls/setupapi/install.c
+@@ -807,6 +807,7 @@ static BOOL install_section_callback( HINF hinf, PCWSTR field, void *arg )
+ {
+     struct install_section_callback_info *info = arg;
+ 
++    TRACE( "installing %s\n", debugstr_w(field) );
+     SetupInstallFromInfSectionW( info->hwnd, hinf, field, SPINST_ALL, NULL, NULL, SP_COPY_NEWER,
+                                  info->callback, info->callback_context, NULL, NULL );
+     return TRUE;
+@@ -1287,19 +1288,16 @@ void WINAPI InstallHinfSectionW( HWND hwnd, HINSTANCE handle, LPCWSTR cmdline, I
+     if (hinf == INVALID_HANDLE_VALUE) return;
+ 
+     SetupDiGetActualSectionToInstallW( hinf, section, section, ARRAY_SIZE(section), NULL, NULL );
++    TRACE( "using section %s\n", debugstr_w(section) );
+ 
+     iterate_section_fields( hinf, section, L"Include", include_callback, NULL );
+ 
+     info.callback_context = SetupInitDefaultQueueCallback( hwnd );
+     install_section_callback( hinf, section, &info );
+-
+     iterate_section_fields( hinf, section, L"Needs", install_section_callback, &info );
+-
+     SetupTermDefaultQueueCallback( info.callback_context );
+-
+     lstrcatW( section, L".Services" );
+     SetupInstallServicesFromInfSectionW( hinf, section, 0 );
+-
+     SetupCloseInfFile( hinf );
+ 
+     /* FIXME: should check the mode and maybe reboot */
+@@ -1498,16 +1496,12 @@ BOOL WINAPI SetupInstallServicesFromInfSectionW( HINF hinf, PCWSTR section, DWOR
+     INT section_flags;
+     BOOL ret = TRUE;
+ 
+-
+     if (!SetupFindFirstLineW( hinf, section, NULL, &context ))
+     {
+         SetLastError( ERROR_SECTION_NOT_FOUND );
+         return FALSE;
+     }
+-    if (!(scm = OpenSCManagerW( NULL, NULL, SC_MANAGER_ALL_ACCESS )))
+-    {
+-        return FALSE;
+-    }
++    if (!(scm = OpenSCManagerW( NULL, NULL, SC_MANAGER_ALL_ACCESS ))) return FALSE;
+ 
+     if (SetupFindFirstLineW( hinf, section, L"AddService", &context ))
+     {
+diff --git a/dlls/winewayland.drv/wayland.c b/dlls/winewayland.drv/wayland.c
+index 8b45a3c2794a..b3d6b3c89e76 100644
+--- a/dlls/winewayland.drv/wayland.c
++++ b/dlls/winewayland.drv/wayland.c
+@@ -254,12 +254,9 @@ BOOL wayland_process_init(void)
+ {
+     struct wl_display *wl_display_wrapper;
+ 
+-
+     process_wayland.wl_display = wl_display_connect(NULL);
+     if (!process_wayland.wl_display)
+-    {
+         return FALSE;
+-    }
+ 
+     TRACE("wl_display=%p\n", process_wayland.wl_display);
+ 
+@@ -342,5 +339,6 @@ BOOL wayland_process_init(void)
+         ERR("Wayland compositor doesn't support xdg_toplevel_icon_manager_v1 (window icons will not be supported)\n");
+ 
+     process_wayland.initialized = TRUE;
++
+     return TRUE;
+ }
+diff --git a/dlls/winewayland.drv/waylanddrv_main.c b/dlls/winewayland.drv/waylanddrv_main.c
+index f7820c149c84..b7a8a29be70c 100644
+--- a/dlls/winewayland.drv/waylanddrv_main.c
++++ b/dlls/winewayland.drv/waylanddrv_main.c
+@@ -30,7 +30,6 @@
+ 
+ #include "waylanddrv.h"
+ 
+-
+ char *process_name = NULL;
+ 
+ static const struct user_driver_funcs waylanddrv_funcs =
+@@ -94,9 +93,7 @@ static NTSTATUS waylanddrv_unix_init(void *arg)
+ 
+     wayland_init_process_name();
+ 
+-    if (!wayland_process_init()) {
+-        goto err;
+-    }
++    if (!wayland_process_init()) goto err;
+ 
+     return 0;
+ 
+

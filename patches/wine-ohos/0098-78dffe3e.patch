@@ -1,0 +1,29 @@
+From 78dffe3e537b2efe76b7216d91a3d5ade0ab8e7a Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Sun, 9 Aug 2026 19:46:26 +0800
+Subject: [PATCH 098/104] fix(wineboot): avoid legacy profile folder thunk on
+ OHOS
+
+---
+ programs/wineboot/wineboot.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/programs/wineboot/wineboot.c b/programs/wineboot/wineboot.c
+index aa91d01c92f2..33b3cf9a0132 100644
+--- a/programs/wineboot/wineboot.c
++++ b/programs/wineboot/wineboot.c
+@@ -1641,7 +1641,12 @@ static void update_user_profile(void)
+                              KEY_ALL_ACCESS, NULL, &profile_hkey, NULL))
+         {
+             DWORD flags = 0;
+-            if (SHGetSpecialFolderPathW(NULL, profile, CSIDL_PROFILE, TRUE))
++            /* The legacy helper is a delayed shell32 import.  On the OHOS
++             * first-prefix path Box64 can resolve that entry to Wine's
++             * unimplemented thunk even though the equivalent modern helper
++             * is available and is already used by create_volatile_environment_registry_key(). */
++            if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROFILE | CSIDL_FLAG_CREATE,
++                                            NULL, SHGFP_TYPE_CURRENT, profile)))
+                 set_reg_value(profile_hkey, L"ProfileImagePath", profile);
+             RegSetValueExW( profile_hkey, L"Flags", 0, REG_DWORD, (const BYTE *)&flags, sizeof(flags) );
+             RegCloseKey(profile_hkey);
+

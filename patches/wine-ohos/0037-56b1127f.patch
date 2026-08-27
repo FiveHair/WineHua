@@ -1,0 +1,66 @@
+From 56b1127f6088badefeeda1f23badb046c4d29c82 Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifeng565@gmail.com>
+Date: Mon, 6 Jul 2026 15:56:43 +0800
+Subject: [PATCH 037/104] fix: restore pad desktop taskbar entries
+
+---
+ dlls/win32u/winstation.c    | 10 ++++++++++
+ programs/explorer/systray.c |  9 +++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/dlls/win32u/winstation.c b/dlls/win32u/winstation.c
+index 3da9acdd3aff..171e7e82ae4d 100644
+--- a/dlls/win32u/winstation.c
++++ b/dlls/win32u/winstation.c
+@@ -25,6 +25,7 @@
+ #include <assert.h>
+ #include <stdarg.h>
+ #include <stddef.h>
++#include <stdlib.h>
+ 
+ #include <pthread.h>
+ 
+@@ -925,6 +926,7 @@ static const WCHAR *get_default_desktop( void *buf, size_t buf_size )
+     const WCHAR *p, *appname = RtlGetCurrentPeb()->ProcessParameters->ImagePathName.Buffer;
+     KEY_VALUE_PARTIAL_INFORMATION *info = buf;
+     WCHAR *buffer = buf;
++    const char *desktop_env;
+     HKEY tmpkey, appkey;
+     DWORD len;
+ 
+@@ -950,6 +952,14 @@ static const WCHAR *get_default_desktop( void *buf, size_t buf_size )
+         }
+     }
+ 
++#ifdef PAD_MODE
++    if ((desktop_env = getenv( "WINEHUA_DESKTOP" )) && *desktop_env)
++    {
++        asciiz_to_unicode( buffer, desktop_env );
++        return buffer;
++    }
++#endif
++
+     /* @@ Wine registry key: HKCU\Software\Wine\Explorer */
+     if ((appkey = reg_open_hkcu_key( "Software\\Wine\\Explorer" )))
+     {
+diff --git a/programs/explorer/systray.c b/programs/explorer/systray.c
+index a2098c808aec..b38174ee9edf 100644
+--- a/programs/explorer/systray.c
++++ b/programs/explorer/systray.c
+@@ -1244,6 +1244,15 @@ void initialize_systray( BOOL arg_using_root, BOOL arg_enable_shell, BOOL arg_sh
+         SystemParametersInfoW( SPI_GETWORKAREA, 0, &work_rect, 0 );
+         SetRect( &primary_rect, 0, 0, GetSystemMetrics( SM_CXSCREEN ), GetSystemMetrics( SM_CYSCREEN ) );
+         SubtractRect( &taskbar_rect, &primary_rect, &work_rect );
++        if (IsRectEmpty( &taskbar_rect ))
++        {
++            int height = max( icon_cy, GetSystemMetrics( SM_CYCAPTION ) );
++
++            WARN( "empty taskbar rect from work area %s, using bottom fallback\n",
++                  wine_dbgstr_rect( &work_rect ));
++            SetRect( &taskbar_rect, primary_rect.left, primary_rect.bottom - height,
++                     primary_rect.right, primary_rect.bottom );
++        }
+ 
+         tray_window = CreateWindowExW( WS_EX_NOACTIVATE, shell_traywnd_class.lpszClassName, NULL, WS_POPUP,
+                                        taskbar_rect.left, taskbar_rect.top, taskbar_rect.right - taskbar_rect.left,
+

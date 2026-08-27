@@ -1,0 +1,41 @@
+From af64af414a766994fa0dc7c950bcd3039aa375a8 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sun, 21 Jun 2026 07:14:12 +0800
+Subject: [PATCH 015/104] =?UTF-8?q?winewayland.drv:=20PAD=5FMODE=20?=
+ =?UTF-8?q?=E4=B8=8B=E9=80=9A=E8=BF=87=20window=5Fgeometry=20x,y=20?=
+ =?UTF-8?q?=E4=BC=A0=E9=80=92=E8=99=9A=E6=8B=9F=E6=A1=8C=E9=9D=A2=E5=9D=90?=
+ =?UTF-8?q?=E6=A0=87?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+安全过滤 CW_USEDEFAULT (0x80000000), 仅在 PAD_MODE 下生效
+---
+ dlls/winewayland.drv/wayland_surface.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
+index db03f32c3bfe..de8d3a49f007 100644
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -609,8 +609,18 @@ static void wayland_surface_reconfigure_geometry(struct wayland_surface *surface
+ 
+     if (!IsRectEmpty(&rect))
+     {
++        // PAD_MODE: 传递窗口在虚拟桌面中的位置，使 compositor 能正确合成
++        // surface->window.rect 是相对于虚拟桌面的屏幕坐标
++        // CW_USEDEFAULT (0x80000000) 会被 bounds check 过滤掉
++        int geo_x = 0, geo_y = 0;
++#ifdef PAD_MODE
++        if (surface->window.rect.left > -32768 && surface->window.rect.left < 32768)
++            geo_x = surface->window.rect.left;
++        if (surface->window.rect.top > -32768 && surface->window.rect.top < 32768)
++            geo_y = surface->window.rect.top;
++#endif
+         xdg_surface_set_window_geometry(surface->xdg_surface,
+-                                        rect.left, rect.top,
++                                        geo_x, geo_y,
+                                         rect.right - rect.left,
+                                         rect.bottom - rect.top);
+     }
+

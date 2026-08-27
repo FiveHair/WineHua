@@ -1,0 +1,1075 @@
+From d33229f9d11c5f50671b5e47b0c1ca999975d1d9 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sun, 21 Jun 2026 00:07:06 +0800
+Subject: [PATCH 012/104] =?UTF-8?q?=E4=BF=AE=E5=A4=8D:=20wineserver=20?=
+ =?UTF-8?q?=E9=87=8D=E5=90=AF=20=E2=80=94=20start=5Fserver=20=E9=80=9A?=
+ =?UTF-8?q?=E8=BF=87=20broker=20=E6=9B=BF=E4=BB=A3=20posix=5Fspawn?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+问题: OHOS PAD_MODE 没有 execve，wineserver 退出后无法像标准 Linux
+那样通过 posix_spawn 重新拉起。wineserver 是 libwineserver.so 库
+而非独立 ELF 可执行文件，且 appspawn 子进程中无法嵌套调用
+StartNativeChildProcess (API 13 返回 NCP_ERR_ALREADY_IN_CHILD)。
+
+标准 Linux 机制: start_server() 通过 posix_spawn 启动 wineserver，
+wineserver 自动 daemonize，中间进程退出后 waitpid 返回完成同步。
+
+解决办法:
+- loader.c start_server() PAD_MODE: 连接 Process Broker 请求重启
+  wineserver，轮询等待 socket 就绪，socket 稳定性验证防止竞态退出
+- 跨进程互斥: spawn 前扫描 socket 文件，避免多进程重复 spawn
+- process.c spawn_process: 通过 broker 转发子进程创建请求
+- broker socket 路径通过 PROCESSBROKER 环境变量传递，避免硬编码
+  (napi_init.cpp 唯一定义绝对路径，wine_child.cpp 从 WINEPREFIX 推导)
+- server/process/main: 添加 wineserver 退出/重启诊断日志
+---
+ dlls/kernel32/thread.c          |   1 +
+ dlls/ntdll/heap.c               |   5 +
+ dlls/ntdll/loader.c             |  37 +++++-
+ dlls/ntdll/signal_x86_64.c      |  11 ++
+ dlls/ntdll/unix/env.c           |  30 +++++
+ dlls/ntdll/unix/loader.c        | 220 +++++++++++++++++++++++++++++++-
+ dlls/ntdll/unix/process.c       | 112 ++++++++++++++++
+ dlls/ntdll/unix/server.c        |  12 ++
+ dlls/ntdll/unix/signal_x86_64.c |  13 +-
+ dlls/ntdll/unix/virtual.c       |   5 +-
+ programs/wineboot/wineboot.c    |  30 ++++-
+ server/main.c                   |  15 ++-
+ server/process.c                |   8 ++
+ 13 files changed, 489 insertions(+), 10 deletions(-)
+
+diff --git a/dlls/kernel32/thread.c b/dlls/kernel32/thread.c
+index 45e92a9f837b..1df9ade3ac00 100644
+--- a/dlls/kernel32/thread.c
++++ b/dlls/kernel32/thread.c
+@@ -66,6 +66,7 @@ __ASM_GLOBAL_FUNC( BaseThreadInitThunk,
+ #else
+ void __fastcall BaseThreadInitThunk( DWORD unknown, LPTHREAD_START_ROUTINE entry, void *arg )
+ {
++    ERR( "OHOS-DBG: BaseThreadInitThunk calling entry=%p arg=%p\n", entry, arg );
+     RtlExitUserThread( entry( arg ) );
+ }
+ #endif
+diff --git a/dlls/ntdll/heap.c b/dlls/ntdll/heap.c
+index feee54e0285b..59de4947131a 100644
+--- a/dlls/ntdll/heap.c
++++ b/dlls/ntdll/heap.c
+@@ -763,6 +763,11 @@ static struct heap *unsafe_heap_from_handle( HANDLE handle, ULONG flags, ULONG *
+     if (!heap || (heap->magic != HEAP_MAGIC))
+     {
+         ERR( "Invalid handle %p!\n", handle );
++        if (!heap)
++            MESSAGE( "OHOS-DBG: unsafe_heap_from_handle: NULL handle\n" );
++        else
++            MESSAGE( "OHOS-DBG: unsafe_heap_from_handle: bad magic %p magic=%08lx expected=%08lx\n",
++                     handle, heap->magic, (ULONG)HEAP_MAGIC );
+         return NULL;
+     }
+     if (heap->flags & HEAP_VALIDATE_ALL)
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index ff5e473e391d..560b3e576105 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -222,6 +222,7 @@ static unsigned int unload_trace_seq;
+ 
+ static void __fastcall default_thread_init_func( DWORD unknown, LPTHREAD_START_ROUTINE entry, void *arg )
+ {
++    ERR( "OHOS-DBG: default_thread_init_func calling entry=%p arg=%p\n", entry, arg );
+     RtlExitUserThread( entry( arg ) );
+ }
+ 
+@@ -1797,8 +1798,12 @@ static NTSTATUS process_attach( LDR_DDAG_NODE *node, LPVOID lpReserved )
+     /* Call DLL entry point */
+     if (status == STATUS_SUCCESS)
+     {
++        ERR( "OHOS-DBG: calling DllMain(%s) PROCESS_ATTACH\n",
++             debugstr_w(wm->ldr.BaseDllName.Buffer) );
+         call_ldr_notifications( LDR_DLL_NOTIFICATION_REASON_LOADED, &wm->ldr );
+         status = MODULE_InitDLL( wm, DLL_PROCESS_ATTACH, lpReserved );
++        ERR( "OHOS-DBG: DllMain(%s) PROCESS_ATTACH done status=%lx\n",
++             debugstr_w(wm->ldr.BaseDllName.Buffer), status );
+         if (status == STATUS_SUCCESS)
+         {
+             wm->ldr.Flags |= LDR_PROCESS_ATTACHED;
+@@ -4445,6 +4450,10 @@ void loader_init( CONTEXT *context, void **entry )
+     ULONG_PTR cookie, port = 0;
+     WINE_MODREF *wm;
+ 
++    MESSAGE( "OHOS-DBG: loader_init ENTER ProcessHeap=%p Peb=%p\n",
++             NtCurrentTeb()->Peb ? NtCurrentTeb()->Peb->ProcessHeap : (void*)-1,
++             NtCurrentTeb()->Peb );
++
+     if (process_detaching) NtTerminateThread( GetCurrentThread(), 0 );
+ 
+     if (NtCurrentTeb()->SkipLoaderInit) return;
+@@ -4464,6 +4473,8 @@ void loader_init( CONTEXT *context, void **entry )
+         peb->TlsExpansionBitmap = &tls_expansion_bitmap;
+         peb->LoaderLock         = &loader_section;
+         peb->ProcessHeap        = RtlCreateHeap( HEAP_GROWABLE, NULL, 0, 0, NULL, NULL );
++        MESSAGE( "OHOS-DBG: loader_init RtlCreateHeap → ProcessHeap=%p\n",
++                 peb->ProcessHeap );
+ 
+         RtlInitializeBitMap( &tls_bitmap, peb->TlsBitmapBits, sizeof(peb->TlsBitmapBits) * 8 );
+         RtlInitializeBitMap( &tls_expansion_bitmap, peb->TlsExpansionBitmapBits,
+@@ -4503,6 +4514,8 @@ void loader_init( CONTEXT *context, void **entry )
+         }
+         node_kernel32 = kernel32->ldr.DdagNode;
+         pBaseThreadInitThunk = RtlFindExportedRoutineByName( kernel32->ldr.DllBase, "BaseThreadInitThunk" );
++        ERR( "OHOS-DBG: pBaseThreadInitThunk=%p (default=%p)\n",
++             pBaseThreadInitThunk, (void *)default_thread_init_func );
+         LdrGetProcedureAddress( kernel32->ldr.DllBase, &ctrl_routine, 0, (void **)&pCtrlRoutine );
+ 
+         actctx_init();
+@@ -4510,10 +4523,16 @@ void loader_init( CONTEXT *context, void **entry )
+         if (needs_elevation())
+             elevate_token();
+         get_env_var( L"WINESYSTEMDLLPATH", 0, &system_dll_path );
++        ERR( "OHOS-DBG: before fixup_imports *entry=%p wm->ldr.EntryPoint=%p flags=%lx\n",
++             *entry, wm->ldr.EntryPoint, wm->ldr.Flags );
+         if (wm->ldr.Flags & LDR_COR_ILONLY)
++        {
++            ERR( "OHOS-DBG: taking fixup_imports_ilonly path!\n" );
+             status = fixup_imports_ilonly( wm, NULL, entry );
++        }
+         else
+             status = fixup_imports( wm, NULL );
++        ERR( "OHOS-DBG: after fixup *entry=%p\n", *entry );
+ 
+         if (status)
+         {
+@@ -4521,6 +4540,7 @@ void loader_init( CONTEXT *context, void **entry )
+                  debugstr_w(NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer), status );
+             NtTerminateProcess( GetCurrentProcess(), status );
+         }
++        ERR( "OHOS-DBG: imports_fixup_done, flushing...\n" );
+         imports_fixup_done = TRUE;
+     }
+     else
+@@ -4543,8 +4563,10 @@ void loader_init( CONTEXT *context, void **entry )
+ 
+     NtCurrentTeb()->FlsSlots = fls_alloc_data();
+ 
++    ERR( "OHOS-DBG: after imports block, attach_done=%d\n", attach_done );
+     if (!attach_done)  /* first time around */
+     {
++        ERR( "OHOS-DBG: first-time attach, calling alloc_thread_tls...\n" );
+         attach_done = 1;
+         if ((status = alloc_thread_tls()) != STATUS_SUCCESS)
+         {
+@@ -4556,14 +4578,23 @@ void loader_init( CONTEXT *context, void **entry )
+         if (wm->ldr.ActivationContext)
+             RtlActivateActivationContext( 0, wm->ldr.ActivationContext, &cookie );
+ 
+-        if ((status = process_attach( node_ntdll, context ))
+-             || (status = process_attach( node_kernel32, context )))
++        ERR( "OHOS-DBG: calling process_attach for ntdll...\n" );
++        status = process_attach( node_ntdll, context );
++        ERR( "OHOS-DBG: process_attach ntdll done status=%lx\n", status );
++        if (!status)
++        {
++            ERR( "OHOS-DBG: calling process_attach for kernel32...\n" );
++            status = process_attach( node_kernel32, context );
++            ERR( "OHOS-DBG: process_attach kernel32 done status=%lx\n", status );
++        }
++        if (status)
+         {
+             ERR( "Initializing system dll for %s failed, status %lx\n",
+                  debugstr_w(NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer), status );
+             NtTerminateProcess( GetCurrentProcess(), status );
+         }
+ 
++        ERR( "OHOS-DBG: calling walk_node_dependencies...\n" );
+         if ((status = walk_node_dependencies( wm->ldr.DdagNode, context, process_attach )))
+         {
+             if (last_failed_modref)
+@@ -4573,6 +4604,7 @@ void loader_init( CONTEXT *context, void **entry )
+                  debugstr_w(NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer), status );
+             NtTerminateProcess( GetCurrentProcess(), status );
+         }
++        ERR( "OHOS-DBG: walk_node_dependencies done status=%lx\n", status );
+         release_address_space();
+         if (wm->ldr.TlsIndex == -1) call_tls_callbacks( wm->ldr.DllBase, DLL_PROCESS_ATTACH );
+         if (wm->ldr.ActivationContext) RtlDeactivateActivationContext( 0, cookie );
+@@ -4588,6 +4620,7 @@ void loader_init( CONTEXT *context, void **entry )
+         if (wm->ldr.TlsIndex == -1) call_tls_callbacks( wm->ldr.DllBase, DLL_THREAD_ATTACH );
+     }
+ 
++    ERR( "OHOS-DBG: loader_init EXIT\n" );
+     RtlLeaveCriticalSection( &loader_section );
+ }
+ 
+diff --git a/dlls/ntdll/signal_x86_64.c b/dlls/ntdll/signal_x86_64.c
+index 29fadc722425..04319fa3c45b 100644
+--- a/dlls/ntdll/signal_x86_64.c
++++ b/dlls/ntdll/signal_x86_64.c
+@@ -244,6 +244,12 @@ NTSTATUS call_seh_handlers( EXCEPTION_RECORD *rec, CONTEXT *orig_context )
+     context = *orig_context;
+     context.ContextFlags &= ~0x40; /* Clear xstate flag. */
+ 
++    MESSAGE( "OHOS-DBG: call_seh_handlers ENTER Rip=%I64x Rsp=%I64x ExceptionCode=%08lx "
++             "StackBase=%p StackLimit=%p Teb=%p\n",
++             context.Rip, context.Rsp, rec->ExceptionCode,
++             NtCurrentTeb()->Tib.StackBase, NtCurrentTeb()->Tib.StackLimit,
++             NtCurrentTeb() );
++
+     dispatch.TargetIp      = 0;
+     dispatch.ContextRecord = &context;
+     dispatch.HistoryTable  = &table;
+@@ -1038,7 +1044,12 @@ __ASM_GLOBAL_FUNC( signal_start_thread,
+  */
+ void WINAPI LdrInitializeThunk( CONTEXT *context, ULONG_PTR unk2, ULONG_PTR unk3, ULONG_PTR unk4 )
+ {
++    MESSAGE( "OHOS-DBG: LdrInitializeThunk ENTER context=%p Rip=%I64x\n",
++             context, context ? context->Rip : 0 );
+     loader_init( context, (void **)&context->Rcx );
++    ERR( "OHOS-DBG: LdrInitializeThunk after loader_init, Rip=%I64x Rcx=%I64x Rsp=%I64x, "
++         "calling signal_start_thread\n",
++         context->Rip, context->Rcx, context->Rsp );
+     TRACE_(relay)( "\1Starting thread proc %p (arg=%p)\n", (void *)context->Rcx, (void *)context->Rdx );
+     signal_start_thread( context );
+ }
+diff --git a/dlls/ntdll/unix/env.c b/dlls/ntdll/unix/env.c
+index 13b9ee130d72..3cd0989ce1a8 100644
+--- a/dlls/ntdll/unix/env.c
++++ b/dlls/ntdll/unix/env.c
+@@ -1541,6 +1541,7 @@ static WCHAR *build_command_line( WCHAR **wargv )
+  */
+ static void run_wineboot( WCHAR *env, SIZE_T size )
+ {
++    MESSAGE( "OHOS-DBG: run_wineboot ENTER\n" );
+     static const WCHAR eventW[] = {'\\','K','e','r','n','e','l','O','b','j','e','c','t','s',
+         '\\','_','_','w','i','n','e','b','o','o','t','_','e','v','e','n','t',0};
+     static const WCHAR appnameW[] = {'\\','?','?','\\','C',':','\\','w','i','n','d','o','w','s',
+@@ -1603,10 +1604,12 @@ static void run_wineboot( WCHAR *env, SIZE_T size )
+     handles[count++] = process;
+ 
+ wait:
++    MESSAGE( "OHOS-DBG: run_wineboot at wait, count=%d\n", count );
+     timeout.QuadPart = (ULONGLONG)5 * 60 * 1000 * -10000;
+     if (NtWaitForMultipleObjects( count, handles, WaitAny, FALSE, &timeout ) == WAIT_TIMEOUT)
+         ERR( "boot event wait timed out\n" );
+     while (count) NtClose( handles[--count] );
++    MESSAGE( "OHOS-DBG: run_wineboot EXIT\n" );
+ }
+ 
+ 
+@@ -1960,8 +1963,26 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
+     TRACE( "image %s cmdline %s dir %s\n",
+            debugstr_w(main_wargv[0]), debugstr_w(cmdline), debugstr_w(curdir) );
+ 
++    /* OHOS: build DllPath from WINEDLLPATH for PE DLL search */
++    DWORD dllpath_len = 0;
++    WCHAR *dllpath_w = NULL;
++    const char *winedllpath = getenv("WINEDLLPATH");
++    if (winedllpath)
++    {
++        DWORD ulen = strlen(winedllpath);
++        dllpath_w = malloc((ulen + 2) * sizeof(WCHAR));
++        if (dllpath_w)
++        {
++            for (const char *s = winedllpath; *s; s++)
++                dllpath_w[dllpath_len++] = (*s == ':') ? ';' : *s;
++            dllpath_w[dllpath_len] = 0;
++            dllpath_len = (dllpath_len + 1) * sizeof(WCHAR);
++        }
++    }
++
+     size = (sizeof(*params)
+             + MAX_PATH * sizeof(WCHAR)  /* curdir */
++            + dllpath_len               /* dll path */
+             + (wcslen( cmdline ) + 1) * sizeof(WCHAR)  /* command line */
+             + (wcslen( main_wargv[0] ) + 1) * sizeof(WCHAR) * 2 /* image path + window title */
+             + env_pos * sizeof(WCHAR));
+@@ -1985,6 +2006,15 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
+     put_unicode_string( main_wargv[0], &dst, &params->ImagePathName );
+     put_unicode_string( cmdline, &dst, &params->CommandLine );
+     put_unicode_string( main_wargv[0], &dst, &params->WindowTitle );
++    if (dllpath_w)
++    {
++        memcpy(dst, dllpath_w, dllpath_len);
++        params->DllPath.Buffer = dst;
++        params->DllPath.Length = dllpath_len - sizeof(WCHAR);
++        params->DllPath.MaximumLength = dllpath_len;
++        dst += dllpath_len / sizeof(WCHAR);
++        free(dllpath_w);
++    }
+     free( nt_name.Buffer );
+     free( cmdline );
+     free( curdir );
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 988477775c3d..2b8579f87e36 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -37,6 +37,11 @@
+ #include <sys/stat.h>
+ #include <sys/mman.h>
+ #include <sys/wait.h>
++#ifdef PAD_MODE
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <dirent.h>
++#endif
+ #include <unistd.h>
+ #include <dlfcn.h>
+ #ifdef HAVE_PWD_H
+@@ -250,6 +255,8 @@ static int build_path_and_exec( pid_t *pid, const char *dir, const char *name, c
+ 
+     argv[0] = build_path( dir, name );
+     ret = posix_spawn( pid, argv[0], NULL, NULL, argv, environ );
++    MESSAGE( "OHOS-DBG: build_path_and_exec dir=%s name=%s path=%s ret=%d errno=%d\n",
++             dir, name, argv[0], ret, ret ? errno : 0 );
+     free( argv[0] );
+     return ret;
+ }
+@@ -397,8 +404,23 @@ static void init_paths(void)
+     else
+     {
+         if (!(dll_dir = remove_tail( ntdll_dir, get_so_dir(current_machine) ))) dll_dir = ntdll_dir;
++#ifdef PAD_MODE
++        {
++            const char *wine_data_dir = getenv( "WINEDATADIR" );
++            if (wine_data_dir) data_dir = strdup( wine_data_dir );
++            else data_dir = build_relative_path( dll_dir, LIBDIR "/wine", DATADIR "/wine" );
++
++            const char *wine_bin_dir = getenv( "WINEBINDIR" );
++            if (wine_bin_dir) bin_dir = strdup( wine_bin_dir );
++            else bin_dir = build_relative_path( dll_dir, LIBDIR "/wine", BINDIR );
++
++            const char *wine_unix_dir = getenv( "WINEUNIXDIR" );
++            if (wine_unix_dir) dll_dir = strdup( wine_unix_dir );
++        }
++#else
+         bin_dir = build_relative_path( dll_dir, LIBDIR "/wine", BINDIR );
+         data_dir = build_relative_path( dll_dir, LIBDIR "/wine", DATADIR "/wine" );
++#endif
+         wineloader = build_path( ntdll_dir, "wine" );
+     }
+ 
+@@ -509,6 +531,9 @@ static int exec_wineserver( pid_t *pid, char **argv )
+ {
+     char *path;
+ 
++    MESSAGE( "OHOS-DBG: exec_wineserver called, bin_dir=%s build_dir=%s\n",
++             bin_dir ? bin_dir : "(null)", build_dir ? build_dir : "(null)" );
++
+     if (!is_win64 && alt_build_dir)  /* look for 64-bit server */
+         return build_path_and_exec( pid, alt_build_dir, "server/wineserver", argv );
+ 
+@@ -523,6 +548,7 @@ static int exec_wineserver( pid_t *pid, char **argv )
+         for (path = strtok( strdup( path ), ":" ); path; path = strtok( NULL, ":" ))
+             if (!build_path_and_exec( pid, path, "wineserver", argv )) return 0;
+     }
++    MESSAGE( "OHOS-DBG: exec_wineserver FAILED all paths, last try BINDIR=%s\n", BINDIR );
+     return build_path_and_exec( pid, BINDIR, "wineserver", argv );
+ }
+ 
+@@ -535,22 +561,199 @@ static int exec_wineserver( pid_t *pid, char **argv )
+ void start_server( BOOL debug )
+ {
+     static BOOL started;  /* we only try once */
+-    char *argv[3];
+-    static char debug_flag[] = "-d";
+ 
++    MESSAGE( "OHOS-DBG: start_server called, started=%d debug=%d\n", started, debug );
+     if (!started)
+     {
++#ifdef PAD_MODE
++        /* 问题起因: 标准 Linux 上 start_server() 通过 posix_spawn 启动 wineserver，
++         * wineserver 自动 daemonize（double-fork），中间进程退出后 waitpid 返回，
++         * 此时 wineserver socket 已就绪。但 OHOS PAD_MODE 没有 execve，
++         * wineserver 是 libwineserver.so 库而非独立 ELF 可执行文件。
++         *
++         * 解决办法: 通过 Process Broker 请求主进程调用 StartNativeChildProcess
++         * 来重启 wineserver。由于没有 daemonize + waitpid 同步点，
++         * 需要轮询 socket 直到就绪。
++         *
++         * 跨进程互斥: static BOOL started 只在单进程内有效，多进程可能同时
++         * 进入此路径。spawn 前扫描 .wineserver/<host>/socket 是否存在——
++         * 存在说明 wineserver 已在运行（可能是其他进程 spawn 的），不重复 spawn。*/
++        const char *prefix = getenv("WINEPREFIX");
++        if (!prefix) prefix = "/data/storage/el2/base/files/.wine";
++        char sockdir_check[512];
++        snprintf(sockdir_check, sizeof(sockdir_check), "%s/.wineserver", prefix);
++
++        /* 扫描 .wineserver 下是否有活跃的 socket 文件 */
++        int socket_alive = 0;
++        {
++            struct stat st;
++            if (stat(sockdir_check, &st) == 0 && S_ISDIR(st.st_mode))
++            {
++                DIR *d = opendir(sockdir_check);
++                if (d)
++                {
++                    struct dirent *de;
++                    while ((de = readdir(d)))
++                    {
++                        if (de->d_name[0] == '.') continue;
++                        char sub[1024];
++                        snprintf(sub, sizeof(sub), "%s/%s/socket", sockdir_check, de->d_name);
++                        if (stat(sub, &st) == 0 && S_ISSOCK(st.st_mode))
++                            { socket_alive = 1; break; }
++                    }
++                    closedir(d);
++                }
++            }
++        }
++
++        if (!socket_alive)
++        {
++            const char *binDir = getenv("WINEBINDIR");
++            if (!binDir) binDir = "/data/storage/el2/base/files/wine/bin";
++
++            int broker_fd = socket(AF_UNIX, SOCK_STREAM, 0);
++            if (broker_fd >= 0)
++            {
++                struct sockaddr_un addr;
++                memset(&addr, 0, sizeof(addr));
++                addr.sun_family = AF_UNIX;
++                const char *broker_path = getenv("PROCESSBROKER");
++                strcpy(addr.sun_path, broker_path ? broker_path : "/data/storage/el2/base/files/.wine_broker");
++
++                if (connect(broker_fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
++                {
++                    char entryParams[1024];
++                    snprintf(entryParams, sizeof(entryParams), "%s|wineserver|-f", binDir);
++                    MESSAGE( "OHOS-DBG: start_server broker request: %s\n", entryParams );
++
++                    char req[2048];
++                    int reqlen = snprintf(req, sizeof(req), "SPAWN\n%s\n", entryParams);
++
++                    struct iovec iov;
++                    iov.iov_base = req;
++                    iov.iov_len = reqlen;
++
++                    struct msghdr msg = {};
++                    msg.msg_iov = &iov;
++                    msg.msg_iovlen = 1;
++
++                    if (sendmsg(broker_fd, &msg, MSG_NOSIGNAL) >= 0)
++                    {
++                        int32_t response[2];
++                        ssize_t n = recv(broker_fd, response, sizeof(response), MSG_WAITALL);
++                        if (n == sizeof(response))
++                        {
++                            MESSAGE( "OHOS-DBG: start_server broker replied childPid=%d status=%d\n",
++                                     response[0], response[1] );
++                            if (response[1] == 0 && response[0] > 0)
++                                started = TRUE;
++                        }
++                    }
++                }
++                close(broker_fd);
++            }
++
++            if (started)
++            {
++                /* poll socket 直到就绪（最多 5 秒） */
++                MESSAGE( "OHOS-DBG: start_server waiting for wineserver socket...\n" );
++                int found = 0;
++                for (int wait = 0; wait < 25; wait++)
++                {
++                    struct stat st;
++                    if (stat(sockdir_check, &st) == 0 && S_ISDIR(st.st_mode))
++                    {
++                        DIR *d = opendir(sockdir_check);
++                        if (d)
++                        {
++                            struct dirent *de;
++                            while ((de = readdir(d)))
++                            {
++                                if (de->d_name[0] == '.') continue;
++                                char sub[1024];
++                                snprintf(sub, sizeof(sub), "%s/%s/socket", sockdir_check, de->d_name);
++                                if (stat(sub, &st) == 0 && S_ISSOCK(st.st_mode))
++                                {
++                                    MESSAGE( "OHOS-DBG: start_server socket ready at %s\n", sub );
++                                    found = 1;
++                                    break;
++                                }
++                            }
++                            closedir(d);
++                        }
++                        if (found) break;
++                    }
++                    usleep(200000);
++                }
++                if (found)
++                    MESSAGE( "OHOS-DBG: start_server wineserver socket ready\n" );
++                else
++                    MESSAGE( "OHOS-DBG: start_server timeout waiting for socket\n" );
++            }
++            else
++                MESSAGE( "OHOS-DBG: start_server broker spawn failed, will retry\n" );
++        }
++        else
++        {
++            /* socket 已存在，但可能是即将退出的 wineserver 残留。
++             * 短暂 poll 确认 socket 稳定存在（2 秒），消失则 fall through 去 spawn。 */
++            MESSAGE( "OHOS-DBG: start_server socket found, verifying stability...\n" );
++            int stable = 1;
++            for (int wait = 0; wait < 10; wait++)
++            {
++                usleep(200000);
++                int still_there = 0;
++                struct stat st;
++                if (stat(sockdir_check, &st) == 0 && S_ISDIR(st.st_mode))
++                {
++                    DIR *d = opendir(sockdir_check);
++                    if (d)
++                    {
++                        struct dirent *de;
++                        while ((de = readdir(d)))
++                        {
++                            if (de->d_name[0] == '.') continue;
++                            char sub[1024];
++                            snprintf(sub, sizeof(sub), "%s/%s/socket", sockdir_check, de->d_name);
++                            if (stat(sub, &st) == 0 && S_ISSOCK(st.st_mode))
++                                { still_there = 1; break; }
++                        }
++                        closedir(d);
++                    }
++                }
++                if (!still_there) { stable = 0; break; }
++            }
++            if (stable)
++            {
++                MESSAGE( "OHOS-DBG: start_server socket stable, skipping spawn\n" );
++                started = TRUE;
++            }
++            else
++                MESSAGE( "OHOS-DBG: start_server socket vanished, will spawn\n" );
++        }
++#else
++        /* 标准 Linux: posix_spawn wineserver */
+         int status;
+         pid_t pid;
++        char *argv[3];
++        static char debug_flag[] = "-d";
+ 
+         argv[1] = debug ? debug_flag : NULL;
+         argv[2] = NULL;
+-        if (exec_wineserver( &pid, argv )) fatal_error( "could not exec wineserver\n" );
++        if (exec_wineserver( &pid, argv ))
++        {
++            MESSAGE( "OHOS-DBG: start_server FAILED exec_wineserver returned error\n" );
++            fatal_error( "could not exec wineserver\n" );
++        }
++        MESSAGE( "OHOS-DBG: start_server waitpid pid=%d...\n", (int)pid );
+         waitpid( pid, &status, 0 );
+         status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
++        MESSAGE( "OHOS-DBG: start_server waitpid done, pid=%d status=%d WIFEXITED=%d\n",
++                 (int)pid, status, WIFEXITED(status) );
+         if (status == 2) return;  /* server lock held by someone else, will retry later */
+         if (status) exit(status);  /* server failed */
+         started = TRUE;
++#endif
+     }
+ }
+ 
+@@ -1867,10 +2070,13 @@ static void start_main_thread(void)
+     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
+     set_load_order_app_name( main_wargv[0] );
+     init_thread_stack( teb, 0, 0, 0 );
++    MESSAGE( "OHOS-DBG: init_thread_stack done, StackBase=%p StackLimit=%p\n",
++             teb->Tib.StackBase, teb->Tib.StackLimit );
+     NtCreateKeyedEvent( &keyed_event, GENERIC_READ | GENERIC_WRITE, NULL, 0 );
+     load_ntdll();
+     load_wow64_ntdll( main_image_info.Machine );
+     load_apiset_dll();
++    MESSAGE( "OHOS-DBG: start_main_thread about to call server_init_process_done\n" );
+     server_init_process_done();
+ }
+ 
+@@ -2002,7 +2208,9 @@ static int pre_exec(void)
+ 
+ static int pre_exec(void)
+ {
+-#ifdef HAVE_WINE_PRELOADER
++#ifdef PAD_MODE
++    return 0;  /* Pad fork-only: no preloader, no execve */
++#elif defined(HAVE_WINE_PRELOADER)
+     return 1;  /* we have a preloader */
+ #else
+     return 0;  /* no exec needed */
+@@ -2018,7 +2226,11 @@ static void reexec_loader( int argc, char *argv[], char *extra_arg )
+     char **new_argv;
+ 
+     /* have to exec if we have a preloader, or an argument, or if we are the initial wrapper */
++#ifdef PAD_MODE
++    if (!pre_exec() && !extra_arg) return;  // Pad: no preloader, skip default reexec
++#else
+     if (!pre_exec() && !extra_arg && dlsym( RTLD_DEFAULT, "wine_main_preload_info" )) return;
++#endif
+ 
+     if (extra_arg)
+     {
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index 418f95b7735f..51614f0ca8cf 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -56,6 +56,9 @@
+ # include <libprocstat.h>
+ #endif
+ #include <unistd.h>
++#ifdef PAD_MODE
++#include <sys/un.h>
++#endif
+ #ifdef HAVE_MACH_MACH_H
+ # include <mach/mach.h>
+ #endif
+@@ -416,6 +419,108 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+         isatty(1) && is_unix_console_handle( params->hStdOutput ))
+         stdout_fd = 1;
+ 
++#ifdef PAD_MODE
++    /* Process Broker: 通过 Unix socket 请求主进程创建子进程。
++     *
++     * 问题起因: wineboot 是 appspawn 子进程，它在 --init 阶段通过
++     * NtCreateUserProcess → spawn_process 创建 services.exe 等子进程。
++     * 若 spawn_process 内部直接调用 OH_Ability_StartNativeChildProcess，
++     * 会返回 NCP_ERR_ALREADY_IN_CHILD（OHOS API 13 不支持嵌套创建子进程）。
++     *
++     * 解决办法: 通过 Unix socket 将创建请求转发到主进程中的 Broker 线程，
++     * Broker 在主进程上下文（非 appspawn 子进程）调用 StartNativeChildProcess，
++     * 并通过 SCM_RIGHTS 传递 wineserver socket fd 给子进程。 */
++    {
++        const char *broker_path = getenv("PROCESSBROKER");
++        if (!broker_path) broker_path = "/data/storage/el2/base/files/.wine_broker";
++        const char *binDir = getenv("WINEBINDIR");
++        if (!binDir) binDir = "/data/storage/el2/base/files/wine/bin";
++        char *entryParams = NULL;
++        int broker_fd;
++        struct sockaddr_un addr;
++        struct msghdr msg;
++        union { char buf[CMSG_SPACE(sizeof(int))]; struct cmsghdr align; } ctrl;
++        struct cmsghdr *cmsg;
++        int i, len;
++        ssize_t sent, received;
++        int32_t response[2];
++
++        argv = build_argv( &params->CommandLine, 0 );
++
++        /* 构建 entryParams: "binDir|wine|arg0|arg1|..."
++         * wine_child.cpp 的 __wine_main 需要 argc>=2 (argv[0]=wine) */
++        len = strlen(binDir) + 1 + 5; /* + "|wine" */
++        for (i = 0; argv[i]; i++) len += strlen(argv[i]) + 1;
++        entryParams = malloc(len + 1);
++        if (entryParams)
++        {
++            char *p = entryParams;
++            p += snprintf(p, len + 1, "%s|wine", binDir);
++            for (i = 0; argv[i]; i++)
++                p += snprintf(p, len + 1 - (p - entryParams), "|%s", argv[i]);
++        }
++
++        /* 连接 broker */
++        broker_fd = socket(AF_UNIX, SOCK_STREAM, 0);
++        if (broker_fd >= 0)
++        {
++            memset(&addr, 0, sizeof(addr));
++            addr.sun_family = AF_UNIX;
++            strcpy(addr.sun_path, broker_path);
++
++            if (connect(broker_fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
++            {
++                /* 构造请求: "SPAWN\n{entryParams}\n" + SCM_RIGHTS */
++                char req_hdr[32];
++                int hdr_len = snprintf(req_hdr, sizeof(req_hdr), "SPAWN\n");
++                size_t ep_len = entryParams ? strlen(entryParams) : 0;
++
++                struct iovec iov_parts[3];
++                iov_parts[0].iov_base = req_hdr;
++                iov_parts[0].iov_len = hdr_len;
++                iov_parts[1].iov_base = entryParams ? entryParams : (char*)"";
++                iov_parts[1].iov_len = ep_len;
++                iov_parts[2].iov_base = (char*)"\n";
++                iov_parts[2].iov_len = 1;
++
++                memset(&msg, 0, sizeof(msg));
++                msg.msg_iov = iov_parts;
++                msg.msg_iovlen = 3;
++                msg.msg_control = ctrl.buf;
++                msg.msg_controllen = sizeof(ctrl.buf);
++
++                cmsg = CMSG_FIRSTHDR(&msg);
++                cmsg->cmsg_level = SOL_SOCKET;
++                cmsg->cmsg_type = SCM_RIGHTS;
++                cmsg->cmsg_len = CMSG_LEN(sizeof(int));
++                memcpy(CMSG_DATA(cmsg), &socketfd, sizeof(int));
++                msg.msg_controllen = cmsg->cmsg_len;
++
++                sent = sendmsg(broker_fd, &msg, MSG_NOSIGNAL);
++                if (sent >= 0)
++                {
++                    /* 接收响应: childPid + status (8 字节) */
++                    received = recv(broker_fd, response, sizeof(response), MSG_WAITALL);
++                    if (received == sizeof(response))
++                    {
++                        pid = response[0];
++                        int32_t broker_status = response[1];
++                        if (broker_status != 0 || pid <= 0)
++                            status = STATUS_UNSUCCESSFUL;
++                    }
++                    else status = STATUS_UNSUCCESSFUL;
++                }
++                else status = STATUS_UNSUCCESSFUL;
++            }
++            else status = STATUS_UNSUCCESSFUL;
++            close(broker_fd);
++        }
++        else status = STATUS_UNSUCCESSFUL;
++
++        free(argv);
++        free(entryParams);
++    }
++#else
+     if (!(pid = fork()))  /* child */
+     {
+         if (!(pid = fork()))  /* grandchild */
+@@ -457,6 +562,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+         } while (wret < 0 && errno == EINTR);
+     }
+     else status = STATUS_NO_MEMORY;
++#endif
+ 
+     if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
+     if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+@@ -563,6 +669,11 @@ NTSTATUS wow64_wine_spawnvp( void *args )
+ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, int unixdir,
+                                const RTL_USER_PROCESS_PARAMETERS *params )
+ {
++#ifdef PAD_MODE
++    /* Pad: native Unix binary execution not supported (no execve).
++     * This path is rarely hit for core Wine (most exes are PE). */
++    return STATUS_UNSUCCESSFUL;
++#else
+     pid_t pid;
+     int fd[2], stdin_fd = -1, stdout_fd = -1;
+     char **argv;
+@@ -651,6 +762,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+     if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
+     if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+     return status;
++#endif /* !PAD_MODE */
+ }
+ 
+ static NTSTATUS alloc_handle_list( const PS_ATTRIBUTE *handles_attr, obj_handle_t **handles, data_size_t *handles_len )
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 8d976ceab467..c90e164e203a 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1415,6 +1415,8 @@ static int server_connect(void)
+     /* chdir to the server directory */
+     if (chdir( server_dir ) == -1)
+     {
++        MESSAGE( "OHOS-DBG: server_connect chdir(%s) failed errno=%d (ENOENT=%d), calling start_server\n",
++                 server_dir, errno, ENOENT );
+         if (errno != ENOENT) fatal_perror( "chdir to %s", server_dir );
+         start_server( TRACE_ON(server) );
+         if (chdir( server_dir ) == -1) fatal_perror( "chdir to %s", server_dir );
+@@ -1431,11 +1433,14 @@ static int server_connect(void)
+         if (retry)
+         {
+             usleep( 100000 * retry * retry );
++            MESSAGE( "OHOS-DBG: server_connect retry=%d, calling start_server\n", retry );
+             start_server( TRACE_ON(server) );
+             if (lstat( SOCKETNAME, &st ) == -1) continue;  /* still no socket, wait a bit more */
+         }
+         else if (lstat( SOCKETNAME, &st ) == -1) /* check for an already existing socket */
+         {
++            MESSAGE( "OHOS-DBG: server_connect no socket at %s/%s, errno=%d, calling start_server\n",
++                     server_dir, SOCKETNAME, errno );
+             if (errno != ENOENT) fatal_perror( "lstat %s/%s", server_dir, SOCKETNAME );
+             start_server( TRACE_ON(server) );
+             if (lstat( SOCKETNAME, &st ) == -1) continue;  /* still no socket, wait a bit more */
+@@ -1621,6 +1626,7 @@ size_t server_init_process(void)
+     server_pid = -1;
+     if (env_socket)
+     {
++        MESSAGE( "OHOS-DBG: server_init WINESERVERSOCKET=%s, using fd directly\n", env_socket );
+         fd_socket = atoi( env_socket );
+         if (fcntl( fd_socket, F_SETFD, FD_CLOEXEC ) == -1)
+             fatal_perror( "Bad server socket %d", fd_socket );
+@@ -1628,6 +1634,7 @@ size_t server_init_process(void)
+     }
+     else
+     {
++        MESSAGE( "OHOS-DBG: server_init NO WINESERVERSOCKET, calling server_connect()\n" );
+         const char *arch = getenv( "WINEARCH" );
+ 
+         if (is_win64 && arch && !strcmp( arch, "win32" ))
+@@ -1636,6 +1643,7 @@ size_t server_init_process(void)
+             fatal_error( "WINEARCH set to invalid value '%s', it must be win32, win64, or wow64.\n", arch );
+ 
+         fd_socket = server_connect();
++        MESSAGE( "OHOS-DBG: server_connect returned fd=%d\n", fd_socket );
+     }
+ 
+     /* setup the signal mask */
+@@ -1766,6 +1774,9 @@ void server_init_process_done(void)
+      * is sent by init_process_done */
+     signal_init_process( data->teb );
+     init_teb_data( data );
++    MESSAGE( "OHOS-DBG: server_init_process_done signal_init done, "
++             "TransferAddress=%p peb=%p\n",
++             main_image_info.TransferAddress, peb );
+ 
+     /* Signal the parent process to continue */
+     SERVER_START_REQ( init_process_done )
+@@ -1778,6 +1789,7 @@ void server_init_process_done(void)
+     SERVER_END_REQ;
+ 
+     assert( !status );
++    MESSAGE( "OHOS-DBG: server_init_process_done about to signal_start_thread\n" );
+     signal_start_thread( main_image_info.TransferAddress, peb, data->teb );
+ }
+ 
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 41293fe56077..9afda40c01af 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2299,6 +2299,8 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+     case TRAP_x86_PROTFLT:   /* General protection fault */
+         {
+             WORD err = ERROR_sig(sigcontext);
++            MESSAGE( "OHOS-DBG: protfault Rip=%p err=%x rsp=%p\n",
++                     (void *)RIP_sig(sigcontext), err, (void *)RSP_sig(sigcontext) );
+             if (!err && (rec.ExceptionCode = is_privileged_instr( &context.c ))) break;
+             if ((err & 7) == 2 && handle_interrupt( data, sigcontext, &rec, &context )) return;
+             rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+@@ -2313,6 +2315,9 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+         rec.NumberParameters = 2;
+         rec.ExceptionInformation[0] = (ERROR_sig(sigcontext) >> 1) & 0x09;
+         rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
++        MESSAGE( "OHOS-DBG: pagefault Rip=%p addr=%p err=%x rsp=%p\n",
++                 (void *)RIP_sig(sigcontext), siginfo->si_addr,
++                 ERROR_sig(sigcontext), (void *)RSP_sig(sigcontext) );
+         if (!virtual_handle_fault( data, &rec, (void *)RSP_sig(sigcontext) ) ||
+             check_invalid_gsbase( data, sigcontext ))
+         {
+@@ -2857,7 +2862,11 @@ void init_syscall_frame( LPTHREAD_START_ROUTINE entry, void *arg, TEB *teb )
+     thread_data->instrumentation_callback = &instrumentation_callback;
+ 
+ #if defined __linux__
+-    arch_prctl( ARCH_SET_GS, teb );
++    {
++        int gs_ret = arch_prctl( ARCH_SET_GS, teb );
++        MESSAGE( "OHOS-DBG: arch_prctl(ARCH_SET_GS, teb=%p) ret=%d\n",
++                 teb, gs_ret );
++    }
+     if (fs32_sel)
+     {
+         arch_prctl( ARCH_GET_FS, &thread_data->pthread_teb );
+@@ -2881,6 +2890,8 @@ void init_syscall_frame( LPTHREAD_START_ROUTINE entry, void *arg, TEB *teb )
+     context.Rdx    = (ULONG_PTR)arg;
+     context.Rsp    = (ULONG_PTR)teb->Tib.StackBase - 0x28;
+     context.Rip    = (ULONG_PTR)pRtlUserThreadStart;
++    MESSAGE( "OHOS-DBG: init_syscall_frame entry=%p arg=%p RtlUserThreadStart=%p\n",
++             entry, arg, pRtlUserThreadStart );
+     context.SegCs  = cs64_sel;
+     context.SegDs  = ds64_sel;
+     context.SegEs  = ds64_sel;
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 4c8257d6ca61..5d86430a5c3c 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -866,7 +866,10 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
+     {
+         if (builtin->unix_path && !builtin->unix_handle)
+         {
+-            builtin->unix_handle = dlopen( builtin->unix_path, RTLD_NOW );
++            /* OHOS: dlopen 不能用绝对路径, 只取文件名让系统 linker 搜索 libs/ */
++            const char *name = strrchr( builtin->unix_path, '/' );
++            name = name ? name + 1 : builtin->unix_path;
++            builtin->unix_handle = dlopen( name, RTLD_NOW );
+             if (!builtin->unix_handle)
+                 WARN_(module)( "failed to load %s: %s\n", debugstr_a(builtin->unix_path), dlerror() );
+         }
+diff --git a/programs/wineboot/wineboot.c b/programs/wineboot/wineboot.c
+index 9c397df49498..32b36f43a1b7 100644
+--- a/programs/wineboot/wineboot.c
++++ b/programs/wineboot/wineboot.c
+@@ -1661,13 +1661,18 @@ static void update_wineprefix( BOOL force )
+     int fd;
+     struct stat st;
+ 
++    ERR("OHOS-WB: update_wineprefix force=%d config_dir=%s inf_path=%s\n",
++        force, debugstr_w(config_dir), debugstr_w(inf_path));
++
+     if (!inf_path)
+     {
++        ERR("OHOS-WB: wine.inf not found!\n");
+         WINE_MESSAGE( "wine: failed to update %s, wine.inf not found\n", debugstr_w( config_dir ));
+         return;
+     }
+     if ((fd = _wopen( inf_path, O_RDONLY )) == -1)
+     {
++        ERR("OHOS-WB: cannot open wine.inf: %s\n", strerror(errno));
+         WINE_MESSAGE( "wine: failed to update %s with %s: %s\n",
+                       debugstr_w(config_dir), debugstr_w(inf_path), strerror(errno) );
+         goto done;
+@@ -1680,6 +1685,7 @@ static void update_wineprefix( BOOL force )
+         HANDLE process;
+         DWORD count = 0;
+ 
++        ERR("OHOS-WB: starting rundll32 PreInstall...\n");
+         if ((process = start_rundll32( inf_path, L"PreInstall", IMAGE_FILE_MACHINE_TARGET_HOST )))
+         {
+             HWND hwnd = show_wait_window();
+@@ -1704,10 +1710,14 @@ static void update_wineprefix( BOOL force )
+                 count++;
+             }
+             DestroyWindow( hwnd );
++            ERR("OHOS-WB: rundll32 loop complete\n");
+         } else {
++            ERR("OHOS-WB: start_rundll32 PreInstall FAILED\n");
+         }
++        ERR("OHOS-WB: calling install_root_pnp_devices...\n");
+         install_root_pnp_devices();
+         update_user_profile();
++        ERR("OHOS-WB: pnp + user_profile done\n");
+ 
+     }
+ 
+@@ -1820,6 +1830,7 @@ int __cdecl main( int argc, char *argv[] )
+     BOOL is_wow64;
+ 
+     end_session = force = init = kill = restart = shutdown = update = FALSE;
++    ERR("OHOS-WB: MAIN entry argc=%d argv[0]=%s\n", argc, argv[0] ? argv[0] : "(null)");
+     GetWindowsDirectoryW( windowsdir, MAX_PATH );
+     if( !SetCurrentDirectoryW( windowsdir ) )
+         WINE_ERR("Cannot set the dir to %s (%ld)\n", wine_dbgstr_w(windowsdir), GetLastError() );
+@@ -1903,23 +1914,39 @@ int __cdecl main( int argc, char *argv[] )
+     NtCreateEvent( &event, EVENT_ALL_ACCESS, &attr, NotificationEvent, 0 );
+ 
+     ResetEvent( event );  /* in case this is a restart */
++    ERR("OHOS-WB: event created, proceeding with init...\n");
+ 
+     create_user_shared_data();
++    ERR("OHOS-WB: create_user_shared_data done\n");
+     create_hardware_registry_keys();
++    ERR("OHOS-WB: create_hardware_registry_keys done\n");
+     create_dynamic_registry_keys();
++    ERR("OHOS-WB: create_dynamic_registry_keys done\n");
+     create_computer_name_keys();
++    ERR("OHOS-WB: create_computer_name_keys done\n");
+     wininit();
++    ERR("OHOS-WB: wininit done\n");
+     pendingRename();
++    ERR("OHOS-WB: pendingRename done\n");
+ 
+     ProcessWindowsFileProtection();
++    ERR("OHOS-WB: ProcessWindowsFileProtection done\n");
+     ProcessRunKeys( HKEY_LOCAL_MACHINE, L"RunServicesOnce", TRUE, FALSE );
++    ERR("OHOS-WB: ProcessRunKeys RunServicesOnce done\n");
+ 
+     if (init || (kill && !restart))
+     {
+         ProcessRunKeys( HKEY_LOCAL_MACHINE, L"RunServices", FALSE, FALSE );
++        ERR("OHOS-WB: ProcessRunKeys RunServices done\n");
+         start_services_process();
++        ERR("OHOS-WB: start_services_process done\n");
++    }
++    ERR("OHOS-WB: INIT=%d UPD=%d about to update_wineprefix(update=%d)\n", init, update, update);
++    if (init || update) {
++        ERR("OHOS-WB: calling update_wineprefix...\n");
++        update_wineprefix( update );
++        ERR("OHOS-WB: update_wineprefix done\n");
+     }
+-    if (init || update) update_wineprefix( update );
+ 
+     create_volatile_environment_registry_key();
+     create_known_dlls();
+@@ -1936,6 +1963,7 @@ int __cdecl main( int argc, char *argv[] )
+     }
+ 
+     WINE_TRACE("Operation done\n");
++    ERR("OHOS-WB: all init done, signaling event and exiting\n");
+ 
+     SetEvent( event );
+     return 0;
+diff --git a/server/main.c b/server/main.c
+index 46419a09cb44..bc7f32d5fa15 100644
+--- a/server/main.c
++++ b/server/main.c
+@@ -243,8 +243,10 @@ static void init_limits(void)
+ 
+ int main( int argc, char *argv[] )
+ {
++    write(2, "OHOS-WS: main() ENTER\n", 22);
+     setvbuf( stderr, NULL, _IOLBF, 0 );
+     server_argv0 = argv[0];
++    write(2, "OHOS-WS: parse_options...\n", 26);
+     parse_options( argc, argv, "d::fhk::p::vw", long_options, option_callback );
+ 
+     /* setup temporary handlers before the real signal initialization is done */
+@@ -256,16 +258,27 @@ int main( int argc, char *argv[] )
+     signal( SIGABRT, sigterm_handler );
+     init_limits();
+ 
++    fprintf(stderr, "OHOS-WS: sock_init...\n");
+     sock_init();
++    fprintf(stderr, "OHOS-WS: open_master_socket...\n");
+     open_master_socket();
+ 
+-    if (debug_level) fprintf( stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
++    fprintf(stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
+     set_current_time();
++    fprintf(stderr, "OHOS-WS: init_signals...\n");
+     init_signals();
++    fprintf(stderr, "OHOS-WS: init_memory...\n");
+     init_memory();
++    fprintf(stderr, "OHOS-WS: init_directories...\n");
+     init_directories( load_intl_file() );
++    fprintf(stderr, "OHOS-WS: init_threading...\n");
+     init_threading();
++    fprintf(stderr, "OHOS-WS: init_registry...\n");
+     init_registry();
++    fprintf(stderr, "OHOS-WS: master_socket_timeout=%lld (TIMEOUT_INFINITE=%lld)\n",
++            (long long)master_socket_timeout, (long long)TIMEOUT_INFINITE);
++    write(2, "OHOS-WS: entering main_loop\n", 29);
+     main_loop();
++    write(2, "OHOS-WS: main_loop RETURNED!\n", 30);
+     return 0;
+ }
+diff --git a/server/process.c b/server/process.c
+index f3aa6797662c..8b48a683dca3 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -574,9 +574,11 @@ static void set_process_startup_state( struct process *process, enum startup_sta
+ /* callback for server shutdown */
+ static void server_shutdown_timeout( void *arg )
+ {
++    write(2, "OHOS-WS: server_shutdown_timeout FIRED\n", 39);
+     shutdown_timeout = NULL;
+     if (!running_processes)
+     {
++        write(2, "OHOS-WS: no running_processes, closing master socket\n", 53);
+         close_master_socket( 0 );
+         return;
+     }
+@@ -614,7 +616,10 @@ static void process_died( struct process *process )
+     if (!process->is_system)
+     {
+         if (!--user_processes && !shutdown_stage && master_socket_timeout != TIMEOUT_INFINITE)
++        {
++            write(2, "OHOS-WS: user_processes->0, scheduling shutdown timeout\n", 55);
+             shutdown_timeout = add_timeout_user( master_socket_timeout, server_shutdown_timeout, NULL );
++        }
+     }
+     release_object( process );
+     if (!--running_processes && shutdown_stage) close_master_socket( 0 );
+@@ -1849,7 +1854,10 @@ DECL_HANDLER(make_process_system)
+             release_thread_desktop( thread, 0 );
+         process->is_system = 1;
+         if (!--user_processes && !shutdown_stage && master_socket_timeout != TIMEOUT_INFINITE)
++        {
++            write(2, "OHOS-WS: user_processes->0 (detach), scheduling shutdown timeout\n", 61);
+             shutdown_timeout = add_timeout_user( master_socket_timeout, server_shutdown_timeout, NULL );
++        }
+     }
+     release_object( process );
+ }
+

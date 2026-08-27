@@ -1,0 +1,87 @@
+From e08d38b8464b6b952899fdf63b6211d58c150c84 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sun, 21 Jun 2026 00:51:04 +0800
+Subject: [PATCH 013/104] =?UTF-8?q?=E4=BF=AE=E5=A4=8D:=20wineserver=20?=
+ =?UTF-8?q?=E6=8C=81=E4=B9=85=E5=8C=96=20+=20WINESERVERSOCKET=20=E6=AD=BB?=
+ =?UTF-8?q?=E8=BF=9E=E6=8E=A5=20fallback?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- loader.c start_server: wineserver 重启加 -p 持久化，避免无客户端退出
+- server.c server_init_process: WINESERVERSOCKET fd 可能指向已退出的
+  wineserver，通过 recv(MSG_PEEK) 检测死连接，断开则 fallback 到
+  server_connect() → start_server() 重启链路
+---
+ dlls/ntdll/unix/loader.c |  2 +-
+ dlls/ntdll/unix/server.c | 34 +++++++++++++++++++++++++++-------
+ 2 files changed, 28 insertions(+), 8 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 2b8579f87e36..0e82bf29d289 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -623,7 +623,7 @@ void start_server( BOOL debug )
+                 if (connect(broker_fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
+                 {
+                     char entryParams[1024];
+-                    snprintf(entryParams, sizeof(entryParams), "%s|wineserver|-f", binDir);
++                    snprintf(entryParams, sizeof(entryParams), "%s|wineserver|-f|-p", binDir);
+                     MESSAGE( "OHOS-DBG: start_server broker request: %s\n", entryParams );
+ 
+                     char req[2048];
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index c90e164e203a..2d0e888f3836 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1628,22 +1628,42 @@ size_t server_init_process(void)
+     {
+         MESSAGE( "OHOS-DBG: server_init WINESERVERSOCKET=%s, using fd directly\n", env_socket );
+         fd_socket = atoi( env_socket );
++
++        /* PAD_MODE: wineserver 可能在进程间传递 fd 期间退出。
++         * recv(MSG_PEEK|MSG_DONTWAIT) 检测: 对方关闭返回 0，存活且无数据
++         * 返回 -1/EAGAIN，有数据返回 >0（MSG_PEEK 不消耗）。 */
++        {
++            char dummy;
++            ssize_t peek = recv( fd_socket, &dummy, 1, MSG_PEEK | MSG_DONTWAIT );
++            if (peek == 0 || (peek == -1 && errno != EAGAIN && errno != EWOULDBLOCK))
++            {
++                MESSAGE( "OHOS-DBG: server_init WINESERVERSOCKET fd=%d dead (peek=%zd errno=%d), "
++                         "falling back to server_connect\n",
++                         fd_socket, peek, peek == -1 ? errno : 0 );
++                close( fd_socket );
++                goto server_connect_fallback;
++            }
++        }
++
+         if (fcntl( fd_socket, F_SETFD, FD_CLOEXEC ) == -1)
+             fatal_perror( "Bad server socket %d", fd_socket );
+         unsetenv( "WINESERVERSOCKET" );
+     }
+     else
+     {
++    server_connect_fallback:
+         MESSAGE( "OHOS-DBG: server_init NO WINESERVERSOCKET, calling server_connect()\n" );
+-        const char *arch = getenv( "WINEARCH" );
++        {
++            const char *arch = getenv( "WINEARCH" );
+ 
+-        if (is_win64 && arch && !strcmp( arch, "win32" ))
+-            fatal_error( "WINEARCH is set to 'win32' but this is not supported in wow64 mode.\n" );
+-        if (arch && strcmp( arch, "win32" ) && strcmp( arch, "win64" ) && strcmp( arch, "wow64" ))
+-            fatal_error( "WINEARCH set to invalid value '%s', it must be win32, win64, or wow64.\n", arch );
++            if (is_win64 && arch && !strcmp( arch, "win32" ))
++                fatal_error( "WINEARCH is set to 'win32' but this is not supported in wow64 mode.\n" );
++            if (arch && strcmp( arch, "win32" ) && strcmp( arch, "win64" ) && strcmp( arch, "wow64" ))
++                fatal_error( "WINEARCH set to invalid value '%s', it must be win32, win64, or wow64.\n", arch );
+ 
+-        fd_socket = server_connect();
+-        MESSAGE( "OHOS-DBG: server_connect returned fd=%d\n", fd_socket );
++            fd_socket = server_connect();
++            MESSAGE( "OHOS-DBG: server_connect returned fd=%d\n", fd_socket );
++        }
+     }
+ 
+     /* setup the signal mask */
+

@@ -77,7 +77,12 @@ run_deps() {
 }
 
 run_wine() {
-    bash "$SCRIPTS/build_wine.sh"
+    # 引擎 flavor 路由: ENGINE=proton 走 Proton 入口 (bootstrap + 补丁系列)
+    if [ "${ENGINE:-wine}" = "proton" ]; then
+        bash "$SCRIPTS/build_proton.sh"
+    else
+        bash "$SCRIPTS/build_wine.sh"
+    fi
 }
 
 run_box64() {

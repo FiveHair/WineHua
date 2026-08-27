@@ -1,0 +1,35 @@
+From 65d78d76cb1f1611567fe685c7e623427ffe8036 Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Tue, 28 Jul 2026 19:19:34 +0800
+Subject: [PATCH 084/104] fix(ntdll): restore system DLL search path on OHOS
+
+---
+ dlls/ntdll/unix/env.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/env.c b/dlls/ntdll/unix/env.c
+index 467c38c261c9..3e3fb341daa5 100644
+--- a/dlls/ntdll/unix/env.c
++++ b/dlls/ntdll/unix/env.c
+@@ -1962,15 +1962,19 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
+     DWORD dllpath_len = 0;
+     WCHAR *dllpath_w = NULL;
+     {
++        static const char system_dll_path[] = ";C:\\windows\\system32;C:\\windows";
+         const char *winedllpath = getenv("WINEDLLPATH");
+         if (winedllpath)
+         {
+             DWORD ulen = strlen(winedllpath);
+-            dllpath_w = malloc((ulen + 2) * sizeof(WCHAR));
++            DWORD system_len = strlen(system_dll_path);
++            dllpath_w = malloc((ulen + system_len + 1) * sizeof(WCHAR));
+             if (dllpath_w)
+             {
+                 for (const char *s = winedllpath; *s; s++)
+                     dllpath_w[dllpath_len++] = (*s == ':') ? ';' : *s;
++                for (const char *s = system_dll_path; *s; s++)
++                    dllpath_w[dllpath_len++] = *s;
+                 dllpath_w[dllpath_len] = 0;
+                 dllpath_len = (dllpath_len + 1) * sizeof(WCHAR);
+             }
+

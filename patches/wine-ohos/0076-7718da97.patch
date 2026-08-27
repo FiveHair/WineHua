@@ -1,0 +1,143 @@
+From 7718da97c1cc3bb27fd6bedbcde8701473e1041b Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sat, 25 Jul 2026 16:17:55 +0800
+Subject: [PATCH 076/104] fix: #ifdef __OHOS__ guards for upstream-incompatible
+ changes
+
+5 fixes that restore upstream behavior on non-OHOS platforms:
+
+- virtual.c: dlopen with absolute path (non-OHOS) / basename (OHOS)
+- virtual.c: MEM_TOP_DOWN kept (non-OHOS) / skipped for Box64 (OHOS)
+- file.c: STATUS_OBJECT_PATH_NOT_FOUND error semantics preserved
+  (non-OHOS returns error immediately, no \\?\\unix fallback)
+- driver.c: nodrv_CreateWindow diagnostics kept on driver load failure
+- server/main.c: --no-auto-close option OHOS-only
+
+arm64 + x86_64: build/deploy/start all passing.
+---
+ dlls/ntdll/unix/file.c    | 12 +++++++++---
+ dlls/ntdll/unix/virtual.c | 12 +++++++++++-
+ dlls/win32u/driver.c      |  4 ++++
+ server/main.c             |  6 ++++++
+ 4 files changed, 30 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 8bee6747b7d0..ea2cfcb62bd0 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -4345,19 +4345,25 @@ NTSTATUS unix_to_nt_file_name( const char *unix_name, WCHAR **nt, UINT dispositi
+     if (!name) return STATUS_NO_MEMORY;
+     status = find_drive_nt_root( name, len - 1, &buffer, disposition );
+     free( name );
+-    if (status && status != STATUS_NO_SUCH_FILE && status != STATUS_OBJECT_PATH_NOT_FOUND)
++    if (status && status != STATUS_NO_SUCH_FILE
++#ifdef __OHOS__
++        && status != STATUS_OBJECT_PATH_NOT_FOUND
++#endif
++        )
+     {
+         ERR( "unix_to_nt_file_name: find_drive_nt_root failed status=%08x for %s\n", status, unix_name );
+         return status;
+     }
+ 
+-    if (!buffer)  /* dosdevices symlinks unavailable, fall back to \\?\unix path */
++    if (!buffer)  /* conversion failed, return \\?\unix path */
+     {
+         if (!(buffer = malloc( sizeof(unix_prefixW) + len * sizeof(WCHAR) ))) return STATUS_NO_MEMORY;
+         memcpy( buffer, unix_prefixW, sizeof(unix_prefixW) );
+         ntdll_umbstowcs( unix_name, len, buffer + ARRAY_SIZE(unix_prefixW), len );
+         collapse_path( buffer );
+-        status = STATUS_SUCCESS;  /* fallback succeeded, clear error */
++#ifdef __OHOS__
++        status = STATUS_SUCCESS;  /* OHOS: dosdevices symlinks unavailable, fallback succeeded */
++#endif
+     }
+ 
+     *nt = buffer;
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 6c6cc246f57a..118a877b457f 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -869,10 +869,14 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
+     {
+         if (builtin->unix_path && !builtin->unix_handle)
+         {
++#ifdef __OHOS__
+             /* OHOS: dlopen 不能用绝对路径, 只取文件名让系统 linker 搜索 libs/ */
+             const char *name = strrchr( builtin->unix_path, '/' );
+             name = name ? name + 1 : builtin->unix_path;
+             builtin->unix_handle = dlopen( name, RTLD_NOW );
++#else
++            builtin->unix_handle = dlopen( builtin->unix_path, RTLD_NOW );
++#endif
+             if (!builtin->unix_handle)
+                 WARN_(module)( "failed to load %s: %s\n", debugstr_a(builtin->unix_path), dlerror() );
+         }
+@@ -4098,7 +4102,13 @@ TEB *virtual_alloc_first_teb(void)
+     }
+ 
+     NtAllocateVirtualMemory( NtCurrentProcess(), &teb_block, is_win64 ? limit_2g - 1 : 0, &total,
+-                             MEM_RESERVE, PAGE_READWRITE );  /* OHOS: skip MEM_TOP_DOWN for Box64 */
++                             MEM_RESERVE
++#ifdef __OHOS__
++                             /* OHOS: Box64 doesn't support MEM_TOP_DOWN */
++#else
++                             | MEM_TOP_DOWN
++#endif
++                             , PAGE_READWRITE );
+     teb_block_pos = 30;
+     ptr = (char *)teb_block + 30 * block_size;
+     data_size = 2 * block_size;
+diff --git a/dlls/win32u/driver.c b/dlls/win32u/driver.c
+index 1d3f6006987e..e97805e9517c 100644
+--- a/dlls/win32u/driver.c
++++ b/dlls/win32u/driver.c
+@@ -1034,7 +1034,11 @@ static void load_display_driver(void)
+         winstation = NtUserGetProcessWindowStation();
+         if (!NtUserGetObjectInformation( winstation, UOI_FLAGS, &flags, sizeof(flags), NULL )
+             || (flags.dwFlags & WSF_VISIBLE))
++#ifdef __OHOS__
+             null_user_driver.pCreateWindow = nulldrv_CreateWindow;
++#else
++            null_user_driver.pCreateWindow = nodrv_CreateWindow;
++#endif
+ 
+         __wine_set_user_driver( &null_user_driver, WINE_GDI_DRIVER_VERSION );
+     }
+diff --git a/server/main.c b/server/main.c
+index 724c7f08e623..80c359558ec5 100644
+--- a/server/main.c
++++ b/server/main.c
+@@ -59,7 +59,9 @@ static void usage( FILE *fh )
+     fprintf(fh, "   -h,    --help            display this help message\n");
+     fprintf(fh, "   -k[n], --kill[=n]        kill the current wineserver, optionally with signal n\n");
+     fprintf(fh, "   -p[n], --persistent[=n]  make server persistent, optionally for n seconds\n");
++#ifdef __OHOS__
+     fprintf(fh, "   --no-auto-close           don't close desktop when last non-system process exits\n");
++#endif
+     fprintf(fh, "   -v,    --version         display version information and exit\n");
+     fprintf(fh, "   -w,    --wait            wait until the current wineserver terminates\n");
+     fprintf(fh, "\n");
+@@ -80,9 +82,11 @@ static void option_callback( int optc, char *optarg )
+     case 'f':
+         foreground = 1;
+         break;
++#ifdef __OHOS__
+     case 128:  /* --no-auto-close */
+         no_auto_close = 1;
+         break;
++#endif
+     case 'h':
+         usage(stdout);
+         exit(0);
+@@ -123,7 +127,9 @@ static struct long_option
+     {"help",        0, 'h'},
+     {"kill",        2, 'k'},
+     {"persistent",  2, 'p'},
++#ifdef __OHOS__
+     {"no-auto-close", 0, 128},  /* 128 = non-ASCII, long-only */
++#endif
+     {"version",     0, 'v'},
+     {"wait",        0, 'w'},
+     { NULL }
+

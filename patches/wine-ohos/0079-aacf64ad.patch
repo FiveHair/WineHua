@@ -1,0 +1,45 @@
+From aacf64ad0add6c6a4e5eedda773047fda61149cc Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 02:27:12 +0800
+Subject: [PATCH 079/104] diagnostic: trace Wine Vulkan command buffer mapping
+
+---
+ dlls/winevulkan/vulkan.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/dlls/winevulkan/vulkan.c b/dlls/winevulkan/vulkan.c
+index 11bb4a7f6227..6f2aa50d59a5 100644
+--- a/dlls/winevulkan/vulkan.c
++++ b/dlls/winevulkan/vulkan.c
+@@ -309,6 +309,18 @@ static struct vulkan_physical_device *vulkan_instance_get_physical_device(struct
+     return NULL;
+ }
+ 
++static BOOL winehua_frame_assoc_trace_enabled(void)
++{
++    static int enabled = -1;
++    const char *value;
++
++    if (enabled >= 0) return enabled;
++
++    value = getenv("WINEHUA_DXVK_TRACE_CAMERA");
++    enabled = value && value[0] == '1' && !value[1];
++    return enabled;
++}
++
+ VkResult wine_vkAllocateCommandBuffers(VkDevice client_device, const VkCommandBufferAllocateInfo *allocate_info,
+                                        VkCommandBuffer *buffers )
+ {
+@@ -353,6 +365,11 @@ VkResult wine_vkAllocateCommandBuffers(VkDevice client_device, const VkCommandBu
+ 
+         vulkan_object_init_ptr(&buffer->obj, (UINT_PTR)host_command_buffer, &client_command_buffer->obj);
+         buffer->device = device;
++
++        if (winehua_frame_assoc_trace_enabled())
++            fprintf(stderr,
++                    "WineHuaWineFrameAssoc: command-buffer clientCmd=%p guestCmd=%p\n",
++                    client_command_buffer, host_command_buffer);
+         instance->p_insert_object(instance, &buffer->obj);
+     }
+ 
+

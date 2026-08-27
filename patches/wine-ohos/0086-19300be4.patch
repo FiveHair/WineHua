@@ -1,0 +1,203 @@
+From 19300be437af0ac7d2a02aff159f2e35b6c55f7c Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Thu, 30 Jul 2026 01:36:37 +0800
+Subject: [PATCH 086/104] =?UTF-8?q?feat(winehua=5Fkeep):=20desktop=20keep-?=
+ =?UTF-8?q?alive=20=E8=BE=85=E5=8A=A9=E8=BF=9B=E7=A8=8B,=20=E6=9B=BF?=
+ =?UTF-8?q?=E4=BB=A3=20--no-auto-close?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+server: 还原 --no-auto-close 定制 (main.c/object.h/winstation.c),
+与 upstream 保持一致, 零侵入.
+
+新增 programs/winehua_keep: Pad 桌面模式持久化辅助进程.
+通过 OpenDesktop + SetThreadDesktop 加入 shell desktop,
+创建隐藏窗口并忽略 WM_CLOSE, 阻止 wineserver auto-close.
+---
+ configure.ac                      |  1 +
+ programs/winehua_keep/Makefile.in |  7 ++++
+ programs/winehua_keep/main.c      | 70 +++++++++++++++++++++++++++++++
+ server/main.c                     | 12 ------
+ server/object.h                   |  1 -
+ server/winstation.c               |  7 +---
+ 6 files changed, 80 insertions(+), 18 deletions(-)
+ create mode 100644 programs/winehua_keep/Makefile.in
+ create mode 100644 programs/winehua_keep/main.c
+
+diff --git a/configure.ac b/configure.ac
+index 54915fc9e8a2..12a9fafa37a3 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -3664,6 +3664,7 @@ WINE_CONFIG_MAKEFILE(programs/winemine)
+ WINE_CONFIG_MAKEFILE(programs/winemsibuilder)
+ WINE_CONFIG_MAKEFILE(programs/winehua_audio_smoke)
+ WINE_CONFIG_MAKEFILE(programs/winehua_graphics_smoke)
++WINE_CONFIG_MAKEFILE(programs/winehua_keep)
+ WINE_CONFIG_MAKEFILE(programs/winepath)
+ WINE_CONFIG_MAKEFILE(programs/winetest)
+ WINE_CONFIG_MAKEFILE(programs/winevdm)
+diff --git a/programs/winehua_keep/Makefile.in b/programs/winehua_keep/Makefile.in
+new file mode 100644
+index 000000000000..6f66a3116497
+--- /dev/null
++++ b/programs/winehua_keep/Makefile.in
+@@ -0,0 +1,7 @@
++MODULE    = winehua_keep.exe
++IMPORTS   = user32
++
++EXTRADLLFLAGS = -mwindows
++
++SOURCES = \
++	main.c
+diff --git a/programs/winehua_keep/main.c b/programs/winehua_keep/main.c
+new file mode 100644
+index 000000000000..c10e04c113a3
+--- /dev/null
++++ b/programs/winehua_keep/main.c
+@@ -0,0 +1,70 @@
++/*
++ * WineHua desktop keep-alive helper (Pad desktop mode only).
++ *
++ * When the last non-system process exits a virtual desktop, wineserver
++ * schedules a 1-second close timeout that sends WM_CLOSE to the desktop
++ * owner (explorer), destroying the desktop.  This is undesirable in Pad
++ * desktop mode where the desktop should persist as a normal PC does.
++ *
++ * This helper joins the "shell" virtual desktop, creates a hidden
++ * window, and runs a message loop that ignores WM_CLOSE.  Its thread
++ * keeps desktop->users > explorer->running_threads, so the auto-close
++ * condition in remove_desktop_user() is never satisfied.
++ *
++ * See server/winstation.c: close_desktop_timeout / remove_desktop_user.
++ */
++#include <windows.h>
++
++/* Same as explorer's desktop.c — not available in mingw headers */
++#define DESKTOP_ALL_ACCESS 0x01ff
++
++static LRESULT CALLBACK keep_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
++{
++    switch (msg)
++    {
++    case WM_CLOSE:
++        /* Refuse to close — we are the desktop anchor. */
++        return 0;
++    case WM_DESTROY:
++        PostQuitMessage(0);
++        return 0;
++    }
++    return DefWindowProcA(hwnd, msg, wp, lp);
++}
++
++int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
++                   LPSTR lpCmdLine, int nCmdShow)
++{
++    HDESK hDesk;
++    WNDCLASSA wc = {0};
++    HWND hwnd;
++    MSG msg;
++
++    /* Open the desktop that explorer created. */
++    hDesk = OpenDesktopA("shell", 0, FALSE, DESKTOP_ALL_ACCESS);
++    if (!hDesk) goto sleep_forever;
++
++    SetThreadDesktop(hDesk);
++    CloseDesktop(hDesk);
++
++    /* Create a tiny hidden window on the desktop so we have
++       a persistent user-object presence. */
++    wc.lpfnWndProc = keep_wnd_proc;
++    wc.hInstance = hInstance;
++    wc.lpszClassName = "WineHuaKeep";
++    RegisterClassA(&wc);
++
++    hwnd = CreateWindowExA(0, "WineHuaKeep", NULL,
++                           WS_POPUP, 0, 0, 1, 1,
++                           NULL, NULL, hInstance, NULL);
++
++    while (GetMessageA(&msg, NULL, 0, 0))
++    {
++        TranslateMessage(&msg);
++        DispatchMessageA(&msg);
++    }
++
++sleep_forever:
++    Sleep(INFINITE);
++    return 0;
++}
+diff --git a/server/main.c b/server/main.c
+index 80c359558ec5..46419a09cb44 100644
+--- a/server/main.c
++++ b/server/main.c
+@@ -44,7 +44,6 @@
+ /* command-line options */
+ int debug_level = 0;
+ int foreground = 0;
+-int no_auto_close = 0;
+ timeout_t master_socket_timeout = 3 * -TICKS_PER_SEC;  /* master socket timeout, default is 3 seconds */
+ const char *server_argv0;
+ 
+@@ -59,9 +58,6 @@ static void usage( FILE *fh )
+     fprintf(fh, "   -h,    --help            display this help message\n");
+     fprintf(fh, "   -k[n], --kill[=n]        kill the current wineserver, optionally with signal n\n");
+     fprintf(fh, "   -p[n], --persistent[=n]  make server persistent, optionally for n seconds\n");
+-#ifdef __OHOS__
+-    fprintf(fh, "   --no-auto-close           don't close desktop when last non-system process exits\n");
+-#endif
+     fprintf(fh, "   -v,    --version         display version information and exit\n");
+     fprintf(fh, "   -w,    --wait            wait until the current wineserver terminates\n");
+     fprintf(fh, "\n");
+@@ -82,11 +78,6 @@ static void option_callback( int optc, char *optarg )
+     case 'f':
+         foreground = 1;
+         break;
+-#ifdef __OHOS__
+-    case 128:  /* --no-auto-close */
+-        no_auto_close = 1;
+-        break;
+-#endif
+     case 'h':
+         usage(stdout);
+         exit(0);
+@@ -127,9 +118,6 @@ static struct long_option
+     {"help",        0, 'h'},
+     {"kill",        2, 'k'},
+     {"persistent",  2, 'p'},
+-#ifdef __OHOS__
+-    {"no-auto-close", 0, 128},  /* 128 = non-ASCII, long-only */
+-#endif
+     {"version",     0, 'v'},
+     {"wait",        0, 'w'},
+     { NULL }
+diff --git a/server/object.h b/server/object.h
+index 926cd9178276..171ca2f8904d 100644
+--- a/server/object.h
++++ b/server/object.h
+@@ -341,7 +341,6 @@ extern struct object *create_symlink( struct object *root, const struct unicode_
+   /* command-line options */
+ extern int debug_level;
+ extern int foreground;
+-extern int no_auto_close;
+ extern timeout_t master_socket_timeout;
+ extern const char *server_argv0;
+ 
+diff --git a/server/winstation.c b/server/winstation.c
+index 9a254e56bf5e..4329f9f4384a 100644
+--- a/server/winstation.c
++++ b/server/winstation.c
+@@ -418,11 +418,8 @@ static void close_desktop_timeout( void *private )
+     struct desktop *desktop = private;
+ 
+     desktop->close_timeout = NULL;
+-    if (!no_auto_close)
+-    {
+-        unlink_named_object( &desktop->obj );  /* make sure no other process can open it */
+-        post_desktop_message( desktop, WM_CLOSE, 0, 0 );  /* and signal the owner to quit */
+-    }
++    unlink_named_object( &desktop->obj );  /* make sure no other process can open it */
++    post_desktop_message( desktop, WM_CLOSE, 0, 0 );  /* and signal the owner to quit */
+ }
+ 
+ /* add a user of the desktop and cancel the close timeout */
+

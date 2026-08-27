@@ -1,0 +1,33 @@
+From 9978980c497f2d4a2743b077d28c2481ccbc8bc5 Mon Sep 17 00:00:00 2001
+From: yifengling0 <yifengling0@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 02:58:50 +0800
+Subject: [PATCH 080/104] diagnostic: namespace Wine Vulkan command mappings
+
+---
+ dlls/winevulkan/vulkan.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/winevulkan/vulkan.c b/dlls/winevulkan/vulkan.c
+index 6f2aa50d59a5..f62910b9afa5 100644
+--- a/dlls/winevulkan/vulkan.c
++++ b/dlls/winevulkan/vulkan.c
+@@ -23,6 +23,7 @@
+ 
+ #include "config.h"
+ #include <time.h>
++#include <unistd.h>
+ 
+ #include "vulkan_private.h"
+ #include "wine/vulkan_driver.h"
+@@ -368,8 +369,8 @@ VkResult wine_vkAllocateCommandBuffers(VkDevice client_device, const VkCommandBu
+ 
+         if (winehua_frame_assoc_trace_enabled())
+             fprintf(stderr,
+-                    "WineHuaWineFrameAssoc: command-buffer clientCmd=%p guestCmd=%p\n",
+-                    client_command_buffer, host_command_buffer);
++                    "WineHuaWineFrameAssoc: unixPid=%d command-buffer clientCmd=%p guestCmd=%p\n",
++                    getpid(), client_command_buffer, host_command_buffer);
+         instance->p_insert_object(instance, &buffer->obj);
+     }
+ 
+

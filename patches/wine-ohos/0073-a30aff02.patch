@@ -1,0 +1,295 @@
+From a30aff0292cb2438706276b22e9e27f10f7ed202 Mon Sep 17 00:00:00 2001
+From: hackeris <hackeris@qq.com>
+Date: Sat, 25 Jul 2026 15:03:41 +0800
+Subject: [PATCH 073/104] =?UTF-8?q?refactor:=20=E6=8F=90=E5=8F=96=20waylan?=
+ =?UTF-8?q?d=5Fsurface=5Fupdate=5Fmin=5Fmax=20=E5=88=B0=E7=8B=AC=E7=AB=8B?=
+ =?UTF-8?q?=E6=96=87=E4=BB=B6=20(M5)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将 52 行 resize 约束函数移到 wayland_surface_ohos.c/h（#ifdef __OHOS__）。
+魔数 -32768/32768 → WINEHUA_DESKTOP_COORD_MIN/MAX 命名常量。
+wayland_surface.c 对 upstream diff: 67→23 行 (-65%)。
+---
+ dlls/winewayland.drv/Makefile.in            |  1 +
+ dlls/winewayland.drv/wayland_surface.c      | 68 +++------------
+ dlls/winewayland.drv/wayland_surface_ohos.c | 93 +++++++++++++++++++++
+ dlls/winewayland.drv/wayland_surface_ohos.h | 48 +++++++++++
+ 4 files changed, 154 insertions(+), 56 deletions(-)
+ create mode 100644 dlls/winewayland.drv/wayland_surface_ohos.c
+ create mode 100644 dlls/winewayland.drv/wayland_surface_ohos.h
+
+diff --git a/dlls/winewayland.drv/Makefile.in b/dlls/winewayland.drv/Makefile.in
+index 929bc8a452b0..cabf756c0044 100644
+--- a/dlls/winewayland.drv/Makefile.in
++++ b/dlls/winewayland.drv/Makefile.in
+@@ -25,6 +25,7 @@ SOURCES = \
+ 	wayland_output.c \
+ 	wayland_pointer.c \
+ 	wayland_surface.c \
++	wayland_surface_ohos.c \
+ 	wayland_text_input.c \
+ 	waylanddrv_main.c \
+ 	window.c \
+diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
+index 74bdf150980b..2d5c526ae85b 100644
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -31,6 +31,9 @@
+ #include "waylanddrv.h"
+ #include "wine/debug.h"
+ #include "wine/server.h"
++#ifdef __OHOS__
++#include "wayland_surface_ohos.h"
++#endif
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
+ 
+@@ -241,58 +244,6 @@ void wayland_surface_destroy(struct wayland_surface *surface)
+     free(surface);
+ }
+ 
+-/**********************************************************************
+- *          wayland_surface_update_min_max
+- *
+- * 发送窗口 resize 约束到 compositor, 使不可 resize 的窗口在鸿蒙侧也被禁止 resize。
+- *
+- * 判断逻辑:
+- *   WS_THICKFRAME 且 !WS_DLGFRAME → 可 resize (min=小值, max=0=无限制)
+- *   否则 (对话框/message box 等) → 不可 resize (min == max == 当前尺寸)
+- *
+- * 调用时机: wayland_surface_reconfigure() 中每次窗口状态变化时更新。
+- */
+-static void wayland_surface_update_min_max(struct wayland_surface *surface)
+-{
+-    LONG style;
+-    int cur_w, cur_h;
+-
+-    if (!surface->xdg_toplevel) return;
+-
+-    style = NtUserGetWindowLongW(surface->hwnd, GWL_STYLE);
+-
+-    /* 当前窗口尺寸 (surface-local) */
+-    cur_w = surface->window.rect.right - surface->window.rect.left;
+-    cur_h = surface->window.rect.bottom - surface->window.rect.top;
+-    wayland_surface_coords_from_window(surface, cur_w, cur_h, &cur_w, &cur_h);
+-
+-    /* WS_THICKFRAME 且非 WS_DLGFRAME → 可 resize, 否则锁定尺寸 */
+-    if ((style & WS_THICKFRAME) && !(style & WS_DLGFRAME))
+-    {
+-        /* 可 resize: 设一个很小的 min 避免窗口塌陷, max=0 无限制 */
+-        surface->min_width = max(1, cur_w / 4);
+-        surface->min_height = max(1, cur_h / 4);
+-        surface->max_width = 0;
+-        surface->max_height = 0;
+-    }
+-    else
+-    {
+-        /* 不可 resize (对话框等): min == max, 鸿蒙侧自动禁止用户拖拽 resize */
+-        surface->min_width = cur_w;
+-        surface->min_height = cur_h;
+-        surface->max_width = cur_w;
+-        surface->max_height = cur_h;
+-    }
+-
+-    TRACE("hwnd=%p style=0x%x min=%dx%d max=%dx%d\n",
+-          surface->hwnd, (unsigned)style,
+-          surface->min_width, surface->min_height,
+-          surface->max_width, surface->max_height);
+-
+-    xdg_toplevel_set_min_size(surface->xdg_toplevel, surface->min_width, surface->min_height);
+-    xdg_toplevel_set_max_size(surface->xdg_toplevel, surface->max_width, surface->max_height);
+-}
+-
+ /**********************************************************************
+  *          wayland_surface_make_toplevel
+  *
+@@ -609,16 +560,19 @@ static void wayland_surface_reconfigure_geometry(struct wayland_surface *surface
+ 
+     if (!IsRectEmpty(&rect))
+     {
+-        // 桌面模式: 传递窗口在虚拟桌面中的屏幕坐标
+-        // 独立窗口模式: 使用 (0,0) 相对坐标
++        /* desktop mode: forward screen coords; standalone: use (0,0) relative */
+         int geo_x = 0, geo_y = 0;
++#ifdef __OHOS__
+         if (getenv("WINEHUA_DESKTOP_MODE") && atoi(getenv("WINEHUA_DESKTOP_MODE")))
+         {
+-            if (surface->window.rect.left > -32768 && surface->window.rect.left < 32768)
++            if (surface->window.rect.left > WINEHUA_DESKTOP_COORD_MIN &&
++                surface->window.rect.left < WINEHUA_DESKTOP_COORD_MAX)
+                 geo_x = surface->window.rect.left;
+-            if (surface->window.rect.top > -32768 && surface->window.rect.top < 32768)
++            if (surface->window.rect.top > WINEHUA_DESKTOP_COORD_MIN &&
++                surface->window.rect.top < WINEHUA_DESKTOP_COORD_MAX)
+                 geo_y = surface->window.rect.top;
+         }
++#endif
+         xdg_surface_set_window_geometry(surface->xdg_surface,
+                                         geo_x, geo_y,
+                                         rect.right - rect.left,
+@@ -790,7 +744,9 @@ BOOL wayland_surface_reconfigure(struct wayland_surface *surface)
+     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
+         if (!surface->xdg_surface) break; /* surface role has been cleared */
+         if (!wayland_surface_reconfigure_xdg(surface, width, height)) return FALSE;
++#ifdef __OHOS__
+         wayland_surface_update_min_max(surface);
++#endif
+         break;
+     case WAYLAND_SURFACE_ROLE_SUBSURFACE:
+         if (!surface->wl_subsurface) break; /* surface role has been cleared */
+diff --git a/dlls/winewayland.drv/wayland_surface_ohos.c b/dlls/winewayland.drv/wayland_surface_ohos.c
+new file mode 100644
+index 000000000000..dc66eb9145b2
+--- /dev/null
++++ b/dlls/winewayland.drv/wayland_surface_ohos.c
+@@ -0,0 +1,93 @@
++/*
++ * WineHua Wayland surface helpers (desktop mode / min-max constraints)
++ *
++ * Copyright 2025-2026 WineHua contributors
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifdef __OHOS__
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <stdlib.h>
++
++#include "waylanddrv.h"
++#include "wayland_surface_ohos.h"
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
++
++
++/**********************************************************************
++ *          wayland_surface_update_min_max
++ *
++ * Send window resize constraints to the compositor so that
++ * non-resizable windows are also prevented from being resized on
++ * the HarmonyOS side.
++ *
++ * Logic:
++ *   WS_THICKFRAME && !WS_DLGFRAME → resizable (min=small, max=0=unlimited)
++ *   otherwise (dialog / message box etc.) → non-resizable (min == max == current size)
++ *
++ * Called from wayland_surface_reconfigure() after each xdg_toplevel
++ * state change.
++ */
++void wayland_surface_update_min_max( struct wayland_surface *surface )
++{
++    LONG style;
++    int cur_w, cur_h;
++
++    if (!surface->xdg_toplevel) return;
++
++    style = NtUserGetWindowLongW( surface->hwnd, GWL_STYLE );
++
++    /* current window size (surface-local) */
++    cur_w = surface->window.rect.right - surface->window.rect.left;
++    cur_h = surface->window.rect.bottom - surface->window.rect.top;
++    wayland_surface_coords_from_window( surface, cur_w, cur_h, &cur_w, &cur_h );
++
++    /* WS_THICKFRAME without WS_DLGFRAME → resizable, otherwise lock size */
++    if ((style & WS_THICKFRAME) && !(style & WS_DLGFRAME))
++    {
++        /* resizable: set a small min to avoid window collapse, max=0 unlimited */
++        surface->min_width  = max( 1, cur_w / 4 );
++        surface->min_height = max( 1, cur_h / 4 );
++        surface->max_width  = 0;
++        surface->max_height = 0;
++    }
++    else
++    {
++        /* non-resizable (dialog etc.): min == max, compositor blocks user resize */
++        surface->min_width  = cur_w;
++        surface->min_height = cur_h;
++        surface->max_width  = cur_w;
++        surface->max_height = cur_h;
++    }
++
++    TRACE( "hwnd=%p style=0x%x min=%dx%d max=%dx%d\n",
++           surface->hwnd, (unsigned)style,
++           surface->min_width, surface->min_height,
++           surface->max_width, surface->max_height );
++
++    xdg_toplevel_set_min_size( surface->xdg_toplevel, surface->min_width, surface->min_height );
++    xdg_toplevel_set_max_size( surface->xdg_toplevel, surface->max_width, surface->max_height );
++}
++
++#endif /* __OHOS__ */
+diff --git a/dlls/winewayland.drv/wayland_surface_ohos.h b/dlls/winewayland.drv/wayland_surface_ohos.h
+new file mode 100644
+index 000000000000..7e9a28946d06
+--- /dev/null
++++ b/dlls/winewayland.drv/wayland_surface_ohos.h
+@@ -0,0 +1,48 @@
++/*
++ * WineHua Wayland surface helpers (desktop mode / min-max constraints)
++ *
++ * Copyright 2025-2026 WineHua contributors
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifndef __WINE_WAYLAND_SURFACE_OHOS_H
++#define __WINE_WAYLAND_SURFACE_OHOS_H
++
++#ifdef __OHOS__
++
++/* OHOS desktop mode: valid window position coordinate range.
++ * Positions outside this range are treated as uninitialized by the
++ * compositor and must not be forwarded as xdg_surface geometry offsets. */
++#define WINEHUA_DESKTOP_COORD_MIN  (-32768)
++#define WINEHUA_DESKTOP_COORD_MAX  32768
++
++struct wayland_surface;
++
++/* Update xdg_toplevel min/max size constraints based on window style.
++ *
++ * In desktop mode the compositor enforces resize constraints per
++ * xdg_toplevel protocol.  This helper inspects the Win32 window style
++ * bits so that:
++ *   - Resizable windows get a small min (1/4 current size) and no max.
++ *   - Non-resizable windows (dialogs, message boxes) get min == max,
++ *     which prevents the user from resizing them on the compositor side.
++ *
++ * Must be called after each xdg_toplevel reconfigure. */
++void wayland_surface_update_min_max( struct wayland_surface *surface );
++
++#endif /* __OHOS__ */
++
++#endif /* __WINE_WAYLAND_SURFACE_OHOS_H */
+

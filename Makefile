@@ -1,10 +1,11 @@
 # Makefile — Wine for HarmonyOS 构建编排
 #
 # 用法:
-#   make                                          # 默认: x86_64 全量构建
+#   make                                          # 默认: x86_64 全量构建 (wine 引擎)
 #   make NATIVE_ARCH=x86_64
 #   make NATIVE_ARCH=arm64-v8a
 #   make NATIVE_ARCH=all                          # 双架构 HAP
+#   make ENGINE=proton NATIVE_ARCH=arm64-v8a hap  # Proton 引擎 flavor
 #
 #   单个模块: make deps | wine | box64 | native | assemble | hap
 #   清理:     make clean
@@ -20,6 +21,12 @@ BUILD_GUEST_VULKAN ?= 1
 BUILD_WINE_MONO ?= 1
 TARGET_SDK_VERSION ?= 6.1.0(23)
 COMPATIBLE_SDK_VERSION ?= 6.1.0(23)
+# 引擎 flavor: wine (默认, thirdparty/wine fork 直建)
+#              proton (ValveSoftware/wine + patches/wine-ohos 补丁系列,
+#                      见 docs/PROTON_ENGINE.md)
+# 设备端契约两 flavor 一致 (wine-data.zip / files/wine / .wine prefix),
+# 产物目录与 stamp 按 ENGINE 隔离, 互不污染增量状态
+ENGINE ?= wine
 export NATIVE_ARCH
 export GUEST_ARCH
 export BUILD_GUEST_GFX
@@ -27,6 +34,7 @@ export BUILD_GUEST_VULKAN
 export BUILD_WINE_MONO
 export TARGET_SDK_VERSION
 export COMPATIBLE_SDK_VERSION
+export ENGINE
 
 CONFIG    := $(NATIVE_ARCH)
 BUILD_DIR := $(ROOT)/build
@@ -63,12 +71,28 @@ else
 ARCHES := $(NATIVE_ARCH)
 endif
 
+# ── 引擎路由 (wine | proton) ──
+ifeq ($(ENGINE),proton)
+ENGINE_BUILD_SCRIPT := $(SCRIPTS)/build_proton.sh
+ENGINE_SOURCE_TREE  := $(ROOT)/thirdparty/proton
+ENGINE_PATCH_INPUTS := $(ROOT)/patches/wine-ohos
+else
+ENGINE_BUILD_SCRIPT := $(SCRIPTS)/build_wine.sh
+ENGINE_SOURCE_TREE  := $(ROOT)/thirdparty/wine
+ENGINE_PATCH_INPUTS :=
+endif
+ENGINE_FIND_PATHS := $(ENGINE_SOURCE_TREE) $(ENGINE_PATCH_INPUTS)
+# proton 的 deps/assemble stamp 独立命名 (mono 落点/引擎产物不同);
+# wine 保持原有 stamp 名, 已有构建目录的增量状态不受影响
+ENGINE_DEPS_STAMP     := $(if $(filter proton,$(ENGINE)),$(STAMPS)/deps-proton,$(STAMPS)/deps)
+ENGINE_ASSEMBLE_STAMP := $(if $(filter proton,$(ENGINE)),assemble-proton,assemble)
+
 # ── 关键产物 (用于验证构建是否完成) ──
 DEPS_SENTINEL   := $(BUILD_DIR)/sysroot-ext/usr/lib/x86_64-linux-ohos/libfreetype.so.6
-WINE_SENTINEL   := $(BUILD_DIR)/wine-native/tools/winegcc/winegcc
+ENGINE_NATIVE_SENTINEL := $(BUILD_DIR)/$(ENGINE)-native/tools/winegcc/winegcc
 GUEST_GFX_SENTINEL := $(BUILD_DIR)/guest_gfx/$(GUEST_ARCH)/winehua-guest-gfx.env
 GUEST_VULKAN_SENTINEL := $(BUILD_DIR)/guest_vulkan/$(GUEST_ARCH)/manifest.json
-WINE_MONO_SENTINEL := $(BUILD_DIR)/wine-ohos/share/wine/mono/wine-mono-11.1.0-x86.msi
+ENGINE_MONO_SENTINEL := $(BUILD_DIR)/$(ENGINE)-ohos/share/wine/mono/wine-mono-11.1.0-x86.msi
 HOST_VULKAN_SOURCE := $(ROOT)/smoke/venus_heaven_material_replay.c
 
 # Guest runtime build scripts can also be invoked directly while iterating on
@@ -176,9 +200,9 @@ $(foreach a,arm64-v8a x86_64,$(eval $(call host_vulkan_rule,$(a))))
 # deps — 交叉编译依赖 → build/sysroot-ext/ (架构无关)
 # ============================================================
 .PHONY: deps
-deps: $(STAMPS)/deps
+deps: $(ENGINE_DEPS_STAMP)
 
-$(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_gnutls.sh $(SCRIPTS)/build_gstreamer.sh \
+$(ENGINE_DEPS_STAMP): $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_gnutls.sh $(SCRIPTS)/build_gstreamer.sh \
 	$(SCRIPTS)/build_ohos_guest_gfx.sh \
 	$(SCRIPTS)/build_ohos_guest_vulkan.sh $(ROOT)/smoke/guest_vulkan_smoke.c \
 	$(ROOT)/smoke/venus_sampled_image_probe.c \
@@ -218,7 +242,7 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_gnutls.sh $(SCRIPTS)/b
 	    guest_vulkan_ready=0; \
 	fi; \
 	mono_ready=1; \
-	if [ "$(BUILD_WINE_MONO)" = "1" ] && [ ! -s "$(WINE_MONO_SENTINEL)" ]; then \
+	if [ "$(BUILD_WINE_MONO)" = "1" ] && [ ! -s "$(ENGINE_MONO_SENTINEL)" ]; then \
 	    mono_ready=0; \
 	fi; \
 	if [ -f $@ ] && [ -f $(DEPS_SENTINEL) ] && [ "$$guest_gfx_ready" = "1" ] && \
@@ -280,25 +304,31 @@ $(STAMPS)/deps: $(SCRIPTS)/build_deps.sh $(SCRIPTS)/build_gnutls.sh $(SCRIPTS)/b
 	fi
 
 # ============================================================
-# wine — Wine 交叉编译 + wineserver
+# 引擎 — wine (fork 直建) / proton (上游+补丁系列) 交叉编译 + wineserver
+# 产物按 flavor 隔离: build/<engine>-native / <engine>-ohos / <engine>_server
 # ============================================================
 .PHONY: wine
-wine: $(STAMPS)/wine-$(CONFIG)
+wine: $(STAMPS)/$(ENGINE)-$(CONFIG)
 
-$(STAMPS)/wine-$(CONFIG): $(SCRIPTS)/build_wine.sh $(SCRIPTS)/env.sh $(STAMPS)/deps FORCE | $(STAMPS)
-	@if [ -f $@ ] && [ -f $(WINE_SENTINEL) ] && \
-	    ! [ "$(SCRIPTS)/build_wine.sh" -nt $@ ] && \
-	    ! find $(ROOT)/thirdparty/wine \
+# 注意: 无 proton 别名目标 — stamp 名在解析期按全局 ENGINE 展开,
+# 别名无法传递 ENGINE; 统一用 `make ENGINE=proton [wine|hap|...]`
+
+$(STAMPS)/$(ENGINE)-$(CONFIG): $(ENGINE_BUILD_SCRIPT) $(SCRIPTS)/build_engine.sh $(SCRIPTS)/env.sh $(ENGINE_DEPS_STAMP) FORCE | $(STAMPS)
+	@if [ -f $@ ] && [ -f $(ENGINE_NATIVE_SENTINEL) ] && \
+	    ! [ "$(ENGINE_BUILD_SCRIPT)" -nt $@ ] && \
+	    ! [ "$(SCRIPTS)/build_engine.sh" -nt $@ ] && \
+	    ! find $(ENGINE_FIND_PATHS) \
 	           -newer $@ -type f \
 	           \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \
 	              -o -name 'meson.build' -o -name 'CMakeLists.txt' \
 	              -o -name 'configure' -o -name '*.ac' -o -name 'Makefile.am' \
-	              -o -name '*.m4' -o -name '*.in' -o -name '*.rc' -o -name '*.spec' \) \
+	              -o -name '*.m4' -o -name '*.in' -o -name '*.rc' -o -name '*.spec' \
+	              -o -name '*.patch' \) \
 	           2>/dev/null | grep -q .; then \
-	    echo "  [wine] up to date"; \
+	    echo "  [$(ENGINE)] up to date"; \
 	else \
-	    echo "=== wine ($(CONFIG)) ==="; \
-	    bash $(SCRIPTS)/build_wine.sh && touch $@; \
+	    echo "=== $(ENGINE) ($(CONFIG)) ==="; \
+	    bash $(ENGINE_BUILD_SCRIPT) && touch $@; \
 	fi
 
 # ============================================================
@@ -372,26 +402,26 @@ assemble: $(foreach a,$(ARCHES),$(STAMPS)/$(a)/assemble)
 define assemble_rule
 .PHONY: assemble-$(1)
 
-assemble-$(1): $$(STAMPS)/$(1)/assemble
+assemble-$(1): $$(STAMPS)/$(1)/$(ENGINE_ASSEMBLE_STAMP)
 
-$$(STAMPS)/$(1)/assemble: $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFACTS) $(DXVK_MODERN_ARTIFACTS) \
+$$(STAMPS)/$(1)/$(ENGINE_ASSEMBLE_STAMP): $(SCRIPTS)/assemble.sh $(SCRIPTS)/env.sh $(DXVK_ARTIFACTS) $(DXVK_MODERN_ARTIFACTS) \
 	$(VKD3D_PROTON_ARTIFACTS) \
 	$(ROOT)/smoke/winehua_d3d8_smoke.c \
 	$(ROOT)/smoke/winehua_d3d_switch_cube.c \
 	$(ROOT)/smoke/winehua_gpu_diagnostics.c \
 	$(ROOT)/smoke/winehua_dxvk26_requirements.c \
 	$(ROOT)/smoke/winehua_win32_driver.c \
-	$$(STAMPS)/deps $$(STAMPS)/wine-$(1) $$(STAMPS)/$(1)/native \
+	$$(ENGINE_DEPS_STAMP) $$(STAMPS)/$(ENGINE)-$(1) $$(STAMPS)/$(1)/native \
 	$$(STAMPS)/$(1)/host-vulkan \
 	$$(ASSEMBLE_GUEST_INPUTS) | $$(STAMPS)/$(1)
-	@echo "=== assemble ($(1)) ==="
-	NATIVE_ARCH=$(1) GUEST_ARCH=$(GUEST_ARCH) BUILD_GUEST_GFX=$(BUILD_GUEST_GFX) bash $(SCRIPTS)/assemble.sh
+	@echo "=== assemble ($(1), engine=$(ENGINE)) ==="
+	ENGINE=$(ENGINE) NATIVE_ARCH=$(1) GUEST_ARCH=$(GUEST_ARCH) BUILD_GUEST_GFX=$(BUILD_GUEST_GFX) bash $(SCRIPTS)/assemble.sh
 	@touch $$@
 endef
 $(foreach a,arm64-v8a x86_64,$(eval $(call assemble_rule,$(a))))
 
-# arm64 assemble 额外依赖 box64 (32-bit PE DLL 已由 wine 主构建 --enable-archs=i386 提供)
-$(STAMPS)/arm64-v8a/assemble: $(STAMPS)/box64-arm64-v8a
+# arm64 assemble 额外依赖 box64 (32-bit PE DLL 已由引擎主构建 --enable-archs=i386 提供)
+$(STAMPS)/arm64-v8a/$(ENGINE_ASSEMBLE_STAMP): $(STAMPS)/box64-arm64-v8a
 
 # ============================================================
 # hap — HAP 构建 + 签名 (统一 rawfile zip)
@@ -453,19 +483,22 @@ clean:
 # ============================================================
 .PHONY: help
 help:
-	@echo "用法: make [target] [NATIVE_ARCH=x86_64|arm64-v8a|all]"
+	@echo "用法: make [target] [NATIVE_ARCH=x86_64|arm64-v8a|all] [ENGINE=wine|proton]"
 	@echo ""
-	@echo "默认: NATIVE_ARCH=x86_64"
+	@echo "默认: NATIVE_ARCH=x86_64, ENGINE=wine"
 	@echo "SDK: target=$(TARGET_SDK_VERSION), compatible=$(COMPATIBLE_SDK_VERSION)"
 	@echo ""
 	@echo "全部构建:"
 	@echo "  make                                          # 默认配置全量 → HAP"
 	@echo "  make NATIVE_ARCH=arm64-v8a                    # ARM64"
 	@echo "  make NATIVE_ARCH=all                          # 双架构 HAP"
+	@echo "  make ENGINE=proton NATIVE_ARCH=arm64-v8a hap  # Proton 引擎 flavor"
+	@echo "                                                # (需先生成 patches/wine-ohos 补丁系列,"
+	@echo "                                                #  见 scripts/gen-wine-ohos-patches.sh)"
 	@echo ""
 	@echo "单模块:"
 	@echo "  make deps      # 交叉编译依赖 → sysroot-ext"
-	@echo "  make wine      # Wine + wineserver"
+	@echo "  make wine      # 引擎 (wine|proton 按 ENGINE) + wineserver"
 	@echo "  make box64     # Box64 (仅 arm64)"
 	@echo "  make native    # Native compositor 依赖"
 	@echo "  make host-vulkan # Host Vulkan exact replay"

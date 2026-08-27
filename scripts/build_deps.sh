@@ -79,7 +79,9 @@ if [ "${BUILD_WINE_MONO:-1}" = "1" ]; then
     WINE_MONO_MSI="wine-mono-${WINE_MONO_VER}-x86.msi"
     WINE_MONO_URL="https://dl.winehq.org/wine/wine-mono/${WINE_MONO_VER}/${WINE_MONO_MSI}"
     WINE_MONO_SHA256="deb0341431f8260b209fff6bc79ddcc5414b97f8e9236ab9fbdca4ce59e0a9b9"
-    WINE_MONO_DIR="$BUILD_DIR/wine-ohos/share/wine/mono"
+    # mono 落在引擎 flavor 的构建目录 (assemble.sh 从同处打包;
+    # proton flavor 经 ENGINE=proton 路由到 build/proton-ohos)
+    WINE_MONO_DIR="$ENGINE_BUILD/share/wine/mono"
     WINE_MONO_PATH="$WINE_MONO_DIR/$WINE_MONO_MSI"
     if [ ! -s "$WINE_MONO_PATH" ] || ! echo "$WINE_MONO_SHA256  $WINE_MONO_PATH" | sha256sum -c --status; then
         log "=== 下载 Wine Mono ${WINE_MONO_VER} ==="

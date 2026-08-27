@@ -47,6 +47,8 @@ out/
 # Third-party submodule build artifacts
 thirdparty/wine/build-*/
 thirdparty/wine/*.bak
+# Proton 引擎源 (本地 bootstrap 克隆; 正式接入时以 submodule 注册并移除本行)
+thirdparty/proton/
 thirdparty/box64/build*/
 thirdparty/freetype-VER-2-13-3/
 /entry/hnp
