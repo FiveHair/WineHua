@@ -43,7 +43,7 @@ x86_64 下 Wine 原生 .so 由系统 linker 直接加载。
 | 全屏游戏 (指针锁定 / 相对鼠标 / 光标回中) | ✅ |
 | 触屏手势 / 触控板模式 | ✅ |
 | NAPI 沙箱运行 | ✅ |
-| Proton 引擎 flavor (`make ENGINE=proton`) | 🚧 构建体系就绪，待补丁系列首生成 ([docs/PROTON_ENGINE.md](docs/PROTON_ENGINE.md)) |
+| Proton 引擎 flavor (`make ENGINE=proton`) | 🚧 构建体系+补丁系列就绪;待系列对 Proton 基线 rebase ([docs/PROTON_ENGINE.md](docs/PROTON_ENGINE.md)) |
 
 ## 构建
 

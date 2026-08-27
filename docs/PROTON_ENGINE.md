@@ -1,6 +1,8 @@
 # Proton 引擎 (ENGINE=proton)
 
-> 状态:构建体系已就绪,等待 `patches/wine-ohos` 补丁系列首次生成(见 §4)。
+> 状态:构建体系与 104 补丁系列(`patches/wine-ohos/`)已就绪;wine flavor
+> 已在 fork 流水线全链路验证,proton flavor 停在补丁系列对 Proton 基线的
+> 28 处冲突(§7.1,需人工 rebase)。
 > 设计原则:**Proton 是构建 flavor,不是运行时可切换引擎** — 设备端契约与
 > wine flavor 完全一致,现有功能(Wayland 合成器 / 音频 / DXVK·VKD3D overlay /
 > VirGL·Venus / 输入 / Box64)全部保留。
@@ -132,9 +134,20 @@ Proton 语义注意事项:
 
 ## 7. 已知限制与后续方向
 
-1. **补丁系列未生成**:本仓库刚接入框架,`patches/wine-ohos/` 为空 —
-   需要一次 `gen-wine-ohos-patches.sh` 运行(要求 wine fork 的上游历史)
-   并解决与 Valve 基线的首次冲突。
+1. **补丁系列尚未对 Proton 基线 rebase**(2026-08-27 fork 流水线实测):
+   - 系列共 104 个补丁,导出自 wine fork 相对上游 master(基线 13289668,
+     2026-06-07)的独有提交;
+   - 对 `proton_11.0` 与 `experimental_11.0`(两者 wine 基座相同)累积应用,
+     **76/104 干净应用,28 个冲突** — 根因是 Valve 基线分叉于 2026 年初,
+     落后 fork 基线约半年的上游 wine 改动(首个冲突即 0001 的
+     `dlls/ntdll/unix/virtual.c`,目标函数偏移 2400+ 行);
+   - `git am -3` 无法挽救: 补丁前镜像 blob 晚于 Valve 分叉点,不在
+     ValveSoftware/wine 仓库中("sha1 information is lacking or useless"),
+     自动回退 `patch --forward` 后在真实冲突处 fail-fast;
+   - **打通 Proton 构建的剩余工作 = 把这 28 个补丁人工 rebase 到
+     Proton 基线**(约 23 个"删除行敏感"文件,按 docs/submodule-patches/wine.md
+     逐条 review),或在 Valve 仓库存在 winehua/proton fork 时直接维护 fork。
+     bootstrap/构建/打包链路本身已由流水线验证就绪。
 2. **运行时双引擎**(arm64 理论可行):需要
    - DXVK/VKD3D overlay 与 guest/host 图形运行时移到引擎无关目录
      (现在挂在 `files/wine/{dxvk,vkd3d}` 与 `bin/{guest_vulkan,host_vulkan}`,
@@ -146,3 +159,9 @@ Proton 语义注意事项:
    - x86_64 因 §2 约束仍只能单引擎。
 3. **Proton 版本钉子**:`PROTON_UPSTREAM_REF` 默认 `proton_11.0`,
    升级 = 改默认值或构建时覆盖;系列冲突率随版本距离增长。
+4. **fork 流水线**(`fork-pipeline.yml`):不依赖私有 buildenv 镜像,
+   用 OpenHarmony 公开 SDK(repo.huaweicloud.com 6.1-Release 的
+   native-linux-x64 组件,clang-15)+ apt 依赖构建引擎链路;
+   wine flavor 已全链路跑通,proton flavor 停在 §7.1 的补丁冲突。
+   上游 CI 用私有镜像内的 HarmonyOS 6.1.0(23) SDK(clang 更新),
+   fork 路径仅作无凭据环境的冒烟验证。
